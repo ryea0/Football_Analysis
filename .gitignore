@@ -1,8 +1,8 @@
 # 密钥（spec §9.4）
 .env
 
-# 运行数据：SQLite 库与原始 CSV 缓存（spec §9.2）
-data/
+# 运行数据：SQLite 库与原始 CSV 缓存（spec §9.2）——仅根目录，避免误伤 src/fa/data 与 tests/data
+/data/
 
 # Python
 __pycache__/
