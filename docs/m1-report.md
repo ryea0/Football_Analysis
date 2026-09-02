@@ -151,4 +151,35 @@ I1 2003-04 / I1 2004-05 / F1 2002-03 / F1 2003-04
 ## 提交
 
 - `a4a9726` fix: 容忍 CSV 数据行尾部多余空字段（2002-05 五联赛 9 份文件 868 行）
-- 本次报告：chore: M1 验收报告（全量入库 + 幂等 + 对账 50 场通过）
+- `a433463` chore: M1 验收报告（全量入库 + 幂等 + 对账 50 场通过）
+- `808cacf` fix(test): 恢复坏日期行保留语义的断言（修复提交中误删）
+- `8143fcd` fix: audit 复用 csv_cache_path；ingest commit 入 try + 回滚保根因（终审修复）
+
+终审（全分支）结论：**Ready to merge**，0 Critical；最终测试 45 passed（离线）。
+
+## 计划偏差与裁决摘要（M2 规划携带项）
+
+实施中发现并修复 **7 处计划/仓库缺陷**（计划文档未回改，以代码与 git 史为准）：
+
+1. Task 1：typer 单命令折叠——补 `@app.callback()`
+2. Task 3：brief 测试的 monkeypatch 顺序 bug——两行对调
+3. Task 5：`resolve_team` 别名分支列名笔误——`SELECT id AS team_id`
+4. Task 6：采样内容哈希对非采样列修正不收敛——改整行 raw JSON 指纹
+5. Task 7：brief 测试放行条件时间炸弹——改精确放行 `(E0, 1995)`
+6. Task 9：audit 夹具文件名违反缓存命名契约——`E0_9596.csv`
+7. 仓库初始提交：`.gitignore` 的 `data/` 未锚定（会静默排除 `src/fa/data/`）——锚定 `/data/`
+
+另：pandas 钉 `>=2.0,<3`（规避 3.x string dtype 破坏 NaN 处理语义）；uv.lock 内嵌
+tsinghua 镜像（单机项目，不处理）。
+
+**M2 携带项**（终审 triage，全部 DEFER-OK，择机处理）：
+
+- `MatchWeek.end` 语义 = 桶内**最后一场比赛日**，不是周三窗口边界——M2 消费时勿误读
+- M2 开场建议：`_read_text` 从 sync 提升为共享模块（audit 的私有导入）
+- walkforward `ORDER BY date` 无 tiebreaker → 改 `ORDER BY date, id`
+- `SCHEMA_VERSION` 升 2 时补版本不匹配路径测试（届时该守卫才承重）
+- 内容哈希存于 `meta` 按 `(league, season)`——DB 侧直改数据且哈希匹配是 sync 的
+  盲区，由 audit 把关（设计如此）
+- M3：`training_matches` 需补「已完赛」谓词（引入未赛 fixture 数据时）；队名别名
+  字典在接入 Odds API 后才有输入
+
