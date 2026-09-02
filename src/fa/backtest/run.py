@@ -21,7 +21,9 @@ def global_targets(conn: sqlite3.Connection, asof: str,
         return 0.0, 0.0
     from datetime import date as _d
     asof_d = _d.fromisoformat(asof)
-    w = np.array([0.5 ** ((_d.fromisoformat(r["date"]) - asof_d).days
+    # 年龄 = asof − date（与 fit.py 的 _design_arrays 同向）：越旧权重越低。
+    # （date − asof 会得到负指数，权重随年龄指数级增长——计划缺陷，已修。）
+    w = np.array([0.5 ** ((asof_d - _d.fromisoformat(r["date"])).days
                           / cfg.half_life_days) for r in rows])
     gh = float(np.dot(w, [r["fthg"] for r in rows]) / w.sum())
     ga = float(np.dot(w, [r["ftag"] for r in rows]) / w.sum())

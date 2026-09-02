@@ -74,3 +74,63 @@ def test_no_leakage_week2_excludes_week1(conn):
 def test_global_targets_leak_free(conn):
     mu_g, ha_g = global_targets(conn, "2023-08-12", FitConfig(window_days=800))
     assert mu_g > 0 and ha_g > 0                      # 主场优势 > 0（种子数据 2:0）
+
+
+def test_global_targets_excludes_asof_day(tmp_path):
+    """泄漏边界钉死（date < ?，非 <=）：date == asof 的比赛必须完全不可见。"""
+    init_db(tmp_path / "t.db")
+    c = connect(tmp_path / "t.db")
+    c.executemany("INSERT INTO teams (league, name) VALUES ('E0', ?)",
+                  [("A",), ("B",)])
+    ids = {r["name"]: r["id"] for r in c.execute("SELECT id, name FROM teams")}
+    c.executemany(
+        "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
+        " fthg, ftag, raw_line) VALUES ('E0',2023,?,?,?,?,?,'{}')",
+        [("2023-08-05", ids["A"], ids["B"], 2, 1),
+         ("2023-08-06", ids["A"], ids["B"], 1, 1),
+         ("2023-08-08", ids["B"], ids["A"], 1, 2),
+         ("2023-08-09", ids["B"], ids["A"], 0, 1)])
+    c.commit()
+    before = global_targets(c, "2023-08-12", FitConfig(window_days=800))
+
+    # asof 当日的极端比分（9:9）必须不改变任何输出
+    c.execute(
+        "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
+        " fthg, ftag, raw_line) VALUES ('E0',2023,'2023-08-12',?,?,9,9,'{}')",
+        (ids["A"], ids["B"]))
+    c.commit()
+    after = global_targets(c, "2023-08-12", FitConfig(window_days=800))
+    assert after == before                            # 逐位相等（同一行集、同一计算）
+
+    # 阳性对照：asof 前一天的 9:9 必须改变输出（证明函数确实在读取数据，
+    # 排除的是 asof 当日而非一切）——否则上面的相等可能是空集导致的假绿
+    c.execute(
+        "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
+        " fthg, ftag, raw_line) VALUES ('E0',2023,'2023-08-11',?,?,9,9,'{}')",
+        (ids["B"], ids["A"]))
+    c.commit()
+    changed = global_targets(c, "2023-08-12", FitConfig(window_days=800))
+    assert changed != before
+    c.close()
+
+
+def test_global_targets_recency_decays_with_age(tmp_path):
+    """衰减方向钉死：新比赛权重必须高于旧比赛（asof − date 为正指数）。"""
+    init_db(tmp_path / "t.db")
+    c = connect(tmp_path / "t.db")
+    c.executemany("INSERT INTO teams (league, name) VALUES ('E0', ?)",
+                  [("A",), ("B",)])
+    ids = {r["name"]: r["id"] for r in c.execute("SELECT id, name FROM teams")}
+    # 近期高比分（asof−1 天 4:1）vs 久远低比分（asof−710 天 0:0，须在 800 天窗内）：
+    # 正确方向 gh≈3.97, ga≈0.99 → mu_g≈0.909；方向反了则权重被 710 天的比赛支配
+    # （w 比 ≈2^7.1≈137 倍 → gh≈0.029, ga≈0.007 → mu_g≈−4.00）。
+    c.executemany(
+        "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
+        " fthg, ftag, raw_line) VALUES ('E0',2023,?,?,?,?,?,'{}')",
+        [("2023-08-11", ids["A"], ids["B"], 4, 1),
+         ("2021-09-01", ids["B"], ids["A"], 0, 0)])
+    c.commit()
+    mu_g, ha_g = global_targets(c, "2023-08-12", FitConfig(window_days=800))
+    assert mu_g > 0.5, mu_g                           # 反向衰减时 ≈ −4.0
+    assert ha_g > 0
+    c.close()
