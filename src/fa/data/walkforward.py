@@ -20,7 +20,7 @@ def iter_matchweeks(conn: sqlite3.Connection, league: str,
                     season: int) -> list[MatchWeek]:
     rows = conn.execute(
         "SELECT id, date FROM matches "
-        "WHERE league=? AND season=? AND date IS NOT NULL ORDER BY date",
+        "WHERE league=? AND season=? AND date IS NOT NULL ORDER BY date, id",
         (league, season)).fetchall()
     weeks: list[MatchWeek] = []
     cur: MatchWeek | None = None
@@ -45,6 +45,6 @@ def iter_matchweeks(conn: sqlite3.Connection, league: str,
 def training_matches(conn: sqlite3.Connection, league: str,
                      asof: str) -> list[dict]:
     rows = conn.execute(
-        "SELECT * FROM matches WHERE league=? AND date < ? ORDER BY date",
+        "SELECT * FROM matches WHERE league=? AND date < ? ORDER BY date, id",
         (league, asof)).fetchall()
     return [dict(r) for r in rows]

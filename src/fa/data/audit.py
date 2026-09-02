@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from fa.data import download
 from fa.data.parse import parse_csv
-from fa.data.sync import _read_text
+from fa.data.reader import read_csv_text
 
 COMPARE_FIELDS = ["fthg", "ftag", "ps_home", "ps_draw", "ps_away",
                   "psc_home", "psc_draw", "psc_away"]
@@ -38,9 +38,9 @@ def audit_sample(conn: sqlite3.Connection, sample: int = 50,
             if not path.exists():
                 out.append(AuditMismatch(mid, "cache_missing", None, str(path)))
                 continue
-            # 读侧统一走 sync._read_text（BOM 嗅探）：个别缓存文件带 UTF-8 BOM，
+            # 读侧统一走 reader.read_csv_text（BOM 嗅探）：个别缓存文件带 UTF-8 BOM，
             # 一律 latin-1 会把 BOM 粘在首个表头上污染该列
-            rows = parse_csv(_read_text(path), m["league"], m["season"])
+            rows = parse_csv(read_csv_text(path), m["league"], m["season"])
             csv_cache[key] = {(r.date, r.home, r.away): r for r in rows}
         row = csv_cache[key].get((m["date"], m["home"], m["away"]))
         if row is None:
