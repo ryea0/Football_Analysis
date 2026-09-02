@@ -14,6 +14,8 @@ def test_render_report(tmp_path):
     out = tmp_path / "r.md"
     summary = render_report(_rows(), out)
     text = out.read_text(encoding="utf-8")
-    assert "GO" in text or "NO-GO" in text
+    # 夹具中模型概率与市场完全一致 → 劣化 0% → 判决必为 GO，且不得出现 NO-GO
+    assert "✅ GO" in text
+    assert "NO-GO" not in text
     assert "log-loss" in text
     assert summary["n"] == 1
