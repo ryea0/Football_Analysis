@@ -43,6 +43,7 @@ def test_parse_modern_all_fields():
 def test_junk_rows_dropped_or_kept_correctly():
     rows = parse_csv(CSV_WITH_JUNK, "E0", 1995)
     assert len(rows) == 2          # 未赛行（无比分）丢弃；坏日期行保留但 date=None
+    assert rows[1].date is None
 
 
 # 真实数据（E0/I1/SP1/D1/F1 的 2002-03~2004-05 部分）数据行行尾会多出若干
