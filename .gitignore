@@ -10,3 +10,6 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.egg-info/
+
+# Claude Code 会话产物（worktrees 等）
+.claude/
