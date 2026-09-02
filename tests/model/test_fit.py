@@ -39,19 +39,19 @@ def test_fit_recovers_ranking():
     assert fit.att["T0"] > fit.att["T5"]
 
 
-@pytest.mark.skip(reason=(
-    "brief 内部矛盾，待裁决："
-    "(1) 该测试取 20 场，必然触发 fit_league 的 <30 守卫 → ValueError；"
-    "(2) 即便绕开守卫，断言 |att[T0]|<0.3 在文件序随机流下也不成立"
-    "（n=20 时加权 MLE=+0.8231，MAP=+0.3661，偏离真值收缩 58.6%——"
-    "收缩机制本身正常，是 0.3 这个绝对阈值对如此噪声水平定得过紧）。"
-    "待定：阈值放宽 / 改为相对收缩断言 / 提高样本数，由控制器裁决后落地。"))
-def test_fit_weak_data_shrinks_to_prior():
-    """只有 20 场时参数应强烈收缩向 0（升班马语义）。"""
-    _, _, rows = _synthetic(n_matches=20)
-    fit = fit_league(rows, asof="2024-01-01", league="X",
-                     mu_global=0.15, ha_global=0.25)
-    assert abs(fit.att["T0"]) < 0.3      # 弱数据不得跑飞
+def test_weak_data_shrinks_toward_prior():
+    """弱数据收缩机制：默认先验下估计显著弱于弱先验（趋近 MLE）版本，且幅度有界。"""
+    _, _, rows = _synthetic(n_matches=40)          # 高于 <30 守卫
+    default = FitConfig()                          # sigma_att=0.35
+    loose = FitConfig(sigma_att=5.0, sigma_dfn=5.0)  # 近似无正则 → 逼近 MLE
+    f_def = fit_league(rows, asof="2024-01-01", league="X",
+                       mu_global=0.15, ha_global=0.25, cfg=default)
+    f_loose = fit_league(rows, asof="2024-01-01", league="X",
+                         mu_global=0.15, ha_global=0.25, cfg=loose)
+    # 机制：先验越强，估计越被拉向 0（联赛均值）
+    assert abs(f_def.att["T0"]) < abs(f_loose.att["T0"])
+    # 幅度有界：强队估计不会因弱数据跑飞
+    assert f_def.att["T0"] < 0.7
 
 
 def test_gradient_matches_numeric():
