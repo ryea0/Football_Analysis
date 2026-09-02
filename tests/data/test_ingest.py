@@ -12,6 +12,14 @@ CSV_B_CORRECTED = """Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR
 E0,19/08/1995,Arsenal,West Ham,1,1,D
 E0,22/08/1995,Liverpool,Everton,2,1,H
 """
+CSV_PSD = """Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,PSD
+E0,19/08/1995,Arsenal,West Ham,1,1,D,3.2
+E0,22/08/1995,Liverpool,Everton,2,0,H,3.1
+"""
+CSV_PSD_CORRECTED = """Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,PSD
+E0,19/08/1995,Arsenal,West Ham,1,1,D,3.4
+E0,22/08/1995,Liverpool,Everton,2,0,H,3.1
+"""
 
 
 @pytest.fixture
@@ -48,3 +56,13 @@ def test_other_league_partition_untouched(conn):
     ingest_rows(conn, "D1", 1995, parse_csv(CSV_A, "D1", 1995))
     ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))  # E0 重跑
     assert count(conn) == 4                              # D1 分区不受影响
+
+
+def test_non_sampled_field_change_converges(conn):
+    """ps_draw 不在旧抽样指纹内 -> 整行指纹下必须重插收敛，而非误判未变而跳过。"""
+    ingest_rows(conn, "E0", 1995, parse_csv(CSV_PSD, "E0", 1995))
+    n = ingest_rows(conn, "E0", 1995, parse_csv(CSV_PSD_CORRECTED, "E0", 1995))
+    assert n > 0                                         # 未被跳过
+    row = conn.execute(
+        "SELECT ps_draw FROM matches WHERE date='1995-08-19'").fetchone()
+    assert row["ps_draw"] == pytest.approx(3.4)          # 修正已落库

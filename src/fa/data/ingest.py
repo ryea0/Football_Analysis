@@ -8,9 +8,9 @@ from fa.db import get_meta, set_meta
 
 
 def _rows_hash(rows: list[MatchRow]) -> str:
+    """整行指纹：任意列的上游修正（含 ps_draw / shots 等非抽样字段）都改变哈希，重跑即收敛。"""
     payload = "\n".join(
-        f"{r.date}|{r.home}|{r.away}|{r.fthg}-{r.ftag}|{r.ps_home}|{r.psc_home}"
-        for r in rows)
+        json.dumps(r.raw, ensure_ascii=False, sort_keys=True) for r in rows)
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
