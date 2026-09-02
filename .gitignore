@@ -1,0 +1,12 @@
+# 密钥（spec §9.4）
+.env
+
+# 运行数据：SQLite 库与原始 CSV 缓存（spec §9.2）
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+*.egg-info/
