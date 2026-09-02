@@ -90,3 +90,59 @@ def test_failed_ingest_leaves_prior_partition(conn, tmp_path):
         "SELECT ftag FROM matches WHERE date='1995-08-22'").fetchone()["ftag"]
     assert ftag == 0                                     # 仍是 CSV_A 数据，未被半替换
     c2.close()
+
+
+class _FaultConn:
+    """透明代理，只劫持 commit/rollback。
+
+    sqlite3.Connection 的 commit/rollback 是只读属性（无 __dict__），不能直接
+    monkeypatch.setattr，故包一层：劫持的方法优先，其余一切转发真连接
+    （含 in_transaction，断言的是真连接的事务状态）。
+    """
+
+    def __init__(self, real, commit=None, rollback=None):
+        self._real = real
+        self._commit = commit
+        self._rollback = rollback
+
+    def commit(self):
+        if self._commit is not None:
+            self._commit()
+        return self._real.commit()
+
+    def rollback(self):
+        if self._rollback is not None:
+            self._rollback()
+        return self._real.rollback()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_commit_failure_rolls_back_and_reraises(conn, tmp_path):
+    """commit 失败（SQLITE_FULL / IO）也必须回滚，且根因异常不被回滚异常吞掉。"""
+    ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))
+    rows = parse_csv(CSV_B_CORRECTED, "E0", 1995)        # 哈希必与 CSV_A 不同
+
+    def broken_commit():
+        raise sqlite3.OperationalError("disk I/O error")
+
+    # 1) commit 抛错 -> 回滚 + 原异常原样上抛
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        ingest_rows(_FaultConn(conn, commit=broken_commit), "E0", 1995, rows)
+    assert conn.in_transaction is False                  # 无悬挂事务
+    c2 = connect(tmp_path / "t.db")                      # 全新连接看持久化真相
+    got = c2.execute("SELECT COUNT(*) c FROM matches").fetchone()["c"]
+    assert got == 2                                      # 原分区完好
+    ftag = c2.execute(
+        "SELECT ftag FROM matches WHERE date='1995-08-22'").fetchone()["ftag"]
+    assert ftag == 0                                     # 仍是 CSV_A 数据，未被半替换
+    c2.close()
+
+    # 2) 回滚自身也炸 -> 胜出的必须仍是根因（commit 的错误），不是回滚的错误
+    def broken_rollback():
+        raise RuntimeError("rollback boom")
+
+    faulty = _FaultConn(conn, commit=broken_commit, rollback=broken_rollback)
+    with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
+        ingest_rows(faulty, "E0", 1995, rows)

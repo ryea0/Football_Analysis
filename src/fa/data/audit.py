@@ -2,7 +2,7 @@ import random
 import sqlite3
 from dataclasses import dataclass
 
-from fa.config import csv_cache_dir, season_code
+from fa.data import download
 from fa.data.parse import parse_csv
 from fa.data.sync import _read_text
 
@@ -33,8 +33,8 @@ def audit_sample(conn: sqlite3.Connection, sample: int = 50,
             "JOIN teams a ON a.id=m.away_team_id WHERE m.id=?", (mid,)).fetchone()
         key = (m["league"], m["season"])
         if key not in csv_cache:
-            # 文件名与 download.csv_cache_path 同一约定：f"{league}_{season_code(year)}.csv"
-            path = csv_cache_dir() / f"{m['league']}_{season_code(m['season'])}.csv"
+            # 路径统一由 download.csv_cache_path 生成（属性式访问，测试可对其打桩）
+            path = download.csv_cache_path(m["league"], m["season"])
             if not path.exists():
                 out.append(AuditMismatch(mid, "cache_missing", None, str(path)))
                 continue

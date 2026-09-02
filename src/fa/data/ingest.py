@@ -46,8 +46,12 @@ def ingest_rows(conn: sqlite3.Connection, league: str, season: int,
                  json.dumps(r.raw, ensure_ascii=False)))
             inserted += 1
         set_meta(conn, key, h)
+        # commit 一并放进 try：SQLITE_FULL / IO 错误时同样回滚，不留悬挂事务
+        conn.commit()
     except BaseException:
-        conn.rollback()  # 失败即回滚：不留下含半替换分区的悬挂事务
+        try:
+            conn.rollback()
+        except Exception:
+            pass  # 回滚失败时保住原始异常
         raise
-    conn.commit()
     return inserted
