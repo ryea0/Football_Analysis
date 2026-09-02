@@ -1,3 +1,4 @@
+import csv
 import io
 from dataclasses import dataclass, field
 
@@ -87,8 +88,39 @@ def _raw_dict(rec: dict) -> dict:
     return out
 
 
+def _trim_ragged_lines(content: str) -> str:
+    """截掉数据行尾部比表头多出来的空字段。
+
+    football-data.co.uk 的 2002-03~2004-05 部分赛季（E0/I1/SP1/D1/F1）数据行
+    会在行尾多出若干逗号，字段数比表头还长且多出的全为空。pandas 默认
+    on_bad_lines='error' 对这种行直接抛 ParserError，一个赛季文件就整份入库
+    失败。实测 169 个缓存文件里 868 行属于此类，没有一例多出非空字段，因此
+    只在「多出的部分全为空」时截断；带非空值的多余字段不静默吞掉，维持
+    pandas 报错上抛（由 sync 记账）。
+
+    引号数不成对的行可能是跨行的带引号字段，逐行切分会误判，原样保留。
+    """
+    lines = content.split("\n")
+    if len(lines) < 2:
+        return content
+    header_fields = len(next(csv.reader([lines[0]]), []))
+    if header_fields == 0:
+        return content          # 首行不是合法表头，交回 pandas 处理
+    out = list(lines)
+    for i, line in enumerate(lines[1:], start=1):
+        if not line.strip() or line.count('"') % 2:
+            continue
+        fields = next(csv.reader([line]), None)
+        if fields is None or len(fields) <= header_fields:
+            continue
+        if any(f.strip() for f in fields[header_fields:]):
+            continue
+        out[i] = ",".join(fields[:header_fields])
+    return "\n".join(out)
+
+
 def parse_csv(content: str, league: str, season: int) -> list[MatchRow]:
-    df = pd.read_csv(io.StringIO(content))
+    df = pd.read_csv(io.StringIO(_trim_ragged_lines(content)))
     df.columns = [str(c).strip() for c in df.columns]
     rows: list[MatchRow] = []
     for rec in df.to_dict("records"):

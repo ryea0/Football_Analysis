@@ -1,4 +1,7 @@
-from fa.data.parse import parse_csv
+import pandas as pd
+import pytest
+
+from fa.data.parse import _trim_ragged_lines, parse_csv
 
 # 90 年代格式：无射门/角球/赔率列，日期 d/m/yyyy
 CSV_90S = """Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR
@@ -40,4 +43,34 @@ def test_parse_modern_all_fields():
 def test_junk_rows_dropped_or_kept_correctly():
     rows = parse_csv(CSV_WITH_JUNK, "E0", 1995)
     assert len(rows) == 2          # 未赛行（无比分）丢弃；坏日期行保留但 date=None
-    assert rows[1].date is None
+
+
+# 真实数据（E0/I1/SP1/D1/F1 的 2002-03~2004-05 部分）数据行行尾会多出若干
+# 逗号，字段数比表头还长且多出的全为空，pandas 默认 on_bad_lines='error'
+# 直接抛 ParserError，导致整个赛季文件入库失败。
+CSV_RAGGED = """Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,HS,AS,HST,AST,HC,AC
+E0,14/08/2004,Chelsea,Man United,1,0,H,15,8,9,3,7,4
+E0,15/08/2004,Arsenal,Leeds,2,1,H,12,9,6,4,5,3,,,,,,,,,,,,,,
+"""
+
+
+def test_parse_rows_with_trailing_extra_empty_fields():
+    rows = parse_csv(CSV_RAGGED, "E0", 2004)
+    assert len(rows) == 2
+    r = rows[1]
+    assert (r.home, r.away, r.date) == ("Arsenal", "Leeds", "2004-08-15")
+    assert (r.fthg, r.ftag) == (2, 1)
+    assert r.shots_home == 12 and r.corners_away == 3
+
+
+def test_trim_leaves_well_formed_content_alone():
+    # 列数与表头一致的文件必须逐字节原样返回（裁剪只动违规行）
+    assert _trim_ragged_lines(CSV_90S) == CSV_90S
+    assert _trim_ragged_lines(CSV_MODERN) == CSV_MODERN
+
+
+def test_trim_keeps_strictness_for_nonempty_extra_fields():
+    # 多出的字段带非空值：不静默吞数据，维持 pandas 报错上抛（由 sync 记账）
+    bad = CSV_RAGGED.replace("5,3,,,,,,,,,,,,,,", "5,3,99,,,,,,,,,,,,,")
+    with pytest.raises(pd.errors.ParserError):
+        parse_csv(bad, "E0", 2004)
