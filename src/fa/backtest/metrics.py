@@ -60,6 +60,8 @@ def calibration(p: list[float], hit: list[bool], bins: int = 10) -> list[dict]:
 
 def evaluate(rows: list[dict]) -> dict:
     """全样本（或任一分组）的对比摘要；verdict 为 spec §8.2 的 go/no-go 关卡。"""
+    if not rows:
+        raise ValueError("无预测行——先跑回测或检查过滤条件")
     probs_m = [(r["p_home"], r["p_draw"], r["p_away"]) for r in rows]
     probs_k = [(r["mkt_home"], r["mkt_draw"], r["mkt_away"]) for r in rows]
     outs = [r["outcome"] for r in rows]

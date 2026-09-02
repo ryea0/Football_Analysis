@@ -42,6 +42,40 @@ def test_evaluate_go_and_nogo():
     assert same["verdict"] == "GO"
 
 
+def test_verdict_boundary():
+    """1.01 判据边界入仓（spec §8.2：劣化 ≤1% 即 GO，端点含入）。
+
+    算术：market=(0.5,.25,.25) 且 outcome="H" ⇒ market_ll = −log(0.5) = ln2。
+    令 p_home = 2**(−k)、其余质量均分（p_draw = p_away = (1−p_home)/2，保持归一），
+    则 model_ll = −log(p_home) = k·ln2 ⇒ ratio 精确等于 k。
+    p_home=0.49654624771851796 即 2**−1.01，实测 ratio 与 1.01 位级相等
+    ⇒ 把「<=」改成「<」时此例必失败；p_home=0.4931163522466796 即 2**−1.02
+    （1.01 < ratio < 1.1）⇒ 把阈值 1.01 改成 1.1 时此例必失败。
+    """
+    def rows(p_home):
+        rest = (1.0 - p_home) / 2
+        return [{"p_home": p_home, "p_draw": rest, "p_away": rest,
+                 "mkt_home": 0.5, "mkt_draw": 0.25, "mkt_away": 0.25,
+                 "outcome": "H"}]
+
+    at_gate = evaluate(rows(0.49654624771851796))     # 2**-1.01
+    assert at_gate["market_ll"] == pytest.approx(math.log(2))
+    assert at_gate["ratio"] == pytest.approx(1.01)
+    assert at_gate["degradation_pct"] == pytest.approx(1.0, abs=1e-12)
+    assert at_gate["verdict"] == "GO"                 # 劣化恰为 1% → 仍 GO
+
+    past = evaluate(rows(0.4931163522466796))         # 2**-1.02
+    assert past["ratio"] == pytest.approx(1.02)
+    assert past["degradation_pct"] == pytest.approx(2.0, abs=1e-12)
+    assert past["verdict"] == "NO-GO"
+
+
+def test_evaluate_empty_raises():
+    """空输入不许以 ZeroDivisionError 崩（Task 9 CLI 另有守卫，此处纵深防御）。"""
+    with pytest.raises(ValueError, match="无预测行"):
+        evaluate([])
+
+
 # ---- 以下为本任务补充（brief 原文只有上面 4 个测试）--------------------------
 # fetch_predictions 的过滤路径相对 brief 原文修正过（参数绑定），必须有回归测试钉住；
 # by_group 是 Task 8/9 直接消费的产出接口，此处钉住分组键与摘要形状。
