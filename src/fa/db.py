@@ -5,6 +5,28 @@ from fa.config import db_path
 
 SCHEMA_VERSION = 2
 
+# backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
+# 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
+_BP_TABLE = """
+CREATE TABLE IF NOT EXISTS backtest_predictions (
+    id INTEGER PRIMARY KEY,
+    league TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    week_index INTEGER NOT NULL,
+    match_id INTEGER NOT NULL REFERENCES matches(id),
+    date TEXT NOT NULL,
+    p_home REAL NOT NULL, p_draw REAL NOT NULL, p_away REAL NOT NULL,
+    p_over25 REAL, p_under25 REAL, p_btts REAL,
+    mkt_home REAL, mkt_draw REAL, mkt_away REAL, mkt_over25 REAL,
+    odds_home REAL, odds_draw REAL, odds_away REAL,
+    outcome TEXT NOT NULL,
+    total_goals INTEGER NOT NULL,
+    UNIQUE (match_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bp_league_season
+    ON backtest_predictions (league, season);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
@@ -50,25 +72,7 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-
-CREATE TABLE IF NOT EXISTS backtest_predictions (
-    id INTEGER PRIMARY KEY,
-    league TEXT NOT NULL,
-    season INTEGER NOT NULL,
-    week_index INTEGER NOT NULL,
-    match_id INTEGER NOT NULL REFERENCES matches(id),
-    date TEXT NOT NULL,
-    p_home REAL NOT NULL, p_draw REAL NOT NULL, p_away REAL NOT NULL,
-    p_over25 REAL, p_under25 REAL, p_btts REAL,
-    mkt_home REAL, mkt_draw REAL, mkt_away REAL, mkt_over25 REAL,
-    odds_home REAL, odds_draw REAL, odds_away REAL,
-    outcome TEXT NOT NULL,
-    total_goals INTEGER NOT NULL,
-    UNIQUE (match_id)
-);
-CREATE INDEX IF NOT EXISTS idx_bp_league_season
-    ON backtest_predictions (league, season);
-"""
+""" + _BP_TABLE
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -100,25 +104,7 @@ def init_db(path: Path | None = None) -> None:
 def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     """顺序升级。v1->v2：仅新增 backtest_predictions 表（加法，无数据搬迁）。"""
     if from_v < 2:
-        conn.executescript("""
-        CREATE TABLE IF NOT EXISTS backtest_predictions (
-            id INTEGER PRIMARY KEY,
-            league TEXT NOT NULL,
-            season INTEGER NOT NULL,
-            week_index INTEGER NOT NULL,
-            match_id INTEGER NOT NULL REFERENCES matches(id),
-            date TEXT NOT NULL,
-            p_home REAL NOT NULL, p_draw REAL NOT NULL, p_away REAL NOT NULL,
-            p_over25 REAL, p_under25 REAL, p_btts REAL,
-            mkt_home REAL, mkt_draw REAL, mkt_away REAL, mkt_over25 REAL,
-            odds_home REAL, odds_draw REAL, odds_away REAL,
-            outcome TEXT NOT NULL,
-            total_goals INTEGER NOT NULL,
-            UNIQUE (match_id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_bp_league_season
-            ON backtest_predictions (league, season);
-        """)
+        conn.executescript(_BP_TABLE)
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
