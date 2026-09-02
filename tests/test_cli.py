@@ -30,6 +30,12 @@ def _use_tmp_db(tmp_path, monkeypatch) -> Path:
     return db
 
 
+def test_backtest_help():
+    result = runner.invoke(app, ["backtest", "run", "--help"])
+    assert result.exit_code == 0
+    assert "half-life" in result.output
+
+
 def test_data_subapp_help():
     result = runner.invoke(app, ["data", "--help"])
     assert result.exit_code == 0

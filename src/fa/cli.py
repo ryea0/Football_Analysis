@@ -85,3 +85,42 @@ def audit_cmd(sample: int = typer.Option(50, "--sample"),
                    f"db={x.db_value} csv={x.csv_value}")
     typer.echo(f"共 {len(mismatches)} 处不一致（抽样 {sample} 场）")
     raise typer.Exit(code=1)
+
+
+backtest_app = typer.Typer(help="回测")
+app.add_typer(backtest_app, name="backtest")
+
+
+@backtest_app.command("run")
+def backtest_run(
+    from_season: int = typer.Option(2019, "--from", help="起始赛季（含）"),
+    to_season: int = typer.Option(2025, "--to", help="结束赛季（含）"),
+    half_life: float = typer.Option(100.0, "--half-life", help="衰减半衰期（天）"),
+    leagues: str = typer.Option("", "--leagues", help="逗号分隔联赛码，空=全部"),
+    no_refit: bool = typer.Option(False, "--no-refit", help="跳过拟合，用表内预测出报告"),
+) -> None:
+    """跑 walk-forward 回测并写 docs/m2-report.md（spec §8）"""
+    from datetime import datetime
+    from pathlib import Path as _P
+    from fa.backtest.report import render_report
+    from fa.backtest.metrics import fetch_predictions
+    from fa.config import LEAGUES, project_root
+    from fa.model.fit import FitConfig
+    lgs = [s.strip() for s in leagues.split(",") if s.strip()] or list(LEAGUES)
+    conn = connect()
+    if not no_refit:
+        from fa.backtest.run import run_backtest
+        cfg = FitConfig(half_life_days=half_life)
+        t0 = datetime.now()
+        n = run_backtest(conn, lgs, range(from_season, to_season + 1), cfg,
+                         verbose=True)
+        typer.echo(f"回测完成：{n} 行预测，耗时 {datetime.now() - t0}")
+    rows = fetch_predictions(conn, leagues=lgs,
+                             seasons=list(range(from_season, to_season + 1)))
+    conn.close()
+    if not rows:
+        typer.echo("无预测行——请先跑拟合（去掉 --no-refit）")
+        raise typer.Exit(code=1)
+    ev = render_report(rows, _P(project_root() / "docs" / "m2-report.md"))
+    typer.echo(f"判决：{ev['verdict']}（劣化 {ev['degradation_pct']:+.2f}%，"
+               f"判据 ≤ +1.00%）——报告见 docs/m2-report.md")
