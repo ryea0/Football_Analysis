@@ -38,3 +38,29 @@ def test_404_returns_none(tmp_path, monkeypatch):
 
     monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
     assert download_csv("F1", 1993) is None
+
+
+def test_download_writes_cache_atomically(tmp_path, monkeypatch):
+    monkeypatch.setattr("fa.data.download.csv_cache_dir", lambda: tmp_path)
+    p = tmp_path / "E0_9900.csv"
+    p.write_text("stale")  # refresh=True 应无视已有缓存重新下载
+
+    content = b"Div,Date,HomeTeam\nE0,2025-08-16,Chelsea\n"
+
+    class FakeResp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return content
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout: FakeResp())
+
+    assert download_csv("E0", 1999, refresh=True) == p
+    assert p.read_bytes() == content
+    # 原子写入：不得残留 .part 临时文件
+    assert not p.with_suffix(".csv.part").exists()
+    assert [f.name for f in tmp_path.iterdir()] == ["E0_9900.csv"]

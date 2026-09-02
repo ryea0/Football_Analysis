@@ -1,3 +1,4 @@
+import os
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -22,5 +23,13 @@ def download_csv(league: str, start_year: int, refresh: bool = False) -> Path | 
         if e.code == 404:
             return None
         raise
-    path.write_bytes(data)
+    # 原子写入：先写临时文件再 os.replace（POSIX 原子），中断不会留下被当作
+    # 有效缓存命中的截断 CSV；.part 后缀与缓存文件不同，永远不会被误判为命中。
+    tmp = path.with_suffix(".csv.part")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
     return path
