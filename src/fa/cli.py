@@ -1,5 +1,6 @@
 import typer
 
+from fa.data.audit import audit_sample
 from fa.data.sync import sync_history
 from fa.db import connect, init_db
 
@@ -67,3 +68,20 @@ def status() -> None:
         "SELECT COUNT(*) c FROM unknown_names").fetchone()["c"]
     typer.echo(f"未知队名（隔离表）：{unknown} 条")
     conn.close()
+
+
+@data_app.command("audit")
+def audit_cmd(sample: int = typer.Option(50, "--sample"),
+              seed: int = typer.Option(42, "--seed")) -> None:
+    """抽样对账：DB vs 缓存 CSV（spec M1 验收：抽样 50 场一致）"""
+    conn = connect()
+    mismatches = audit_sample(conn, sample=sample, seed=seed)
+    conn.close()
+    if not mismatches:
+        typer.echo(f"对账通过：抽样 {sample} 场，0 不一致")
+        return
+    for x in mismatches:
+        typer.echo(f"  [不一致] match={x.match_id} field={x.field} "
+                   f"db={x.db_value} csv={x.csv_value}")
+    typer.echo(f"共 {len(mismatches)} 处不一致（抽样 {sample} 场）")
+    raise typer.Exit(code=1)
