@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
@@ -50,6 +50,24 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS backtest_predictions (
+    id INTEGER PRIMARY KEY,
+    league TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    week_index INTEGER NOT NULL,
+    match_id INTEGER NOT NULL REFERENCES matches(id),
+    date TEXT NOT NULL,
+    p_home REAL NOT NULL, p_draw REAL NOT NULL, p_away REAL NOT NULL,
+    p_over25 REAL, p_under25 REAL, p_btts REAL,
+    mkt_home REAL, mkt_draw REAL, mkt_away REAL, mkt_over25 REAL,
+    odds_home REAL, odds_draw REAL, odds_away REAL,
+    outcome TEXT NOT NULL,
+    total_goals INTEGER NOT NULL,
+    UNIQUE (match_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bp_league_season
+    ON backtest_predictions (league, season);
 """
 
 
@@ -70,11 +88,38 @@ def init_db(path: Path | None = None) -> None:
     if row is None:
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
-    elif row["version"] != SCHEMA_VERSION:
+    elif row["version"] < SCHEMA_VERSION:
+        _migrate_up(conn, row["version"])
+    elif row["version"] > SCHEMA_VERSION:
         raise RuntimeError(
-            f"schema 版本不匹配：库={row['version']}，程序={SCHEMA_VERSION}")
+            f"数据库 schema 版本 {row['version']} 高于程序 {SCHEMA_VERSION}，请升级 fa")
     conn.commit()
     conn.close()
+
+
+def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
+    """顺序升级。v1->v2：仅新增 backtest_predictions 表（加法，无数据搬迁）。"""
+    if from_v < 2:
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS backtest_predictions (
+            id INTEGER PRIMARY KEY,
+            league TEXT NOT NULL,
+            season INTEGER NOT NULL,
+            week_index INTEGER NOT NULL,
+            match_id INTEGER NOT NULL REFERENCES matches(id),
+            date TEXT NOT NULL,
+            p_home REAL NOT NULL, p_draw REAL NOT NULL, p_away REAL NOT NULL,
+            p_over25 REAL, p_under25 REAL, p_btts REAL,
+            mkt_home REAL, mkt_draw REAL, mkt_away REAL, mkt_over25 REAL,
+            odds_home REAL, odds_draw REAL, odds_away REAL,
+            outcome TEXT NOT NULL,
+            total_goals INTEGER NOT NULL,
+            UNIQUE (match_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_bp_league_season
+            ON backtest_predictions (league, season);
+        """)
+    conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
 def get_meta(conn: sqlite3.Connection, key: str) -> str | None:
