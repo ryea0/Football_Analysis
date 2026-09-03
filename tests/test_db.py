@@ -4,6 +4,7 @@ import pytest
 
 from fa.db import (
     SCHEMA_VERSION,
+    _BLINE_TABLE,
     _BP_TABLE,
     _migrate_up,
     connect,
@@ -81,10 +82,10 @@ def test_meta_roundtrip(conn):
     assert get_meta(conn, "k") == "v2"
 
 
-def test_fresh_db_is_v3(tmp_path):
+def test_fresh_db_is_v4(tmp_path):
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 3
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
@@ -125,8 +126,8 @@ def _assert_legacy_rows_intact(c, bp_count: int = 1) -> None:
                 bp["total_goals"]) == ('E0', 2025, 'H', 3)
 
 
-def test_v2_upgrades_to_v3(tmp_path):
-    """v2→v3：纯加法。B 线五表新出现且为空，既有表与数据一字不动。"""
+def test_v2_upgrades_to_v4(tmp_path):
+    """v2→v4：纯加法。B 线五表与 retro 两表新出现且为空，既有表与数据一字不动。"""
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
     _seed_legacy_rows(c)
@@ -135,15 +136,15 @@ def test_v2_upgrades_to_v3(tmp_path):
     init_db(tmp_path / "t.db")                               # 不抛异常即升级成功
 
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 3
-    for t in _BLINE_TABLES:
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
+    for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions"):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c)
     c.close()
 
 
-def test_v1_upgrades_to_v3(tmp_path):
-    """v1→v3 跨级升级：backtest_predictions 与 B 线五表一并补齐。"""
+def test_v1_upgrades_to_v4(tmp_path):
+    """v1→v4 跨级升级：backtest_predictions、B 线五表与 retro 两表一并补齐。"""
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
     _seed_legacy_rows(c)
@@ -153,10 +154,10 @@ def test_v1_upgrades_to_v3(tmp_path):
     init_db(tmp_path / "t.db")
 
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 3
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
     assert c.execute(
         "SELECT COUNT(*) c FROM backtest_predictions").fetchone()["c"] == 0
-    for t in _BLINE_TABLES:
+    for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions"):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c, bp_count=0)
     c.close()
@@ -291,7 +292,7 @@ def test_bline_vocab_accepts_all_legal_values(conn, bline_ids):
 
 
 def test_migrate_up_v1_adds_everything(tmp_path):
-    """_migrate_up 单独跑就能把 v1 库补齐到 v3（不依赖 _SCHEMA 兜底）。"""
+    """_migrate_up 单独跑就能把 v1 库补齐到 v4（不依赖 _SCHEMA 兜底）。"""
     p = tmp_path / "v1.db"
     _legacy_db(p, version=1, with_bp=False)
     c = connect(p)
@@ -300,12 +301,12 @@ def test_migrate_up_v1_adds_everything(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
     assert c.execute(
-        "SELECT version FROM schema_version").fetchone()["version"] == 3
+        "SELECT version FROM schema_version").fetchone()["version"] == 4
     c.close()
 
 
-def test_migrate_up_v2_adds_only_bline(tmp_path):
-    """v2 库走 _migrate_up 只补 B 线五表，不动 backtest_predictions。"""
+def test_migrate_up_v2_adds_bline_and_retro(tmp_path):
+    """v2 库走 _migrate_up 补 B 线五表与 retro 两表，不动 backtest_predictions。"""
     p = tmp_path / "v2.db"
     _legacy_db(p, version=2, with_bp=True)
     c = connect(p)
@@ -315,24 +316,26 @@ def test_migrate_up_v2_adds_only_bline(tmp_path):
     _migrate_up(c, 2)
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    assert set(_BLINE_TABLES) <= names
+    assert set(_BLINE_TABLES) | {"retro_runs", "retro_attributions"} <= names
     assert c.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='backtest_predictions'").fetchone()["sql"] == bp_before
     assert c.execute(
-        "SELECT version FROM schema_version").fetchone()["version"] == 3
+        "SELECT version FROM schema_version").fetchone()["version"] == 4
     c.close()
 
 
 def test_migrate_and_fresh_schemas_match(tmp_path):
     """新建与迁移两条路径产出的全部表/索引 DDL 必须逐字一致（M2 教训的推广）。"""
-    init_db(tmp_path / "a.db")                      # 全新 v3
-    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回 v3
+    init_db(tmp_path / "a.db")                      # 全新 v4
+    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回 v4
     _set_version(tmp_path / "b.db", 1,
-                 drop=("backtest_predictions", *_BLINE_TABLES))
+                 drop=("backtest_predictions", *_BLINE_TABLES,
+                       "retro_runs", "retro_attributions"))
     init_db(tmp_path / "b.db")
 
-    tables = ("backtest_predictions", *_BLINE_TABLES)
+    tables = ("backtest_predictions", *_BLINE_TABLES,
+              "retro_runs", "retro_attributions")
     a = connect(tmp_path / "a.db")
     b = connect(tmp_path / "b.db")
     for t in tables:
@@ -368,7 +371,7 @@ def bline_ids(conn):
 
 
 def test_backtest_predictions_schema_unchanged(conn):
-    """B 线边界烟测：A 线独占表的列集/约束在 schema v3 下不得有任何变动。"""
+    """B 线边界烟测：A 线独占表的列集/约束在 schema v4 下不得有任何变动。"""
     cols = _table_cols(conn, "backtest_predictions")
     assert list(cols) == ["id", "league", "season", "week_index", "match_id",
                           "date", "p_home", "p_draw", "p_away", "p_over25",
@@ -494,3 +497,98 @@ def test_future_version_refused(tmp_path):
     import pytest
     with pytest.raises(RuntimeError):
         init_db(tmp_path / "t.db")
+
+
+# ---------------------------------------------------------------------------
+# schema v4：A 线复盘归因两表（retro_runs / retro_attributions）
+# ---------------------------------------------------------------------------
+
+def test_v4_creates_retro_tables(tmp_path):
+    """v4 新建库即含 retro 两表；词表 CHECK 一次到位（SQLite 无法 ALTER 补 CHECK）。"""
+    from fa.db import connect, init_db
+    db = tmp_path / "v4.db"
+    init_db(db)
+    conn = connect(db)
+    try:
+        tables = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"retro_runs", "retro_attributions"} <= tables
+        # 词表钉死：非法 selector / status / model_vs_market 须被 CHECK 拒绝
+        # （CHECK 在 execute 即抛、非 commit——与上方 B 线词表用例同款写法）
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO retro_runs (selector, params_json, n_selected, n_ok,"
+                " n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+                " VALUES ('bogus', '{}', 0, 0, 0, 0, 0, 0.0, '2026-09-04T00:00:00Z')")
+        # retro_attributions 外键开启，负例须先备好合法父行——否则 IntegrityError
+        # 来自外键而非 CHECK，负例就测空了
+        team = conn.execute(
+            "INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+        match_id = conn.execute(
+            "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
+            " raw_line) VALUES ('E0', 2025, '2025-08-16', ?, ?, '{}')",
+            (team.lastrowid, team.lastrowid)).lastrowid
+        batch = conn.execute(
+            "INSERT INTO retro_runs (selector, params_json, n_selected, n_ok,"
+            " n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+            " VALUES ('divergence', '{}', 1, 0, 0, 0, 0, 1.0,"
+            " '2026-09-04T00:00:00Z')").lastrowid
+
+        def attr(status="ok", model_vs_market=None):
+            conn.execute(
+                "INSERT INTO retro_attributions (batch_id, match_id, league, season,"
+                " date, selector, status, model_vs_market, harness, input_pack_path,"
+                " tag_set_version, created_at) VALUES "
+                "(?, ?, 'E0', 2025, '2025-08-16', 'divergence', ?, ?, 'hermes',"
+                " 'packs/x.json', 'v1', '2026-09-04T00:00:00Z')",
+                (batch, match_id, status, model_vs_market))
+
+        with pytest.raises(sqlite3.IntegrityError):
+            attr(status="bogus")
+        with pytest.raises(sqlite3.IntegrityError):
+            attr(model_vs_market="bogus")
+        attr()                      # 合法组合不得被 CHECK 误伤
+        conn.rollback()
+    finally:
+        conn.close()
+
+
+def test_v3_migrates_to_v4(tmp_path):
+    """老库（v3）经 init_db 升级到 v4，retro 表出现且 schema_version=4。"""
+    from fa.db import SCHEMA_VERSION, connect, init_db
+    db = tmp_path / "old.db"
+    init_db(db)
+    conn = connect(db)
+    conn.execute("UPDATE schema_version SET version=3")
+    conn.execute("DROP TABLE retro_runs")
+    conn.execute("DROP TABLE retro_attributions")
+    conn.commit()
+    conn.close()
+    init_db(db)                      # 触发 _migrate_up(3 -> 4)
+    conn = connect(db)
+    try:
+        assert conn.execute(
+            "SELECT version FROM schema_version").fetchone()["version"] == 4
+        assert SCHEMA_VERSION == 4
+        names = {r["name"] for r in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {"retro_runs", "retro_attributions"} <= names
+    finally:
+        conn.close()
+
+
+def test_migrate_up_v3_adds_retro(tmp_path):
+    """_migrate_up 单独跑就能给 v3 库补上 retro 两表（不经 _SCHEMA 兜底）——
+    init_db 会先跑 _SCHEMA 把缺口兜掉，单看 init_db 测不出 v4 分支死活。"""
+    p = tmp_path / "v3.db"
+    _legacy_db(p, version=3, with_bp=True)
+    c = connect(p)
+    c.executescript(_BLINE_TABLE)
+    c.commit()
+    _migrate_up(c, 3)
+    names = {r["name"] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"retro_runs", "retro_attributions"} <= names
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == 4
+    c.close()

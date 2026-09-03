@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -121,6 +121,57 @@ CREATE TABLE IF NOT EXISTS bets (
 CREATE INDEX IF NOT EXISTS idx_bets_status ON bets (status);
 """
 
+# A 线复盘归因子线两表（spec docs/superpowers/specs/2026-09-04-retro-attribution-design.md
+# §7）。物理隔离：retro 对 recommendations/bets 无任何代码通路。selector 词表含
+# S2/S3 的 paper_t1 / agentline_aligned——SQLite 无法后补 CHECK，趁表空一次到位。
+# 契约字段（miss_tags 等）在 status != 'ok' 的行上为 NULL（parse_fail 只留 raw 与
+# 审计字段）。
+_RETRO_TABLE = """
+CREATE TABLE IF NOT EXISTS retro_runs (
+    id           INTEGER PRIMARY KEY,
+    selector     TEXT NOT NULL
+        CHECK (selector IN ('divergence', 'manual', 'paper_t1', 'agentline_aligned')),
+    params_json  TEXT NOT NULL,
+    n_selected   INTEGER NOT NULL,
+    n_ok         INTEGER NOT NULL,
+    n_parse_fail INTEGER NOT NULL,
+    n_timeout    INTEGER NOT NULL,
+    n_error      INTEGER NOT NULL,
+    duration_s   REAL NOT NULL,
+    created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS retro_attributions (
+    id              INTEGER PRIMARY KEY,
+    batch_id        INTEGER NOT NULL REFERENCES retro_runs(id),
+    match_id        INTEGER NOT NULL REFERENCES matches(id),
+    league          TEXT NOT NULL,
+    season          INTEGER NOT NULL,
+    date            TEXT NOT NULL,
+    selector        TEXT NOT NULL
+        CHECK (selector IN ('divergence', 'manual', 'paper_t1', 'agentline_aligned')),
+    miss_tags_json  TEXT,            -- JSON 数组；status != ok 时 NULL
+    primary_tag     TEXT,
+    tags_confidence REAL,
+    model_vs_market TEXT
+        CHECK (model_vs_market IN ('model_wrong', 'market_wrong', 'both_off',
+                                   'variance')),
+    evidence_json   TEXT,
+    digest          TEXT,
+    status          TEXT NOT NULL CHECK (status IN ('ok', 'parse_fail',
+                                                    'timeout', 'error')),
+    repaired        INTEGER NOT NULL DEFAULT 0,
+    harness         TEXT NOT NULL,
+    model           TEXT,
+    duration_s      REAL,
+    input_pack_path TEXT NOT NULL,
+    tag_set_version TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_retro_attr_batch ON retro_attributions (batch_id);
+CREATE INDEX IF NOT EXISTS idx_retro_attr_match ON retro_attributions (match_id);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
@@ -166,7 +217,7 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-""" + _BP_TABLE + _BLINE_TABLE
+""" + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -198,11 +249,14 @@ def init_db(path: Path | None = None) -> None:
 def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     """顺序升级，逐级纯加法、无数据搬迁：
     v1->v2 新增 backtest_predictions；v2->v3 新增 B 线五表
-    （fixtures / odds_snapshots / runs / recommendations / bets）。"""
+    （fixtures / odds_snapshots / runs / recommendations / bets）；v3->v4 新增
+    retro 两表（retro_runs / retro_attributions，A 线复盘归因子线）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
         conn.executescript(_BLINE_TABLE)
+    if from_v < 4:
+        conn.executescript(_RETRO_TABLE)
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
