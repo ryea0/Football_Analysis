@@ -43,7 +43,8 @@ MODE = "paper"                      # 本 Provider 的模式（§7.2 双模式�
 STATUS_PENDING = "pending"
 SETTLED_STATUSES = ("won", "lost")  # 终态；void = 退款，不进 ROI 的分母/分子
 STATUS_FINISHED = "finished"        # fixtures.status：配对并结算完的场次
-MAX_MATCH_DAY_GAP = 2               # fixture↔match 配对日期窗（brief：相差 ≤2 天）
+MAX_MATCH_DAY_GAP = 2               # fixture↔match 配对窗上界（brief：相差 ≤2 天）；
+                                    # 下界 0——不认 kickoff **之前**的同配对完赛（T7 审查）
 
 # 各市场 → matches 的收盘列（CLV 基准，spec §7.3「Pinnacle 收盘价」）
 _CLOSING_COLUMN = {"H": "psc_home", "D": "psc_draw", "A": "psc_away",
@@ -93,10 +94,11 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
     """结算所有已可判定的 pending paper 注，返回 ``{"settled","won","pnl","clv_median"}``。
 
     配对：``fixtures`` 与 ``matches`` 按 ``(league, home_team_id, away_team_id)``
-    且比赛日期与 kickoff 相差 ≤ :func:`MAX_MATCH_DAY_GAP` 天对上（多场候选取日期
-    差最小者；无完赛行 / 未对齐侧 / 缺比分 / kickoff 不可解析 → 不配对）。
-    ``settled``/``won`` 按注数计；``pnl`` = 已结算注的 ``return − stake``；
-    ``clv_median`` = 本次结算注 CLV 的中位数（缺收盘者不计，全缺 → ``None``）。
+    且比赛日期落在 ``[kickoff 日期, kickoff 日期 + MAX_MATCH_DAY_GAP 天]`` 对上
+    （多场候选取日期差最小者；无完赛行 / 未对齐侧 / 缺比分 / kickoff 不可解析
+    → 不配对）。``settled``/``won`` 按注数计；``pnl`` = 已结算注的
+    ``return − stake``；``clv_median`` = 本次结算注 CLV 的中位数（缺收盘者不计，
+    全缺 → ``None``）。
     """
     pending = conn.execute(
         "SELECT b.id AS bet_id, b.stake, b.odds_taken,"
@@ -229,8 +231,17 @@ def _paired_match(conn: sqlite3.Connection, league: str, home_team_id: int | Non
                   away_team_id: int | None, kickoff: date | None) -> sqlite3.Row | None:
     """该 fixture 对应的完赛行；配不上返回 ``None``（注保持 pending，绝不硬猜）。
 
-    多场候选（同联赛同主客在窗口内撞期）取 ``(日期差, 日期, id)`` 最小者——确定性，
-    平手偏向更早且更先入库的一行。
+    窗口 = ``[kickoff 的 UTC 日历日, kickoff 日历日 + MAX_MATCH_DAY_GAP 天]``：
+    **只认 kickoff 当日或之后**的完赛（T7 审查加固）。理由——同一配对可能在
+    1–2 天前已赛过另一场（杯赛 / 一周双赛），而 fixture 因故推迟时 kickoff 会
+    后移；拿赛前那场的比分来结算，等于用错误的比赛结果 latch 掉注（写
+    ``finished`` + 动 bankroll），且事后几乎无从察觉。推迟只会把 kickoff 往后
+    推，故真完赛必在同日或之后；上界 +2 天覆盖跨日深夜开球与完赛数据晚到
+    （brief「相差 ≤2 天」的上端点语义保留）。
+
+    多场候选取 ``(日期差, 日期, id)`` 最小者——确定性；经上面的下界过滤后
+    ``日期差`` 非负，即「离 kickoff 最近的赛后完赛」胜出，平手偏向更早且更先
+    入库的一行。
     """
     if kickoff is None or home_team_id is None or away_team_id is None:
         return None
@@ -243,8 +254,8 @@ def _paired_match(conn: sqlite3.Connection, league: str, home_team_id: int | Non
         played = _match_date(row["date"])
         if played is None:
             continue
-        gap = abs((played - kickoff).days)
-        if gap > MAX_MATCH_DAY_GAP:
+        gap = (played - kickoff).days
+        if gap < 0 or gap > MAX_MATCH_DAY_GAP:      # 赛前同配对 → 出局（不得 latch）
             continue
         key = (gap, row["date"], row["id"])
         if best_key is None or key < best_key:

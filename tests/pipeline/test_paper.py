@@ -248,7 +248,7 @@ def test_four_market_outcome_rules(conn, market, fthg, ftag, won):
 
 
 def test_settlement_pairs_fixture_to_match_within_two_days(conn):
-    """配对键 (league, home, away, |date − kickoff date| ≤ 2)；差 3 天不配对。"""
+    """配对键 (league, home, away) + kickoff 当日起 ≤2 天；上端点含、差 3 天出局。"""
     fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
     add_match(conn, "Chelsea", "Arsenal", "2026-09-04", 2, 1)      # 差 2 天（含端点）
     run = add_run(conn)
@@ -268,26 +268,44 @@ def test_settlement_pairs_fixture_to_match_within_two_days(conn):
     assert [b["status"] for b in late] == ["pending"]
 
 
-def test_ambiguous_pairing_takes_closest_date(conn):
-    """同键多场（杯赛撞期等）：取日期差最小者，平手取日期早、id 小——确定性。"""
-    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
-    add_match(conn, "Chelsea", "Arsenal", "2026-08-31", 0, 0)      # 差 2 天
-    add_match(conn, "Chelsea", "Arsenal", "2026-09-01", 3, 0)      # 差 1 天 ← 胜出
+def test_pre_kickoff_match_does_not_latch_settlement(conn):
+    """kickoff **之前**的同配对完赛（杯赛/首回合，fixture 推迟时 kickoff 后移）
+    不得拿来结算：只认 kickoff 当日或之后，赛前 1–2 天同样出局（T7 审查加固）。"""
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal", kickoff="2026-09-02T14:00:00Z")
+    add_match(conn, "Chelsea", "Arsenal", "2026-08-31", 0, 0)      # 差 −2 天
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-01", 3, 0)      # 差 −1 天
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H")
+    place_paper_bets(conn, run)
+    assert settle_paper_bets(conn) == {"settled": 0, "won": 0, "pnl": 0.0,
+                                       "clv_median": None}
+    assert bet_by_market(conn, "H")["status"] == "pending"
+    assert fixture_status(conn)[fx] == "scheduled"                 # 未 latch 成 finished
+
+
+def test_ambiguous_pairing_takes_closest_post_kickoff_date(conn):
+    """同键多场：先剔赛前场，再取日期差最小者，平手取日期早、id 小——确定性。"""
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal", kickoff="2026-09-02T14:00:00Z")
+    add_match(conn, "Chelsea", "Arsenal", "2026-08-31", 0, 0)      # 赛前 −2 天：出局
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-04", 0, 0)      # 差 +2 天
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-03", 3, 0)      # 差 +1 天 ← 胜出
     run = add_run(conn)
     add_rec(conn, run, fx, "H")
     place_paper_bets(conn, run)
     out = settle_paper_bets(conn)
     assert out["settled"] == 1 and out["won"] == 1
+    # 若赛前那场（0-0）或 +2 天那场（0-0）被取走，H 会判负 → return 0.0
     assert bet_by_market(conn, "H")["return_amt"] == pytest.approx(40.0)
 
 
 def test_unpaired_fixture_stays_pending(conn):
-    """无论无完赛行、未对齐侧、还是缺比分：一律保持 pending（不猜）。"""
+    """无论无完赛行、主客互换、别的队、未对齐侧、还是缺比分：一律保持 pending（不猜）。"""
     run = add_run(conn)
     fx_none = add_fixture(conn, "ev-none", "Chelsea", "Arsenal")
     fx_unaligned = add_fixture(conn, "ev-null", "Chelsea", None)
     add_match(conn, "Everton", "Spurs", "2026-09-02", 1, 0)          # 别的队
     add_match(conn, "Chelsea", "Arsenal", "2026-09-02", None, None)  # 无比分
+    add_match(conn, "Arsenal", "Chelsea", "2026-09-02", 1, 0)        # 主客互换（T7 审查）
     add_rec(conn, run, fx_none, "H")
     add_rec(conn, run, fx_unaligned, "A")
     assert place_paper_bets(conn, run) == 2
