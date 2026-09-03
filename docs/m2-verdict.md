@@ -152,6 +152,46 @@ uv run python -c "from fa.db import connect; from fa.backtest.metrics import fet
 uv run python -c "import math; from fa.db import connect; rows=[dict(r) for r in connect().execute('SELECT p_over25, mkt_over25, total_goals FROM backtest_predictions WHERE mkt_over25 IS NOT NULL')]; eps=1e-12; f=lambda k: -sum(math.log(min(max(r[k],eps),1-eps)) if r['total_goals']>=3 else math.log(1-min(max(r[k],eps),1-eps)) for r in rows)/len(rows); m,k=f('p_over25'),f('mkt_over25'); print(len(rows), round(m,5), round(k,5), f'{(m/k-1)*100:+.2f}%')"
 ```
 
+## 补充：§4.5 近 6 场状态协变量消融（on/off 对比，真实回测）
+
+spec §4.5 留作可选的最后一项消融：把各队**近 6 场场均净胜球**作为队级状态协变量加进 Dixon-Coles（`log λ_home += β·f_home`、`log λ_away += β·f_away`，β 由每周 walk-forward 与其余参数一同拟合并加单个 L-BFGS 参数、无先验项），特征严格防泄漏（某行特征只由该行日期之前的比赛构成）。动机是判决书「大小球通道诊断」节指出的弱环节——**1X2 概率分配**：状态协变量是 1X2 通道少数还没试过的、与「调参」不同类（新增信息源）的手段。与 half-life/σ 两根超参轴不同，这一项改变的是模型输入而非正则强度。
+
+| 近 6 场净胜球协变量 | n | 模型 log-loss | 劣化% | 平注 ROI（注数） | 判决 |
+|---|---|---|---|---|---|
+| **off（默认，主判决，已归档）** | 11,605 | **0.99790** | **+3.02%** | −5.55%（9,679） | **NO-GO** |
+| **on（`--form`）** | 11,605 | 0.99985 | **+3.22%** | −5.39%（9,666） | NO-GO |
+
+（市场 log-loss 恒为 0.96867；两路径写入行数完全相等 = 11,605，无一场被丢弃。Brier：off 0.29776 / on 0.29845；`p_home` 标准差 off 0.148 → on 0.157，市场 0.186。）
+
+**β 抽样 5 周**（跑完后对 5 个抽样 league-week 重拟合并读 `beta_form`；与驱动器同一路径，只读）：
+
+| 抽样周（asof） | 训练行数 | β | 窗内 form p10/p50/p90 |
+|---|---|---|---|
+| E0 2019 wk11（2019-10-31） | 1,170 | +0.0993 | −2.00 / −0.17 / +1.67 |
+| SP1 2021 wk21（2022-02-03） | 1,177 | +0.1127 | −1.33 / −0.17 / +0.83 |
+| D1 2023 wk16（2024-01-11） | 953 | +0.0995 | −1.33 / −0.17 / +0.83 |
+| I1 2024 wk26（2025-02-27） | 1,174 | +0.0691 | −1.67 / 0.00 / +1.17 |
+| F1 2025 wk13（2025-11-27） | 979 | +0.0424 | −1.33 / −0.33 / +1.17 |
+
+β 跨周稳定为正（min +0.042 / median +0.099 / max +0.113）——**净胜球近况与当期进球确实正相关，方向没有错**。但量级很小：form 的 p10–p90 约 ±1.3 球，对应 λ 的乘性调整 `exp(β·f)` 仅约 ×0.88–×1.18，且方向已被队级 att/dfn 与时间衰减加权基本吸收，剩下的增量在样本外是**负贡献**。
+
+**解读：唯一一根「换信息源」而非「调参」的轴也到不了关卡，反而略变差。** 劣化从 +3.02% 升到 +3.22%（**+0.20pp**），五联赛（+2.80% ～ +3.49%）与七赛季（+2.43% ～ +4.03%）依然全部 NO-GO。这与判决书的机理诊断完全自洽：模型的问题是概率**离散度不足/信号无增量**，而近况信息 Pinnacle 收盘价早已定价——免费、滞后、队级的近况数据不可能提供收盘价之外的信息增量（§4.5 对伤停盲区的论证在这里同样成立）。加入协变量只是又添了一个可过拟合的自由度（`p_home` 标准差确实从 0.148 升到 0.157，但 log-loss 同步变差，与 σ 扫描「弥合离散度反而更差」的结论一致）。平注 ROI 从 −5.55% 微升到 −5.39%（注数 9,679 → 9,666），仍远未转正，且与 log-loss 的变差方向不同向——不构成任何可下注的改进。
+
+> 诚实声明：本次为**样本内消融**（与 σ/half-life 扫描同一评估窗口 2019–2025），即使某次跑出更优结果也**不重开关卡**；本次未出现更优结果（+3.22% > +3.02%）。spec §4.5 的协变量写明是「积分 / 净胜球」二选一，本次只做**净胜球**：它已回答了同一问题（近况对 1X2 无样本外增量），再加积分变体需再花一次全量回测（≈70 s × 1）与一份表格，预期结论重复，故未做。off 基线取已归档的主判决数字，未重跑；消融后已用默认参数重跑一次恢复正典（`docs/m2-report.md` sha256 `42e956cc793f9251cc8a84c689c0c3fe17b5da3797d47bb50e8bc8f7ec38d11f`，与提交版逐字节一致，`git diff` 为空）。
+
+### §4.5 消融复现命令（审计记录，按执行顺序）
+
+```bash
+# on 路径（每次整表覆盖 backtest_predictions，78.7 s）
+uv run fa backtest run --from 2019 --to 2025 --form
+# 表内只读取数（n / 模型 ll / 市场 ll / 劣化 / 判决 / 平注 ROI）
+uv run python -c "from fa.db import connect; from fa.backtest.metrics import fetch_predictions, evaluate; from fa.backtest.simulate import candidates, simulate_flat; rows=fetch_predictions(connect(), leagues=['E0','SP1','D1','I1','F1'], seasons=list(range(2019,2026))); ev=evaluate(rows); f=simulate_flat(candidates(rows)); print(ev['n'], round(ev['model_ll'],5), round(ev['market_ll'],5), round(ev['degradation_pct'],2), ev['verdict'], f['n'], round(f['roi']*100,2))"
+# β 抽样：对 5 个抽样 league-week 重拟合并读 beta_form（与驱动器同一路径，只读）
+#   （一次性探针脚本，未入库：E0 2019 wk10 / SP1 2021 wk20 / D1 2023 wk15 / I1 2024 wk25 / F1 2025 wk12）
+# 收尾：默认重跑恢复正典
+uv run fa backtest run --from 2019 --to 2025
+```
+
 ## 数据说明
 
 - `psc_*`（Pinnacle 收盘）实际自 **2012** 赛季起即有覆盖，早于 brief 预估的 2019；`--from 2019` 按计划保留（spec §8.1 walk-forward ≥5 赛季）。
