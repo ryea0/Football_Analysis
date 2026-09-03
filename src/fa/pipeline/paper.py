@@ -11,8 +11,8 @@
 3. :func:`paper_summary`——``fa status`` 消费的台账汇总。
 
 **bankroll**（spec §7.1「bankroll 快照」）：经 ``meta`` 持久化，键
-:func:`BANKROLL_KEY` 是**单一事实源**（T8 的 render 曾自声明同名字面量，合流时
-改指此处）。首次落注时惰性初始化为 :func:`INITIAL_BANKROLL`（未用过不写 meta，
+:func:`BANKROLL_KEY` 是**单一事实源**（T8 的 render 曾自声明同名字面量，合流后
+已改指此处）。首次落注时惰性初始化为 :func:`INITIAL_BANKROLL`（未用过不写 meta，
 保持「未初始化」可观测）。语义：余额只在**结算**时按净额增减（落注不冻结注金，
 注金以 ``bets.stake`` 记账、仓位按当前余额计）——这正是 §7.3 ROI = 净利 / 总投注
 额的口径，也是 paper 模式零真金下最简单的可复算账本。
@@ -36,7 +36,7 @@ from datetime import date, datetime, timezone
 
 from fa.db import get_meta, set_meta
 
-BANKROLL_KEY = "paper_bankroll"     # 单一事实源（T8 render 合流时 re-point 此处）
+BANKROLL_KEY = "paper_bankroll"     # 单一事实源（fa.report.render 已改指此处）
 INITIAL_BANKROLL = 1000.0           # 首次落注时惰性初始化（brief 钉死）
 STRATEGY = "model_only"             # M3 只落 model_only 轨（model_persona 归 M4，§6.6）
 MODE = "paper"                      # 本 Provider 的模式（§7.2 双模式的 paper 侧）

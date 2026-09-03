@@ -1,8 +1,9 @@
 """B 线报告渲染（spec §7.1）——纯函数：只读 DB，无网络、无子进程。
 
-与并行落地的管线（T5 fixtures / T6 推荐生成 / T7 paper / T9 matchday）解耦：
-这里只消费表（recommendations join fixtures join teams、runs、meta、bets）和
-入参字典，不 import 上述任何模块——因此各流可独立演进。
+与并行落地的管线（T5 fixtures / T6 推荐生成 / T9 matchday）解耦：这里只消费表
+（recommendations join fixtures join teams、runs、meta、bets）和入参字典，不
+import 上述任何模块——因此各流可独立演进。唯一的跨模块依赖是 T7 paper 层的
+:func:`BANKROLL_KEY`（合流 follow-up：键名单源，不再自声明同名字面量）。
 
 persona 段在 M3 无实现，一律渲染占位一行（spec §6 推迟到 M4）。
 
@@ -14,8 +15,7 @@ import json
 
 from fa.db import get_meta
 from fa.model.fit import FitConfig
-
-BANKROLL_KEY = "paper_bankroll"
+from fa.pipeline.paper import BANKROLL_KEY
 
 # 半衰期缺省取 FitConfig 单源（M2 模型层），报告不再自造常量
 _DEFAULT_HALF_LIFE = FitConfig.half_life_days
@@ -30,10 +30,9 @@ _STRATEGY = {"model_only": "纯模型", "model_persona": "模型+persona"}
 # 价格比较容差：best_odds 经 JSON/浮点往返，1e-9 级差异视为未变，不产假「盘口移动」
 _ODDS_EPS = 1e-9
 
-# run summary 的样本量键名尚未被 T9 钉死（并行流），按常见命名容错识别；
-# 只认语义明确的训练样本键，避免把「场次数」误当样本量。
-# 都缺失时给中性占位，报告骨架不缺行。
-_TRAIN_KEYS = ("train_n", "n_train", "sample_n")
+# run summary 的样本量键名已由 T9 钉死为 train_n（summary 同时落 half_life）。
+# 缺失时给中性占位「样本量：未提供」，报告骨架不缺行。
+_TRAIN_KEYS = ("train_n",)
 
 _PERSONA_LINE = "persona 未接入（M4）"
 

@@ -642,13 +642,20 @@ def test_invalid_phase_is_rejected(env):
 # ---------------------------------------------------------------- 报告接缝
 
 
-def test_reporting_render_falls_back_while_t8_unmerged(monkeypatch):
-    """T8 未合流：渲染回占位串、推送回 False——绝不抛 ImportError。"""
-    monkeypatch.setattr(reporting, "_load_render", lambda name: None)
-    text = reporting.render_matchday_report(None, 7, "am", {}, 480, False)
-    assert isinstance(text, str) and "未合流" in text and "7" in text
-    monkeypatch.setattr(reporting, "_load_telegram", lambda: None)
-    assert reporting.send("正文") is False
+def test_reporting_binds_real_t8_modules_after_merge():
+    """T8 已合流：接缝降级分支已摘除——门面直引真实现，不再有 _load_* 兜底。"""
+    from fa.report import render as render_mod, telegram as telegram_mod
+
+    assert reporting._render is render_mod
+    assert reporting._telegram is telegram_mod
+    assert not hasattr(reporting, "_load_render")       # 惰性缝已消失
+    assert not hasattr(reporting, "_load_telegram")
+    assert not hasattr(reporting, "_UNMERGED")          # 占位串已消失
+    # 公共调用面仍是那三个渲染函数 + send/last_error（matchday/daily/cli 依赖）
+    assert callable(reporting.render_matchday_report)
+    assert callable(reporting.render_pm_update)
+    assert callable(reporting.render_settlement_brief)
+    assert callable(reporting.send) and callable(reporting.last_error)
 
 
 def test_reporting_render_passes_arguments_in_t8_order(monkeypatch):
@@ -660,30 +667,29 @@ def test_reporting_render_passes_arguments_in_t8_order(monkeypatch):
                     quota_left=quota_left, degraded=degraded)
         return "ok"
 
-    monkeypatch.setattr(reporting, "_load_render", lambda name: fake_render)
+    monkeypatch.setattr(reporting, "_render",
+                        types.SimpleNamespace(render_matchday_report=fake_render))
     conn, summary = object(), {"train_n": 3}
     assert reporting.render_matchday_report(
         conn, 7, "pm", summary, 12, True) == "ok"
     assert seen == {"conn": conn, "run_id": 7, "phase": "pm",
                     "summary": summary, "quota_left": 12, "degraded": True}
 
-    seen.clear()
-
     def fake_update(conn, am_run_id, pm_run_id, quota_left, degraded):
         seen["args"] = (conn, am_run_id, pm_run_id, quota_left, degraded)
         return "upd"
 
-    monkeypatch.setattr(reporting, "_load_render", lambda name: fake_update)
+    monkeypatch.setattr(reporting, "_render",
+                        types.SimpleNamespace(render_pm_update=fake_update))
     assert reporting.render_pm_update("c", 1, 2, 3, False) == "upd"
     assert seen["args"] == ("c", 1, 2, 3, False)
-
-    seen.clear()
 
     def fake_brief(settle):
         seen["settle"] = settle
         return "brief"
 
-    monkeypatch.setattr(reporting, "_load_render", lambda name: fake_brief)
+    monkeypatch.setattr(reporting, "_render",
+                        types.SimpleNamespace(render_settlement_brief=fake_brief))
     assert reporting.render_settlement_brief({"settled": 2}) == "brief"
     assert seen["settle"] == {"settled": 2}
 
@@ -692,7 +698,7 @@ def test_reporting_send_and_last_error_delegate_to_t8(monkeypatch):
     """合流后：send 透传返回值，last_error 读 LAST_TELEGRAM_ERROR。"""
     tg = types.SimpleNamespace(send_telegram=lambda text: text == "good",
                                LAST_TELEGRAM_ERROR=None)
-    monkeypatch.setattr(reporting, "_load_telegram", lambda: tg)
+    monkeypatch.setattr(reporting, "_telegram", tg)
     assert reporting.send("good") is True
     assert reporting.send("bad") is False
     tg.LAST_TELEGRAM_ERROR = "exit 1: boom"
