@@ -101,6 +101,48 @@ def test_audit_passes_early_evidence(db, tmp_path, monkeypatch):
     assert "违规 0" in a.output
 
 
+def _attr(conn, batch_id, match_id, date, evidence, tags=("injury",)):
+    """直插一条 status=ok 的归因行（审计用例不依赖 run→audit 全链路）。"""
+    conn.execute(
+        "INSERT INTO retro_attributions (batch_id, match_id, league, season,"
+        " date, selector, miss_tags_json, primary_tag, tags_confidence,"
+        " model_vs_market, evidence_json, digest, status, repaired, harness,"
+        " model, duration_s, input_pack_path, tag_set_version, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (batch_id, match_id, "E0", 2023, date, "manual",
+         json.dumps(list(tags)), tags[0], 0.5, "model_wrong",
+         json.dumps(evidence, ensure_ascii=False), "d", "ok", 0, "hermes",
+         None, 0.1, "x", "v1", "2026-09-04T00:00:00Z"))
+
+
+def test_audit_unparseable_date_is_violation(db):
+    """spec §8-1：证据须可证早于开球——不可解析一律违规，不靠字典序误打误撞。
+
+    0000-00-00 字典序早于比赛日（旧实现静默放行）；2024/04/19 因 `/`>`-`
+    被误判「不早于」（旧实现理由错）。另含富格式 ISO 时间戳应放行的容忍臂。
+    """
+    conn = connect(db)
+    conn.execute(
+        "INSERT INTO retro_runs (id, selector, params_json, n_selected, n_ok,"
+        " n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+        " VALUES (1, 'manual', '{}', 3, 3, 0, 0, 0, 0.3, 'now')")
+    _attr(conn, 1, 1, "2024-04-20",
+          [{"title": "幻觉日期", "date": "0000-00-00", "url": "https://e/1"}])
+    _attr(conn, 1, 2, "2024-04-21",
+          [{"title": "斜杠日期", "date": "2024/04/19", "url": "https://e/2"}])
+    # 富格式（ISO 时间戳）取前 10 字符可解析且早于比赛日 → 放行
+    _attr(conn, 1, 3, "2024-04-22",
+          [{"title": "富格式", "date": "2024-04-21T10:00:00Z",
+            "url": "https://e/3"}])
+    conn.commit()
+    conn.close()
+    a = runner.invoke(app, ["retro", "audit"])
+    assert a.exit_code == 0
+    assert "检查 3 行" in a.output and "违规 2" in a.output
+    assert "不可解析" in a.output
+    assert "0000-00-00" in a.output and "2024/04/19" in a.output
+
+
 def test_runs_lists_ledger(db, tmp_path, monkeypatch):
     from fa.retro import pipeline
     monkeypatch.setattr(

@@ -1,11 +1,15 @@
 """S0 分歧报告渲染 + S1 证据审计（设计 §8-1）。
 
-audit 规则：行含赛前成因标签（PREMATCH_CAUSE_TAGS）时，证据
-须非空且全部 date < 比赛日；date 取前 10 字符（容 LLM 输出富格式），
-不可解析计违规。违规率如实输出，不得为通过放宽规则（诚实条款）。
+audit 规则：行含赛前成因标签（PREMATCH_CAUSE_TAGS）时，证据须非空
+且全部 date 可证早于比赛日——date 先取前 10 字符（容 LLM 输出富格式
+如 ISO 时间戳），再经 date.fromisoformat 校验，**不可解析计违规**
+（幻觉日期如 0000-00-00 字典序早于比赛日，纯字典序会静默放行）；
+解析成功后 ISO 日期的字典序比较即安全。违规率如实输出，不得为通过
+放宽规则（诚实条款）。
 """
 import json
 import sqlite3
+from datetime import date
 
 from fa.retro.contract import PREMATCH_CAUSE_TAGS
 
@@ -43,7 +47,13 @@ def audit_batch(conn: sqlite3.Connection, batch_id=None) -> dict:
             continue
         for e in ev:
             d = str(e.get("date", ""))[:10]
-            if len(d) != 10 or d >= r["date"]:
+            try:
+                date.fromisoformat(d)
+            except ValueError:
+                violations.append((r["id"], r["match_id"],
+                                   f"证据日期不可解析: {e.get('date')!r}"))
+                break
+            if d >= r["date"]:
                 violations.append((r["id"], r["match_id"],
                                    f"证据日期 {e.get('date')!r} 不早于比赛日"))
                 break
