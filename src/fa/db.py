@@ -31,6 +31,8 @@ CREATE INDEX IF NOT EXISTS idx_bp_league_season
 # （外加 meta），绝不写 backtest_predictions / matches。与 _BP_TABLE 同理，
 # 新建与迁移共用同一常量，两条路径的表结构由构造即一致。
 # M4 persona 才落的位（verdict / confidence_delta / final_stake_frac）建库即可空。
+# 词表用 CHECK 钉死（mode/status/strategy/market/phase/type）——SQLite 无法
+# ALTER ADD CHECK，须趁表空时一次到位；fixtures.status 词表仍在演进，暂不加。
 _BLINE_TABLE = """
 CREATE TABLE IF NOT EXISTS fixtures (
     id           INTEGER PRIMARY KEY,
@@ -40,7 +42,8 @@ CREATE TABLE IF NOT EXISTS fixtures (
     kickoff_utc  TEXT NOT NULL,               -- ISO UTC 开球时间
     home_team_id INTEGER REFERENCES teams(id),   -- 未对齐时 NULL（spec §3.3）
     away_team_id INTEGER REFERENCES teams(id),
-    status       TEXT NOT NULL,               -- scheduled / finished
+    -- status 词表（scheduled/finished/…）随 T5 同步与 T7 结算演进，故不加 CHECK
+    status       TEXT NOT NULL,
     created_at   TEXT NOT NULL
 );
 
@@ -60,8 +63,11 @@ CREATE INDEX IF NOT EXISTS idx_odds_snap_event
 
 CREATE TABLE IF NOT EXISTS runs (
     id             INTEGER PRIMARY KEY,
-    type           TEXT NOT NULL,            -- daily / matchday_am / matchday_pm / backtest / manual
-    phase          TEXT,                     -- am / pm（仅 matchday run 有）
+    -- type 词表（spec §3.2）：am/pm 由 phase 承载，故 matchday 不再拆 _am/_pm
+    type           TEXT NOT NULL
+        CHECK (type IN ('daily', 'matchday', 'backtest', 'manual')),
+    phase          TEXT
+        CHECK (phase IN ('am', 'pm')),       -- 仅 matchday run 有
     started_at     TEXT NOT NULL,
     finished_at    TEXT,
     status         TEXT NOT NULL,            -- ok / skipped / failed / no_key
@@ -74,9 +80,12 @@ CREATE TABLE IF NOT EXISTS recommendations (
     id               INTEGER PRIMARY KEY,
     run_id           INTEGER NOT NULL REFERENCES runs(id),
     fixture_id       INTEGER NOT NULL REFERENCES fixtures(id),
-    strategy         TEXT NOT NULL,          -- model_only / model_persona
-    market           TEXT NOT NULL,          -- H / D / A / O2.5（每个结果一行）
-    phase            TEXT NOT NULL,          -- am / pm
+    strategy         TEXT NOT NULL
+        CHECK (strategy IN ('model_only', 'model_persona')),   -- §6.6 A/B 双轨
+    market           TEXT NOT NULL
+        CHECK (market IN ('H', 'D', 'A', 'O2.5')),             -- 每个结果一行
+    phase            TEXT NOT NULL
+        CHECK (phase IN ('am', 'pm')),                         -- §9.6 两窗
     model_p          REAL NOT NULL,
     market_p         REAL NOT NULL,
     best_odds        REAL NOT NULL,          -- 可成交最优价
@@ -95,12 +104,14 @@ CREATE INDEX IF NOT EXISTS idx_recs_run ON recommendations (run_id);
 CREATE TABLE IF NOT EXISTS bets (
     id                INTEGER PRIMARY KEY,
     recommendation_id INTEGER NOT NULL REFERENCES recommendations(id),
-    mode              TEXT NOT NULL,         -- paper / live（真实下注禁止，§12.2）
+    mode              TEXT NOT NULL
+        CHECK (mode IN ('paper', 'live')),   -- live 仅 fa bet add --live（§12.2）
     placed_at         TEXT NOT NULL,
     bookmaker         TEXT NOT NULL,
     odds_taken        REAL NOT NULL,
     stake             REAL NOT NULL,
-    status            TEXT NOT NULL,         -- pending / won / lost / void
+    status            TEXT NOT NULL
+        CHECK (status IN ('pending', 'won', 'lost', 'void')),
     settled_at        TEXT,
     return_amt        REAL,
     closing_odds      REAL,                  -- CLV 基准（Pinnacle 收盘）

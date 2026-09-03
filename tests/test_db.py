@@ -194,6 +194,102 @@ def _legacy_db(path, version: int, with_bp: bool) -> None:
     c.close()
 
 
+def test_bline_vocab_check_constraints(conn, bline_ids):
+    """词表 CHECK（§12.2 硬性质 + §6.6/§9.6 语义）：违例插入必被拒。"""
+    run_id, fx_id = bline_ids
+
+    def rec(**over):
+        cols = {"run_id": run_id, "fixture_id": fx_id,
+                "strategy": "model_only", "market": "H", "phase": "am",
+                "model_p": 0.5, "market_p": 0.45, "best_odds": 2.0,
+                "bookmaker": "Pinnacle", "edge": 0.05, "ev": 0.1,
+                "kelly_stake_frac": 0.01, "created_at": "2026-09-03T11:00:00Z"}
+        cols.update(over)
+        sql = "INSERT INTO recommendations ({}) VALUES ({})".format(
+            ", ".join(cols), ", ".join("?" * len(cols)))
+        return conn.execute(sql, tuple(cols.values()))
+
+    # recommendations 三个词表列
+    for bad in ({"strategy": "model_personae"}, {"strategy": ""},
+                {"market": "O1.5"}, {"market": "h2h"},
+                {"phase": "AM"}, {"phase": "pm "}):
+        with pytest.raises(sqlite3.IntegrityError):
+            rec(**bad)
+    # bets 两个词表列
+    rid = rec().lastrowid
+    for mode, status in (("simulated", "pending"), ("", "won"),
+                         ("paper", "push"), ("paper", "PENDING")):
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker, "
+                "odds_taken, stake, status) VALUES (?, ?, ?, 'Pinnacle', 2.0, "
+                "10.0, ?)", (rid, mode, "2026-09-03T11:00:05Z", status))
+    # runs.type：'matchday_am' 是 T9 最易误写的值——am/pm 归 phase，不拆 _am/_pm
+    for bad in ("matchday_am", "matchday_pm", "daily_pm", ""):
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO runs (type, started_at, status) VALUES (?, ?, 'ok')",
+                (bad, "2026-09-03T11:00:00Z"))
+    conn.rollback()
+
+
+def test_bline_vocab_accepts_all_legal_values(conn, bline_ids):
+    """合法词表全部可写入——CHECK 不得误伤。"""
+    run_id, fx_id = bline_ids
+    # recommendations：2 strategy × 4 market × 2 phase = 16 行，UNIQUE 不撞
+    for strategy in ("model_only", "model_persona"):
+        for market in ("H", "D", "A", "O2.5"):
+            for phase in ("am", "pm"):
+                conn.execute(
+                    "INSERT INTO recommendations (run_id, fixture_id, strategy, "
+                    "market, phase, model_p, market_p, best_odds, bookmaker, "
+                    "edge, ev, kelly_stake_frac, created_at) VALUES "
+                    "(?, ?, ?, ?, ?, 0.5, 0.45, 2.0, 'Pinnacle', 0.05, 0.1, "
+                    "0.01, '2026-09-03T11:00:00Z')",
+                    (run_id, fx_id, strategy, market, phase))
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 16
+
+    # runs：4 种 type；matchday 带 phase，其余不带
+    for t in ("daily", "matchday", "backtest", "manual"):
+        conn.execute(
+            "INSERT INTO runs (type, phase, started_at, status) VALUES (?, ?, "
+            "'2026-09-03T11:00:00Z', 'ok')",
+            (t, "am" if t == "matchday" else None))
+    assert conn.execute("SELECT COUNT(*) c FROM runs").fetchone()["c"] == 5
+
+    # bets：4 条 rec × 2 mode = 8 注，覆盖全部 4 种 status
+    # （用第二场 fixture，避开上面 16 行已占满的 UNIQUE 四元组）
+    fx2 = conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, status, "
+        "created_at) VALUES ('E0', 'ev-2', 'oddsapi', '2026-09-05T14:00:00Z', "
+        "'scheduled', '2026-09-03T11:00:00Z')").lastrowid
+    statuses = ("pending", "won", "lost", "void")
+    for i, market in enumerate(("H", "D", "A", "O2.5")):
+        r = conn.execute(
+            "INSERT INTO recommendations (run_id, fixture_id, strategy, market, "
+            "phase, model_p, market_p, best_odds, bookmaker, edge, ev, "
+            "kelly_stake_frac, created_at) VALUES "
+            "(?, ?, 'model_only', ?, 'am', 0.5, 0.45, 2.0, 'Pinnacle', 0.05, "
+            "0.1, 0.01, '2026-09-03T11:00:00Z')", (run_id, fx2, market))
+        for mode in ("paper", "live"):
+            conn.execute(
+                "INSERT INTO bets (recommendation_id, mode, placed_at, "
+                "bookmaker, odds_taken, stake, status) VALUES "
+                "(?, ?, '2026-09-03T11:00:05Z', 'Pinnacle', 2.0, 10.0, ?)",
+                (r.lastrowid, mode, statuses[i]))
+    assert conn.execute("SELECT COUNT(*) c FROM bets").fetchone()["c"] == 8
+    assert conn.execute(
+        "SELECT COUNT(DISTINCT mode) c FROM bets").fetchone()["c"] == 2
+    assert conn.execute(
+        "SELECT COUNT(DISTINCT status) c FROM bets").fetchone()["c"] == 4
+    # fixtures.status 词表未约束——任意标记都收，由 T5/T7 演进
+    conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, status, "
+        "created_at) VALUES ('E0', 'ev-x', 'oddsapi', '2026-09-04T14:00:00Z', "
+        "'some-future-state', '2026-09-03T11:00:00Z')")
+
+
 def test_migrate_up_v1_adds_everything(tmp_path):
     """_migrate_up 单独跑就能把 v1 库补齐到 v3（不依赖 _SCHEMA 兜底）。"""
     p = tmp_path / "v1.db"
@@ -256,6 +352,20 @@ def test_migrate_and_fresh_schemas_match(tmp_path):
 # ---------------------------------------------------------------------------
 # B 线五表 DDL 语义（brief 逐条）
 # ---------------------------------------------------------------------------
+
+@pytest.fixture
+def bline_ids(conn):
+    """一条合法 run + fixture 的 id，供词表 CHECK 用例做合法父引用。"""
+    run = conn.execute(
+        "INSERT INTO runs (type, phase, started_at, status) VALUES "
+        "('matchday', 'am', '2026-09-03T11:00:00Z', 'ok')")
+    fx = conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, status, "
+        "created_at) VALUES ('E0', 'ev-1', 'oddsapi', '2026-09-04T14:00:00Z', "
+        "'scheduled', '2026-09-03T11:00:00Z')")
+    conn.commit()
+    return run.lastrowid, fx.lastrowid
+
 
 def test_backtest_predictions_schema_unchanged(conn):
     """B 线边界烟测：A 线独占表的列集/约束在 schema v3 下不得有任何变动。"""
@@ -325,7 +435,7 @@ def test_bline_fk_chain_roundtrip(conn):
     run = conn.execute(
         "INSERT INTO runs (type, phase, started_at, status, credits_before, "
         "credits_after, summary) VALUES "
-        "('matchday_am', 'am', '2026-09-03T11:00:00Z', 'ok', 500, 490, '{}')")
+        "('matchday', 'am', '2026-09-03T11:00:00Z', 'ok', 500, 490, '{}')")
     fx = conn.execute(
         "INSERT INTO fixtures (league, event_key, source, kickoff_utc, "
         "home_team_id, away_team_id, status, created_at) VALUES "
