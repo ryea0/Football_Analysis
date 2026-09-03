@@ -30,7 +30,7 @@ def replay(monkeypatch):
     """把 _http_get 换成夹具回放，并记录 (url, params) 供断言。
 
     额度头两次取不同值且**最小值不在末位**（483 → 487），以钉死「多 region 取
-    最小值」而非「取最后一次」。
+    最小值」而非「取最后一次」（真实额度单调递减，此处只为钉死选取规则）。
     """
     calls = []
 
@@ -235,6 +235,8 @@ def test_best_prices_omits_unquoted_outcome():
 
 def test_malformed_event_is_skipped(monkeypatch):
     """缺 id / 队名的事件无法对齐下注，跳过且不影响其余事件解析。"""
+    from fa.pipeline.odds_api import LAST_FETCH_STATS
+
     events = [
         {"id": "ev_bad", "commence_time": "2026-09-05T14:00:00Z", "bookmakers": []},
         _fixture_events()[0],
@@ -247,6 +249,11 @@ def test_malformed_event_is_skipped(monkeypatch):
     snaps, _ = fetch_odds("E0", regions=("eu",))
     assert {s.event_key for s in snaps} == {"ev1"}
     assert len(snaps) == 4
+    assert LAST_FETCH_STATS == {
+        "events": 1,                                    # 坏事件不计入「事件数」（丢弃即不进口径）
+        "snapshots": 4,
+        "dropped_totals_outcomes": 2,                   # 随 ev1 带进来的 3.5 线仍照常计数
+    }
 
 
 # ---------------------------------------------------------------- 额度记账（调用方落库）
@@ -285,13 +292,17 @@ def test_refresh_quota_false_skips_quota(monkeypatch):
 
 
 def test_fetch_odds_never_persists_quota(replay, monkeypatch):
-    """控制器裁定：fetch_odds 只取数，meta 落库归调用方（Task 5/9）。"""
+    """控制器裁定：fetch_odds 只取数，meta/快照落库归调用方（Task 5/9）。
+
+    守卫打在真实 I/O 入口 sqlite3.connect（fa.db 一切读写都经它）——
+    而非某个具体函数名，模块改用别的写库路径也照样被拦。
+    """
 
     def boom(*args, **kwargs):
         raise AssertionError("fetch_odds 不得触碰 DB")
 
-    monkeypatch.setattr("fa.db.set_meta", boom)
-    monkeypatch.setattr("fa.db.get_meta", boom)
+    monkeypatch.setattr("fa.db.sqlite3.connect", boom)
+    monkeypatch.setattr("urllib.request.urlopen", boom)  # 兜底：真触网也立刻暴露
     _, quota = fetch_odds("E0", regions=("eu",))
     assert quota == 483                                 # 落库归调用方，此处只交出数值
 
@@ -310,9 +321,31 @@ def test_missing_key_raises_without_network(monkeypatch):
 
 
 def test_unknown_league_raises(monkeypatch):
+    def boom(*a, **k):
+        raise AssertionError("未知联赛不得触网")
+
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get", boom)  # 未来重排守卫顺序也不触网
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
     with pytest.raises(OddsApiError, match="Z0"):
         fetch_odds("Z0")
+
+
+def test_stats_empty_after_config_errors(replay, monkeypatch):
+    """无 key / 未知联赛的失败同样不留旧统计（clear 提到函数入口）。"""
+    from fa.pipeline.odds_api import LAST_FETCH_STATS
+
+    fetch_odds("E0", regions=("eu",))
+    assert LAST_FETCH_STATS["snapshots"] == 8
+
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    with pytest.raises(OddsApiError, match="未配置"):
+        fetch_odds("E0", regions=("eu",))
+    assert LAST_FETCH_STATS == {}
+
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    with pytest.raises(OddsApiError, match="Z0"):
+        fetch_odds("Z0")
+    assert LAST_FETCH_STATS == {}
 
 
 def test_fetch_odds_propagates_provider_error(monkeypatch):
@@ -414,6 +447,20 @@ def test_http_get_non_json_body_raises(monkeypatch):
     from fa.pipeline.odds_api import _http_get
 
     with pytest.raises(OddsApiError, match="JSON"):
+        _http_get("https://api.the-odds-api.com/v4/x", {})
+
+
+def test_http_get_truncated_response_raises(monkeypatch):
+    """连接被截断（IncompleteRead/BadStatusLine 等 HTTPException）也归一为 OddsApiError。"""
+    import http.client
+
+    def boom(url, timeout):
+        raise http.client.IncompleteRead(b"partial body")
+
+    _patch_urlopen(monkeypatch, boom)
+    from fa.pipeline.odds_api import _http_get
+
+    with pytest.raises(OddsApiError, match="网络异常"):
         _http_get("https://api.the-odds-api.com/v4/x", {})
 
 

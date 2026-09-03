@@ -12,6 +12,7 @@ Provider 抽象（spec §9.8）：`fetch_odds`（别名 `OddsApiProvider`）即 
 
 from __future__ import annotations
 
+import http.client
 import json
 import urllib.error
 import urllib.request
@@ -83,6 +84,7 @@ def fetch_odds(
 
     429 / 其他 HTTP 错误 / 网络异常上抛 :class:`OddsApiError`。
     """
+    LAST_FETCH_STATS.clear()                        # 任何失败（无 key / 未知联赛 / 网络）都留 {}
     api_key = odds_api_key()
     if not api_key:
         raise OddsApiError("ODDS_API_KEY 未配置")
@@ -91,7 +93,6 @@ def fetch_odds(
         known = ", ".join(sorted(ODDS_SPORT_KEYS))
         raise OddsApiError(f"未知联赛: {league}（可用: {known}）")
 
-    LAST_FETCH_STATS.clear()                        # 任一 region 失败 → 整次记为未完成
     stats = {"events": 0, "snapshots": 0, "dropped_totals_outcomes": 0}
     quotas: list[int] = []
     snaps: list[OddsSnapshot] = []
@@ -163,8 +164,9 @@ def best_prices(snaps: list[OddsSnapshot], market: str) -> dict[str, tuple[float
 def _http_get(url: str, params: dict[str, str]) -> tuple[Any, dict[str, str]]:
     """唯一触网点：GET ``url?params``，返回 ``(解码后的 JSON 体, 小写键响应头)``。
 
-    429 → 额度耗尽/限流；其他 HTTP 错误、网络异常、非 JSON 响应同样上抛
-    :class:`OddsApiError`。异常文案不含 query（apiKey 不泄漏）。
+    429 → 额度耗尽/限流；其他 HTTP 错误、网络异常（含连接被截断的
+    ``http.client.HTTPException``，如 IncompleteRead/BadStatusLine）、非 JSON
+    响应同样上抛 :class:`OddsApiError`。异常文案不含 query（apiKey 不泄漏）。
     """
     full_url = f"{url}?{urlencode(params)}" if params else url
     try:
@@ -174,7 +176,7 @@ def _http_get(url: str, params: dict[str, str]) -> tuple[Any, dict[str, str]]:
     except urllib.error.HTTPError as e:          # HTTPError 是 URLError 子类，须先接
         detail = f"HTTP {e.code}（额度耗尽或限流）" if e.code == 429 else f"HTTP {e.code} {e.reason}"
         raise OddsApiError(f"Odds API 请求失败: {detail}") from e
-    except (urllib.error.URLError, TimeoutError, OSError) as e:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as e:
         raise OddsApiError(f"Odds API 网络异常: {e}") from e
     try:
         payload = json.loads(body)
@@ -195,16 +197,19 @@ def _quota_remaining(headers: dict[str, str]) -> int | None:
 
 
 def _parse_events(payload: list, league: str, region: str) -> tuple[int, list[OddsSnapshot], int]:
-    """解析一个 region 的事件数组，返回 ``(事件数, 快照列表, 被滤掉的非 2.5 线条数)``。"""
+    """解析一个 region 的事件数组，返回 ``(事件数, 快照列表, 被滤掉的非 2.5 线条数)``。
+
+    事件数只计**可解析**事件——缺 id/队名的坏事件不计入（丢弃即不进口径）。
+    """
     stats_events = 0
     dropped_total = 0
     snaps: list[OddsSnapshot] = []
     for event in payload:
-        stats_events += 1
         home_name = event.get("home_team") or ""
         away_name = event.get("away_team") or ""
         if not event.get("id") or not home_name or not away_name:
             continue                             # 缺 id/队名的事件无法对齐下注，跳过
+        stats_events += 1
         for bookmaker in event.get("bookmakers") or []:
             book_key = bookmaker.get("key") or ""
             for market in bookmaker.get("markets") or []:
