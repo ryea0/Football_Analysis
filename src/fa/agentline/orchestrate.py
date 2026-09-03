@@ -12,7 +12,11 @@ from fa.agentline.contract import parse_prediction
 from fa.agentline.runner import _PROFILE_LINE, build_prompt
 from fa.agentline.store import save_prediction, save_run
 
-_HARNESS = "dsh (版本见附录 A)"      # spike 后可换成 dsh --version 的实测值
+# 审计常量（设计 §6 harness/model 列）：值来自 Task 2 spike 实测（附录 A）——
+# dsh 版本 0.1.1-rc.2（npm 钉死版，见附录 A.1）；模型为 ARK plan 端点的
+# ark-code-latest（附录 A.3，与 Hermes 同源同凭证）。
+MODEL = "ark-code-latest"
+_HARNESS = "dsh 0.1.1-rc.2"
 
 
 def _status_of(parsed: dict, run_err: str | None) -> tuple[dict, str]:
@@ -41,8 +45,8 @@ def run_line(conn: sqlite3.Connection, line: str, info_dir: Path,
             build_prompt(info, line), profile)
         parsed, status = _status_of(parse_prediction(out or ""), err)
         save_prediction(conn, mid, line, parsed, out or "", _HARNESS,
-                        "flash", dur)
+                        MODEL, dur)
         counts[status] += 1
-    save_run(conn, line, profile, "flash", counts,
+    save_run(conn, line, profile, MODEL, counts,
              {"n_todo": len(todo), "info_dir": str(info_dir)})
     return counts
