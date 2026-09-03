@@ -11,6 +11,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from fa.config import persona_search_enabled
 from fa.persona import PersonaError
 
 _MARKET_TO_KEY = {"H": "p_home", "D": "p_draw", "A": "p_away"}
@@ -18,7 +19,7 @@ _MARKET_TO_KEY = {"H": "p_home", "D": "p_draw", "A": "p_away"}
 _FORM_LEN = 5
 _H2H_LEN = 3
 
-_CONTRACT_CLAUSE = """
+_CONTRACT_CLAUSE_BASE = """
 
 ## 输出契约（必须严格遵守）
 输出必须是且仅是一个 JSON 对象（不要代码围栏、不要任何多余文字），字段：
@@ -29,12 +30,26 @@ _CONTRACT_CLAUSE = """
 不合规的输出会被程序整场丢弃（该场按纯模型处理），宁保守勿越界。
 """
 
+# 过渡条款（stopgap，T15 fix round 1）：web_search 不可用时防 derail——m4-report
+# §2.1 实测 27 调用 13 例失败全是模型先调 web_search（标记式/JSON 式/叙述态）。
+# 根治 = 配搜索后端 key（FA_PERSONA_SEARCH=1，本句自动退出 prompt）。
+_NO_SEARCH_CLAUSE = ("本环境无网络搜索可用：不要调用任何工具（包括 web_search），"
+                     "直接基于本场输入 JSON 给出判断。\n")
+
+
+def _contract_clause() -> str:
+    """输出契约两形态：``persona_search_enabled()`` 为真保持原样（检索合法）；
+    为假（默认）追加禁工具句。"""
+    if persona_search_enabled():
+        return _CONTRACT_CLAUSE_BASE
+    return _CONTRACT_CLAUSE_BASE + "\n" + _NO_SEARCH_CLAUSE
+
 
 def build_prompt(persona_md: str, input_obj: dict) -> str:
     """prompt = persona 全文 + 该场输入 JSON + 输出契约说明（spec §6.2）。"""
     return (persona_md.rstrip() + "\n\n## 本场输入\n```json\n"
             + json.dumps(input_obj, ensure_ascii=False, indent=2)
-            + "\n```" + _CONTRACT_CLAUSE)
+            + "\n```" + _contract_clause())
 
 
 # ---------------------------------------------------------------- 输入组装

@@ -9,6 +9,7 @@
 """
 import pytest
 
+from fa.config import persona_search_enabled
 from fa.db import connect, init_db
 from fa.persona import PersonaError
 from fa.persona.contract import build_input, build_prompt
@@ -243,3 +244,33 @@ def test_build_prompt_strips_persona_tail_and_keeps_non_ascii():
     prompt = build_prompt("PERSONA 全文\n\n", {"league": "D1", "h2h": "拜人 vs 多人"})
     assert "PERSONA 全文\n\n## 本场输入" in prompt     # 尾部空白剥平，不堆空行
     assert '"h2h": "拜人 vs 多人"' in prompt           # ensure_ascii=False，中文不转义
+
+
+def test_build_prompt_bans_tools_when_search_off(monkeypatch):
+    """默认（FA_PERSONA_SEARCH 未设 = off）prompt 含禁工具过渡条款（T15 fix
+    round 1：实跑 27 调用 13 例 derail 的对症缓解，stopgap）。"""
+    monkeypatch.delenv("FA_PERSONA_SEARCH", raising=False)
+    prompt = build_prompt("PERSONA 全文", {"league": "D1"})
+    assert "不要调用任何工具（包括 web_search）" in prompt
+    # 条款追加在输出契约末尾，契约主体次序不变
+    assert prompt.index("宁保守勿越界") < prompt.index("不要调用任何工具")
+
+
+def test_build_prompt_keeps_tools_allowed_when_search_on(monkeypatch):
+    """FA_PERSONA_SEARCH=1（M5 配好搜索后端 key 后）条款自动退出——检索重新合法。"""
+    monkeypatch.setenv("FA_PERSONA_SEARCH", "1")
+    prompt = build_prompt("PERSONA 全文", {"league": "D1"})
+    assert "不要调用任何工具" not in prompt
+    assert "宁保守勿越界" in prompt                    # 契约主体仍在
+
+
+def test_persona_search_enabled_truth_table(monkeypatch):
+    """开关解析：默认 off；1/true/yes/on 不分大小写为 on；其余含空串/乱值 off。"""
+    monkeypatch.delenv("FA_PERSONA_SEARCH", raising=False)
+    assert persona_search_enabled() is False
+    for truthy in ("1", "true", "YES", "On"):
+        monkeypatch.setenv("FA_PERSONA_SEARCH", truthy)
+        assert persona_search_enabled() is True, truthy
+    for falsy in ("", " ", "0", "false", "junk"):
+        monkeypatch.setenv("FA_PERSONA_SEARCH", falsy)
+        assert persona_search_enabled() is False, falsy

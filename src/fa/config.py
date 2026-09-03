@@ -99,6 +99,17 @@ def persona_timeout() -> float:
         return PERSONA_TIMEOUT_S
 
 
+def persona_search_enabled() -> bool:
+    """web_search 对 persona 是否可用（env ``FA_PERSONA_SEARCH``，默认 off）。
+
+    判定权交运维：M5 配好搜索后端 key 时置 1——届时 :func:`build_prompt` 的
+    禁工具过渡条款自动消失（stopgap，根治 = 配 key；T15 fix round 1，
+    m4-report §2.1 实测 derail 13/27 的对症缓解）。
+    """
+    return os.environ.get("FA_PERSONA_SEARCH", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
 def persona_path(league: str) -> Path:
     """联赛 → personas/ 下的人格文件路径（spec §9.2）。"""
     try:
