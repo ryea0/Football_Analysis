@@ -229,7 +229,8 @@ def test_am_full_chain(env):
     out = matchday.run_matchday(c, "am", [LEAGUE])
 
     assert out["status"] == "ok" and out["phase"] == "am"
-    assert out["fixtures"] == 1 and out["recs"] == 1 and out["bets"] == 1
+    # A1 双落：1 个过门槛 market × 2 轨 = 2 条推荐；落注仍只落 model_only 轨
+    assert out["fixtures"] == 1 and out["recs"] == 2 and out["bets"] == 1
     assert out["quota_left"] == QUOTA
     assert out["degraded"] is False and out["sent"] is True
     assert out["am_run_id"] is None
@@ -254,7 +255,7 @@ def test_am_full_chain(env):
     summary = summary_of(c, out["run_id"])
     assert summary["train_n"] >= 64                 # T8 报告消费的样本量键
     assert summary["half_life"] == FitConfig().half_life_days
-    assert summary["fixtures"] == 1 and summary["recs"] == 1 and summary["bets"] == 1
+    assert summary["fixtures"] == 1 and summary["recs"] == 2 and summary["bets"] == 1
     assert summary["unknown"] == []
     assert summary["telegram"] == {"sent": True, "error": None}
     assert summary["report"] == "matchday"
@@ -324,7 +325,7 @@ def test_persisted_window_fixture_skips_probe_and_syncs(env):
 
     assert env.events == []                          # 探测被跳过（零额外请求）
     assert env.fetch == [LEAGUE]
-    assert out["status"] == "ok" and out["recs"] == 1 and out["bets"] == 1
+    assert out["status"] == "ok" and out["recs"] == 2 and out["bets"] == 1  # A1 双落
     assert "probe" not in summary_of(c, out["run_id"])
 
 
@@ -337,7 +338,7 @@ def test_probe_finding_event_triggers_full_sync(env):
 
     assert env.events == [LEAGUE]
     assert env.fetch == [LEAGUE]                     # 有赛事 → 照常计费拉盘
-    assert out["status"] == "ok" and out["recs"] == 1 and out["bets"] == 1
+    assert out["status"] == "ok" and out["recs"] == 2 and out["bets"] == 1  # A1 双落
     assert out["fixtures"] == 1
     assert summary_of(c, out["run_id"])["probe"] == "found"
 
@@ -440,7 +441,7 @@ def test_exception_mid_run_rolls_back_stage_writes(env, monkeypatch):
     # 已提交的阶段产物不受回滚影响（sync/推荐各自 commit 过）
     assert reader.execute("SELECT COUNT(*) c FROM fixtures").fetchone()["c"] == 1
     assert reader.execute(
-        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 1
+        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 2  # A1 双落
     row = reader.execute(
         "SELECT status, summary FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     assert row["status"] == "failed" and "落注炸了" in row["summary"]
@@ -567,14 +568,16 @@ def test_same_phase_rerun_refreshes_run_id_attribution(env):
     env.fetch.clear()
     second = matchday.run_matchday(c, "am", [LEAGUE])
 
-    assert second["status"] == "ok" and second["recs"] == 1
+    assert second["status"] == "ok" and second["recs"] == 2   # A1 双落
     rows = [dict(r) for r in c.execute(
-        "SELECT id, run_id FROM recommendations WHERE phase='am'")]
-    assert len(rows) == 1
-    assert rows[0]["run_id"] == second["run_id"] != first["run_id"]
+        "SELECT id, run_id, strategy FROM recommendations WHERE phase='am'")]
+    assert len(rows) == 2                                     # 两轨各一行，原地刷新
+    assert {r["strategy"] for r in rows} == {"model_only", "model_persona"}
+    assert all(r["run_id"] == second["run_id"] != first["run_id"] for r in rows)
     bets = bets_of(c)
     assert len(bets) == 1
-    assert bets[0]["recommendation_id"] == rows[0]["id"]
+    assert bets[0]["recommendation_id"] == next(
+        r["id"] for r in rows if r["strategy"] == "model_only")
 
 
 # ---------------------------------------------------------------- 降级与失败
@@ -591,7 +594,7 @@ def test_sync_failure_degrades_to_existing_snapshots(env):
 
     assert out["status"] == "degraded_ok"
     assert out["degraded"] is True and out["fixtures"] == 0
-    assert out["recs"] == 1                          # 旧快照照常出推荐
+    assert out["recs"] == 2                          # 旧快照照常出推荐（A1 双落）
     assert any("Odds API" in r
                for r in summary_of(c, out["run_id"])["degraded_reasons"])
 
@@ -645,9 +648,9 @@ def test_tg_failure_does_not_lose_recs_or_bets(env, monkeypatch):
     out = matchday.run_matchday(c, "am", [LEAGUE])
 
     assert out["status"] == "ok" and out["sent"] is False
-    assert out["recs"] == 1 and out["bets"] == 1
+    assert out["recs"] == 2 and out["bets"] == 1     # A1 双落
     assert c.execute(
-        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 1
+        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 2
     assert len(bets_of(c)) == 1
     assert summary_of(c, out["run_id"])["telegram"] == {
         "sent": False, "error": "exit 1: send failed"}
@@ -838,7 +841,7 @@ def test_cli_matchday_reports_counts_and_push(tmp_path, monkeypatch):
 
         assert result.exit_code == 0, result.output
         assert "am" in result.output and "ok" in result.output
-        assert "推荐 1 条" in result.output and "落注 1 注" in result.output
+        assert "推荐 2 条" in result.output and "落注 1 注" in result.output  # A1 双落
         assert "推送" in result.output
     finally:
         c.close()
