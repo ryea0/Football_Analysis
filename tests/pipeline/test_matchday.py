@@ -748,12 +748,17 @@ def test_cli_skipped_and_degraded_prints_empty_run_reason(tmp_path, monkeypatch)
 
 def test_cli_matchday_no_key_exits_zero(tmp_path, monkeypatch):
     """无 key：优雅输出 + exit 0（T12 冒烟口径），runs 记 'no_key'。"""
+    import fa.config as config
+
     from typer.testing import CliRunner
     from fa.cli import app
 
     db = tmp_path / "t.db"
     monkeypatch.setenv("FA_DB", str(db))
     monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    # CLI 启动会读 project_root/.env（spec §9.4）——指到 tmp_path，否则真机上
+    # 仓库根恰好有 .env 时会把 key 重新装回环境，无 key 分支永远测不到
+    monkeypatch.setattr(config, "project_root", lambda: tmp_path)
     init_db(db)
     monkeypatch.setattr(fixtures_mod, "fetch_odds",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("触网")))

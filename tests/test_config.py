@@ -92,6 +92,45 @@ def test_load_env_defaults_to_project_root_dotenv(clean_env, tmp_path, monkeypat
     assert load_env() == {"FA_ENV_PROBE": "root-dotenv"}
 
 
+def test_cli_startup_loads_project_root_dotenv(clean_env, tmp_path, monkeypatch):
+    """CLI 启动即读 project_root/.env——spec §9.4「key 走 .env」的唯一接线点。
+
+    没有这行接线，.env 是死配置：程序从不调用 load_env，用户按文档把 key 写进
+    .env 后 `fa run matchday` 依然 no_key，hermes cron（§9.6）的裸环境更拿不到。
+    load_env 直写 os.environ（见上 test_load_env_write_escapes_monkeypatch_undo），
+    故用 clean_env 的快照兜底还原；monkeypatch 只负责把 project_root 指到 tmp_path。
+    """
+    from typer.testing import CliRunner
+
+    from fa.cli import app
+
+    monkeypatch.setattr(config, "project_root", lambda: tmp_path)
+    _write_env(tmp_path, "ODDS_API_KEY=from-dotenv-123\n")
+    assert odds_api_key() is None                    # 前置：文件此时还没被读
+
+    result = CliRunner().invoke(app, ["version"])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["ODDS_API_KEY"] == "from-dotenv-123"
+    assert odds_api_key() == "from-dotenv-123"
+
+
+def test_cli_env_does_not_override_exported_key(clean_env, tmp_path, monkeypatch):
+    """load_env 的 setdefault 语义穿过 CLI：shell 已导出的 key 优先于 .env。"""
+    from typer.testing import CliRunner
+
+    from fa.cli import app
+
+    monkeypatch.setattr(config, "project_root", lambda: tmp_path)
+    clean_env.setenv("ODDS_API_KEY", "from-shell")
+    _write_env(tmp_path, "ODDS_API_KEY=from-dotenv-123\n")
+
+    result = CliRunner().invoke(app, ["version"])
+
+    assert result.exit_code == 0, result.output
+    assert odds_api_key() == "from-shell"
+
+
 def test_odds_api_key_from_env(clean_env):
     clean_env.setenv("ODDS_API_KEY", "k-123")
     assert odds_api_key() == "k-123"

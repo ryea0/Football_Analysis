@@ -4,6 +4,7 @@ import typer
 
 from fa.data.audit import audit_sample
 from fa.data.sync import sync_history
+from fa.config import load_env
 from fa.db import connect, init_db
 from fa.pipeline.align import rank_candidates
 
@@ -13,6 +14,11 @@ app = typer.Typer(help="fa — 足球量化分析与投注推荐（设计见 spe
 @app.callback()
 def main() -> None:
     """fa — 足球量化分析与投注推荐（设计见 spec.md）"""
+    # spec §9.4「ODDS_API_KEY 走 .env」的唯一接线点：CLI 每次启动读 project_root/.env
+    # 进 os.environ。setdefault 语义 → shell 已导出的键优先，重复加载幂等。
+    # 没有这行，.env 是死配置——hermes cron（§9.6）的裸环境永远拿不到 key，
+    # 每日 run 全部 no_key（T12 E2E 实测发现的缺陷）。
+    load_env()
 
 
 @app.command()
