@@ -220,9 +220,9 @@ hermes cron（调度）
   },
   "form": {
     "home_last5": ["W", "W", "D", "L", "W"],
-    "away_last5": ["D", "L", "W", "W", "L"],
-    "home_pos": 2, "away_pos": 5
+    "away_last5": ["D", "L", "W", "W", "L"]
   },
+  "home_pos": 2, "away_pos": 5,
   "h2h_recent": [{ "date": "2026-04-12", "score": "4-2", "home": "Bayern Munich" }]
 }
 ```

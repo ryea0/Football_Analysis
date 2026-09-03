@@ -126,7 +126,8 @@ def _last5(conn: sqlite3.Connection, league: str, team_id: int,
 
 def _h2h(conn: sqlite3.Connection, league: str, home_id: int, away_id: int,
          before_date: str) -> list[dict]:
-    """近 3 次交手，近的在前；``score``/``home`` 按当场的真实主客方位写。"""
+    """近 3 次交手，近的在前；``score``/``home`` 按当场的真实主客方位写。
+    交手限定同联赛（M1 库只含五大联赛联赛场）。"""
     rows = conn.execute(
         "SELECT m.date, m.fthg, m.ftag, t.name AS home FROM matches m"
         " JOIN teams t ON t.id = m.home_team_id"
@@ -159,3 +160,98 @@ def _positions(conn: sqlite3.Connection, league: str, season: int,
     order = sorted(stats,
                    key=lambda t: (-stats[t][0], -stats[t][1], -stats[t][2], t))
     return {team: i + 1 for i, team in enumerate(order)}
+
+
+# ---------------------------------------------------------------- 输出提取与校验
+
+
+class PersonaContractError(PersonaError):
+    """输出提取/校验失败（§6.5 该场可降级）：``reason`` ∈ {"extract", "contract"}。"""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(f"{reason}: {detail}" if detail else reason)
+        self.reason = reason
+
+
+def extract_json(text: str) -> dict:
+    """stdout → JSON 对象：整体 → 围栏 → 平衡花括号扫描（字符串内 } 不误判）。"""
+    stripped = (text or "").strip()
+    for candidate in (stripped, _fenced(stripped)):
+        if candidate is not None:
+            try:
+                obj = json.loads(candidate)
+            except ValueError:
+                continue
+            if isinstance(obj, dict):
+                return obj
+    obj = _balanced_scan(stripped)
+    if obj is not None:
+        return obj
+    raise PersonaContractError(
+        "extract", f"stdout 无合法 JSON（前 80 字：{stripped[:80]!r}）")
+
+
+def _fenced(text: str) -> str | None:
+    """取第一段完整 ```json 围栏内容；无围栏或无闭合则 None（保守不硬拆）。"""
+    if "```" not in text:
+        return None
+    parts = text.split("```")
+    for i in range(1, len(parts) - 1, 2):        # 围栏内容在奇数段
+        body = parts[i]
+        body = body[4:] if body.lstrip().startswith("json") else body
+        if "{" in body:
+            return body.strip()
+    return None
+
+
+def _balanced_scan(text: str) -> dict | None:
+    """自首个 ``{`` 起做平衡花括号扫描；字符串内的花括号/引号不计数。"""
+    start = text.find("{")
+    while start != -1:
+        depth, in_str, escape = 0, False, False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+            elif ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(text[start:i + 1])
+                    except ValueError:
+                        break                      # 该起点不成 JSON，试下一个 {
+                    if isinstance(obj, dict):
+                        return obj
+        start = text.find("{", start + 1)
+    return None
+
+
+def validate_output(obj: dict) -> None:
+    """§6.3 逐条；veto 的 delta 不在此卡（apply 强制置 0，设计文档 §5 裁定）。"""
+    if obj.get("verdict") not in ("agree", "downweight", "veto"):
+        raise PersonaContractError("contract", f"verdict 词表外：{obj.get('verdict')!r}")
+    delta = obj.get("confidence_delta")
+    if not isinstance(delta, (int, float)) or isinstance(delta, bool):
+        raise PersonaContractError("contract", f"confidence_delta 非数值：{delta!r}")
+    if not -0.15 <= delta <= 0.15:
+        raise PersonaContractError("contract", f"confidence_delta 超值域：{delta}")
+    if obj["verdict"] == "downweight" and delta >= 0:
+        raise PersonaContractError("contract", f"downweight 须 <0：{delta}")
+    factors = obj.get("key_factors")
+    if (not isinstance(factors, list) or not 1 <= len(factors) <= 5
+            or not all(isinstance(f, str) for f in factors)):
+        raise PersonaContractError("contract", f"key_factors 须 1–5 条字符串：{factors!r}")
+    if any(len(f) > 50 for f in factors):
+        raise PersonaContractError("contract", "key_factors 单条超 50 字")
+    report = obj.get("report_md")
+    if not isinstance(report, str) or len(report) > 500:
+        raise PersonaContractError("contract", f"report_md 须 ≤500 字：{report!r}")
