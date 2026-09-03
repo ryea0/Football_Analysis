@@ -1,0 +1,143 @@
+[
+  {
+    "id": "ev1",
+    "sport_key": "soccer_epl",
+    "sport_title": "EPL",
+    "commence_time": "2026-09-05T14:00:00Z",
+    "home_team": "Chelsea",
+    "away_team": "Arsenal",
+    "bookmakers": [
+      {
+        "key": "pinnacle",
+        "title": "Pinnacle",
+        "last_update": "2026-09-03T08:00:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-09-03T08:00:00Z",
+            "outcomes": [
+              {"name": "Chelsea", "price": 2.1},
+              {"name": "Draw", "price": 3.5},
+              {"name": "Arsenal", "price": 3.6}
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-09-03T08:00:00Z",
+            "outcomes": [
+              {"name": "Over", "price": 1.95, "point": 2.5},
+              {"name": "Under", "price": 1.95, "point": 2.5},
+              {"name": "Over", "price": 2.6, "point": 3.5},
+              {"name": "Under", "price": 1.5, "point": 3.5}
+            ]
+          },
+          {
+            "key": "spreads",
+            "last_update": "2026-09-03T08:00:00Z",
+            "outcomes": [
+              {"name": "Chelsea", "price": 1.9, "point": -0.5},
+              {"name": "Arsenal", "price": 1.95, "point": 0.5}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "betfair_ex_eu",
+        "title": "Betfair Exchange",
+        "last_update": "2026-09-03T07:45:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-09-03T07:45:00Z",
+            "outcomes": [
+              {"name": "Chelsea", "price": 2.15},
+              {"name": "Draw", "price": 3.4},
+              {"name": "Arsenal", "price": 3.75}
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-09-03T07:45:00Z",
+            "outcomes": [
+              {"name": "Over", "price": 1.92, "point": 2.5},
+              {"name": "Under", "price": 2.0, "point": 2.5}
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": "ev2",
+    "sport_key": "soccer_epl",
+    "sport_title": "EPL",
+    "commence_time": "2026-09-06T16:30:00Z",
+    "home_team": "Bayern Munich",
+    "away_team": "Borussia Dortmund",
+    "bookmakers": [
+      {
+        "key": "pinnacle",
+        "title": "Pinnacle",
+        "last_update": "2026-09-03T08:00:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-09-03T08:00:00Z",
+            "outcomes": [
+              {"name": "Bayern Munich", "price": 1.8},
+              {"name": "Draw", "price": 4.0},
+              {"name": "Borussia Dortmund", "price": 4.6}
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-09-03T08:00:00Z",
+            "outcomes": [
+              {"name": "Over", "price": 1.85, "point": 2.5},
+              {"name": "Under", "price": 2.05, "point": 2.5}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "williamhill",
+        "title": "William Hill",
+        "last_update": "2026-09-03T07:30:00Z",
+        "markets": [
+          {
+            "key": "h2h",
+            "last_update": "2026-09-03T07:30:00Z",
+            "outcomes": [
+              {"name": "Bayern Munich", "price": 1.75},
+              {"name": "Draw", "price": 3.9},
+              {"name": "Borussia Dortmund", "price": 4.75}
+            ]
+          },
+          {
+            "key": "totals",
+            "last_update": "2026-09-03T07:30:00Z",
+            "outcomes": [
+              {"name": "Over", "price": 1.8, "point": 2.5},
+              {"name": "Under", "price": 2.1, "point": 2.5}
+            ]
+          }
+        ]
+      },
+      {
+        "key": "spreads_only_book",
+        "title": "Spreads Only",
+        "last_update": "2026-09-03T07:00:00Z",
+        "markets": [
+          {
+            "key": "spreads",
+            "last_update": "2026-09-03T07:00:00Z",
+            "outcomes": [
+              {"name": "Bayern Munich", "price": 1.85, "point": -1.5},
+              {"name": "Borussia Dortmund", "price": 2.0, "point": 1.5}
+            ]
+          }
+        ]
+      }
+    ]
+  }
+]
