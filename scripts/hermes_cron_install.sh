@@ -19,6 +19,7 @@ WRAPPER="$SCRIPT_DIR/fa_cron.sh"
 JOBS_FILE="$SCRIPT_DIR/cron_jobs.txt"
 HERMES_SCRIPTS="$HOME/.hermes/scripts"
 NAMES=()
+LAUNCHERS=()
 
 [[ -x "$WRAPPER" ]] || { echo "wrapper 不可执行：$WRAPPER（chmod +x）" >&2; exit 1; }
 [[ -r "$JOBS_FILE" ]] || { echo "读不到事实单：$JOBS_FILE" >&2; exit 1; }
@@ -26,13 +27,15 @@ NAMES=()
 while IFS=$'\t' read -r job schedule arg; do
   [[ "$job" =~ ^# || -z "$job" ]] && continue
   NAMES+=("fa-$job")
+  LAUNCHERS+=("$HERMES_SCRIPTS/fa_cron_$job.sh")
 done < "$JOBS_FILE"
 
 if [[ "${1:-}" == "--remove" ]]; then
   for name in "${NAMES[@]}"; do
     hermes cron remove "$name" || true   # job_id 直收名字；不在库里的报错忽略
   done
-  echo "已从 hermes cron 移除：${NAMES[*]}"
+  rm -f "${LAUNCHERS[@]}"                # 启动器是本脚本生成的，随卸载清走
+  echo "已从 hermes cron 移除：${NAMES[*]}（含启动器）"
   exit 0
 fi
 
@@ -47,7 +50,8 @@ while IFS=$'\t' read -r job schedule arg; do
 exec "$WRAPPER" "$arg"
 EOF
   chmod +x "$launcher"
-  hermes cron create "$schedule" --script "$launcher" --no-agent --name "fa-$job"
+  # --script 只收相对文件名（hermes 自动锚定 ~/.hermes/scripts/，绝对路径会被拒）
+  hermes cron create "$schedule" --script "fa_cron_$job.sh" --no-agent --name "fa-$job"
 done < "$JOBS_FILE"
 
 echo "hermes cron 载体已装配（时刻=北京时间）。gateway 状态："

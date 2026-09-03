@@ -9,8 +9,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 WRAPPER="$SCRIPT_DIR/fa_cron.sh"
 JOBS_FILE="$SCRIPT_DIR/cron_jobs.txt"
+WRAPPER_LOG="$PROJECT_ROOT/logs/cron/wrapper.log"
 BEGIN="# BEGIN fa-cron-m5"
 END="# END fa-cron-m5"
 
@@ -31,12 +33,12 @@ fi
 
 [[ -x "$WRAPPER" ]] || { echo "wrapper 不可执行：$WRAPPER（chmod +x）" >&2; exit 1; }
 [[ -r "$JOBS_FILE" ]] || { echo "读不到事实单：$JOBS_FILE" >&2; exit 1; }
-mkdir -p "$SCRIPT_DIR/../logs/cron"   # cron 行的重定向目标须先在，wrapper 才跑得起来
+mkdir -p "$PROJECT_ROOT/logs/cron"    # cron 行的重定向目标须先在，wrapper 才跑得起来
 
 block="$BEGIN"
 while IFS=$'\t' read -r job schedule arg; do
   [[ "$job" =~ ^# || -z "$job" ]] && continue
-  block+=$'\n'"$schedule $WRAPPER $arg >> $SCRIPT_DIR/../logs/cron/wrapper.log 2>&1"
+  block+=$'\n'"$schedule $WRAPPER $arg >> $WRAPPER_LOG 2>&1"
 done < "$JOBS_FILE"
 block+=$'\n'"$END"
 

@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | 项目名 | fa（Football Analysis） |
-| 版本 | v0.6（确认稿） |
+| 版本 | v0.7（确认稿） |
 | 日期 | 2026-09-04 |
 | 状态 | M1 完成；M2 判决 NO-GO（+3.02%，docs/m2-verdict.md）；**项目负责人批准 §12 双线并存协议——B 线（M3-M5 paper 模式）在推翻顺序关卡的前提下启动**（2026-09-03） |
 
@@ -12,6 +12,7 @@
 > v0.3 → v0.4 变更：Provider 体系成型——OddsProvider 家族（历史 CSV / Odds API / 二期滚球与交易所）+ 新增 ExecutionProvider（Paper 模拟盘为默认实现，真实平台二期以官方 API + 地区合规为前提）；`bets` 增 `mode` 字段，模拟盘自 M3 起每日自动落注结算，并成为 M5 实盘入场前提。
 > v0.4 → v0.5 变更：新增 **§12 双线并存协议**——A 线（研究评测，已建成）与 B 线（运营模拟 = M3-M5 paper 模式）在同一程序并存、结论分账；项目负责人显式推翻「M2 NO-GO → M3+ 不启动」的顺序约束（决策记录见 §12.4）；A 线判据不变。
 > v0.5 → v0.6 变更：新增本地只读看板（§7.4）——`dashboard/`（Streamlit + plotly，独立 dependency-group），B/A 线分区观察出口，只读连库、指标口径复用回测模块（设计：docs/superpowers/specs/2026-09-04-web-dashboard-design.md）。
+> v0.6 → v0.7 变更：调度载体双轨化（§9.6）——system crontab 与 hermes cron 双载体可切换（2026-09-04 负责人裁定「并行开发、实现可切换」）；job 唯一入口 `scripts/fa_cron.sh`，失败告警与漏跑看护收进 `fa ops alert` / `fa ops watchdog`（风险 #6 落地）。
 
 ---
 
@@ -385,13 +386,24 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 - persona 失败 → 6.5 降级
 - 所有 run 写 `runs` 表 + 文件日志
 
-### 9.6 调度（hermes cron，两条 job，北京时间）
+### 9.6 调度（双载体 cron，三条 job，北京时间）
 
 | job | 时间 | 动作 |
 |---|---|---|
 | daily | 每日 06:30 | `fa run daily`（数据更新 + 结算） |
 | matchday-am | 每日 11:00 | `fa run matchday --phase am`：拉盘→建模→价值→persona→**完整推荐报告**；管线内部检查当日赛程，无赛事即空跑退出，不耗额度 |
 | matchday-pm | 每日 17:00 | `fa run matchday --phase pm`：**更新版报告（已确认）**——与 11:00 对比只推差异：已推候选的盘口移动（CLV 预览）、新增/消失候选，去重不重发全量；persona 不重跑（沿用 11:00 判决），仅对新增候选场次补跑一次 |
+
+**载体与告警（2026-09-04 负责人裁定：双载体并行开发、实现可切换）**：三条 job 的
+唯一入口是 `scripts/fa_cron.sh <daily|am|pm>`——环境补齐（PATH 补 uv 所在、导出
+clash 代理供 TG 推送）、日志落 `logs/cron/`、job 失败即 `fa ops alert` TG 告警、
+daily 成功后 `fa ops watchdog` 查漏跑（最近两次成功 daily 间隔 >25h 即告警，风险
+#6 落地）；成功时 stdout 静默。装配载体二选一、互斥切换（双跑会重复触发）：
+system crontab（`scripts/cron_install.sh`，标记块幂等）或 hermes cron
+（`scripts/hermes_cron_install.sh`，`--no-agent --script` 纯调度——hermes 不进
+LLM，gateway 亦无须配 TG 代理，告警走 fa 自己的推送路径）。时刻事实单
+`scripts/cron_jobs.txt` 为双载体共同事实源（机时区 Asia/Shanghai，本地时刻即
+北京时间，无需换算）。
 
 ### 9.7 测试策略
 
@@ -449,7 +461,7 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 3. **队名对齐是持续成本**：新赛季 / 杯赛交叉数据会持续产生新别名；隔离表 + 告警保证不脏数据
 4. **大小球线对齐**：历史 CSV 基准为 2.5 线；实时盘主线可能漂移（2.75 等）——一期只取 2.5 线，其余丢弃并计数
 5. **persona 输出不合规率未知**：降级路径必须被 mock 测试全路径覆盖
-6. **hermes cron 依赖本机常开**：跑批失败要有 TG 告警（daily 失败超 1 天即告警）
+6. **调度依赖本机常开**：跑批失败要有 TG 告警（daily 失败超 1 天即告警）——**已落地（2026-09-04，M5 运营基建）**：wrapper 失败即 `fa ops alert`；漏跑/连续失败（最近两次成功 daily 间隔 >25h）由 `fa ops watchdog` 告警（§9.6）。机器关机期间本地无从自发告警，恢复后首个 daily 揭示
 
 ### 开放问题（到对应里程碑再定，不提前锁死）
 

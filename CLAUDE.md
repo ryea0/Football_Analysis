@@ -6,12 +6,15 @@
 
 ## 当前状态
 
-- spec **v0.4 确认稿**（2026-09-03）：架构与关键决策已拍板
+- spec **v0.7 确认稿**（2026-09-04）：架构与关键决策已拍板；v0.5 双线协议、v0.6 本地看板（§7.4）、v0.7 调度双轨化（§9.6）逐版叠加
 - **M1（数据层 + 回测基建）完成**（2026-09-03）：五大联赛 34 赛季 59,176 场全量入库、幂等、抽样对账通过——`docs/m1-report.md`
 - **M2（模型 + 回测评估）完成，判决 NO-GO**（2026-09-03）：劣化 +3.02%（判据 ≤1%），四重稳健性证据全部 NO-GO——`docs/m2-verdict.md`
 - **spec v0.5 双线并存协议（2026-09-03 启用）**：A 线（研究评测，已建成）与 B 线（M3-M5 paper 运营）同程序并存、结论分账（§12）；项目负责人显式推翻「M2 止步」的顺序约束（决策记录 §12.4），**真实下注依然禁止**；B 线预注册判据见 §12.3
-- **M3（B 线运营栈）完成**（2026-09-04，docs/m3-report.md）：真跑实测 102 fixtures→14 推荐→14 paper 注、/events 探测实证免费、额度 40/日（500/月档）；对齐为候选池瓶颈（30 项 ≥0.60 待 `fa data aliases --confirm`，2 真歧义）；**M5 首务=额度节流**（单 region/pm 限比赛日），否则第 13 天耗尽免费额度
+- **M3（B 线运营栈）完成**（2026-09-04，docs/m3-report.md）：真跑实测 102 fixtures→14 推荐→14 paper 注、/events 探测实证免费；**额度节流梯子已落地**（quota<200 单 eu / <100 pm 跳拉盘，月耗推算 ~300——`.superpowers/sdd/quota-throttle-report.md`）；**别名对齐已完成**（oddsapi 侧 44 条确认、隔离表清零）
+- **M5 运营基建完成**（2026-09-04）：cron **双载体可切换**（§9.6，负责人裁定）——`scripts/fa_cron.sh` 为三 job 唯一入口（失败→`fa ops alert` TG 告警、daily 后 `fa ops watchdog` 查漏跑，风险 #6 落地），装配用 `scripts/cron_install.sh`（system crontab，**当前激活**）或 `scripts/hermes_cron_install.sh`（hermes cron，互斥切换）；「连续跑通一周」观察期进行中
 - **范式对比线（§12.5）立项**（2026-09-04）：线 A（dsh headless agent 当大脑）与线 P 长期并行滚动对比，不设样本上限；设计 `docs/superpowers/specs/2026-09-04-agentline-dual-track-design.md`，首批 E2E 完成（10 场×双线全 ok，快照库），滚动扩批中
+- **v0.6 本地只读看板**（§7.4，`dashboard/`，Streamlit）与 **retro 复盘归因子线**（`src/fa/retro/` + `fa retro`，设计 docs/superpowers/specs/2026-09-04-retro-attribution-design.md）已进主线
+- **M4（persona 接入）未实施**：设计分支 `worktree-m4-persona-design` 已存在；B 线 §12.3 的 model_persona 轨依赖 M4 落地后起算
 
 ## 关键约束（详见 spec 对应章节）
 
@@ -28,7 +31,7 @@
 
 ## 环境
 
-- Hermes **TG 平台未配置**（2026-09-03 E2E 实测：`~/.hermes/.env` 全注释、无任何 token，`hermes send --to telegram` 报 `Platform 'telegram' is not configured`）；配好后 `fa` 的推送自动恢复，代码侧降级路径已验证（`runs.summary` 记推送失败、不中断 run）；`hermes -z` headless 一次性运行；默认模型 ark-code-latest（火山方舟，跑现有额度）
+- Hermes **TG 平台已配置可用**（2026-09-04 实测推送成功，须过代理——见下节）；`hermes -z` headless 一次性运行；默认模型 ark-code-latest（火山方舟，跑现有额度）
 - `ODDS_API_KEY` 走环境变量（`.env`，gitignore）
 
 ### TG 推送代理依赖（2026-09-04 实测）
@@ -37,3 +40,9 @@
 - 交互式跑法：`export https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 && uv run fa run matchday --phase am`
 - 代理离线时：推送失败按设计降级（runs.summary 记原因、run 不中断、报告静默落库）——不是 bug
 - bot: @Cheung_football_analysis_bot，home channel 8853969879
+
+### cron 定时跑批（M5，spec §9.6 双载体）
+
+- 三条 job（北京时间）：daily 06:30 / matchday-am 11:00 / matchday-pm 17:00；入口 `scripts/fa_cron.sh`，日志 `logs/cron/`
+- **当前激活载体：system crontab**（`crontab -l` 可见 `# BEGIN fa-cron-m5` 标记块）；切到 hermes 载体：`scripts/cron_install.sh --remove && scripts/hermes_cron_install.sh`（后者需 `hermes gateway` 在跑）
+- 失败告警：job 失败 → `fa ops alert` 即时 TG；daily 漏跑/连续失败（最近两次成功间隔 >25h）→ `fa ops watchdog` 告警（仅 daily wrapper 收尾调一次）
