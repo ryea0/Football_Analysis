@@ -224,6 +224,26 @@ def runs() -> None:
     conn.close()
 
 
+@agentline_app.command()
+def compare(league: str = typer.Option(None), season: int = typer.Option(None),
+            out: str = typer.Option(None)) -> None:
+    """三线对比滚动报告（docs/agentline/compare-YYYYMMDD.md）"""
+    from datetime import date
+    from pathlib import Path
+
+    from fa.agentline.compare import compare_lines, render_report
+    from fa.config import project_root
+    conn = connect()
+    cmp = compare_lines(conn,
+                        [league] if league else None,
+                        [season] if season else None)
+    conn.close()
+    p = Path(out) if out else (
+        project_root() / "docs" / "agentline" / f"compare-{date.today():%Y%m%d}.md")
+    render_report(cmp, p)
+    typer.echo(f"报告已写：{p}")
+
+
 backtest_app = typer.Typer(help="回测")
 app.add_typer(backtest_app, name="backtest")
 
