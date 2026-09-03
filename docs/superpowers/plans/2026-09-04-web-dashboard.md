@@ -24,6 +24,8 @@
 
 ---
 
+> **执行期裁定（2026-09-04，T2 评审触发）**：void 注记账 = 查询侧排除。本计划 Task 2/Task 4 代码块中的 `status != 'pending'`（界定「已结算」）一律按 **`status IN ('won', 'lost')`** 执行——void（作废/push）不进 pnl、不进 staked、不进 pending 计数。依据：spec §3.2 status 词表含 void、push 零损益；改 CLI 侧（void 写 return_amt=stake）违反「核心管线零改动」约束。测试相应追加 void 排除与 live 模式过滤用例。裁定全文见 .superpowers/sdd/2026-09-04-web-dashboard/progress.md。
+
 ### Task 1: 依赖组 + 只读连接 `connect_ro`
 
 **Files:**
