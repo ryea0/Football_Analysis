@@ -6,9 +6,11 @@
   ``ev_of(0.5149, 2.0) = 0.02980000000000005 < EV_MIN``。位级等于 float(0.03)
   不可达（两个操作数比值 < 2 → 末次减法精确 → 落在 2^-52 网格，而 0.03 在
   2^-57 网格），故用「最近可达值夹住常量」的口径。
-- Kelly 上限：``odds=2.0`` 时 ``f = 0.25·(2p−1)/1 = 0.5p − 0.25``，``p = 0.54``
-  给 ``0.27 − 0.25 = 0.02``，与 STAKE_CAP **位级相等**（乘 0.5 是精确的指数
-  缩放）——真·可达上限，不是近似夹逼。
+- Kelly 上限：``odds=2.0`` 时 raw ``f = 0.25·(2p−1)/1 = 0.5p − 0.25``，``p = 0.54``
+  给 raw ``= 0.020000000000000018``，**比 STAKE_CAP 高 5 ulp，并不位级相等**；
+  位级相等的 ``0.02`` 是 ``min()`` **夹逼**出来的（``min(max(f,0),cap)`` 把
+  1.8e-17 的超出量截回 cap）。「上限可达」的断言意图不变，机制是**经由 clamp
+  达成**，与 EV 那条「最近可达值夹住常量」口径一致。
 """
 import inspect
 import math
@@ -84,8 +86,16 @@ def test_ev_of_zero_stake_no_edge_is_negative():
 
 
 def test_kelly_cap_boundary_is_bit_reachable():
-    """p=0.54、o=2.0 → f = 0.5·0.54 − 0.25 = 0.02，与 STAKE_CAP 位级相等。"""
-    assert kelly_fraction(0.54, 2.0) == STAKE_CAP
+    """p=0.54、o=2.0：raw f = 0.020000000000000018（高 5 ulp）→ 经 ``min()`` 夹逼回 0.02。
+
+    位级相等的 0.02 **不是 raw 算式给出的**，而是上限截断的结果——这正说明
+    STAKE_CAP 是真·可达上限（clamp 后返回值与常量 ``is`` 同一对象）。
+    """
+    raw = KELLY_FRAC * (0.54 * 2.0 - 1) / (2.0 - 1)
+    assert raw > STAKE_CAP                              # raw 并不位级相等（5 ulp 之上）
+    got = kelly_fraction(0.54, 2.0)
+    assert got == STAKE_CAP
+    assert got is STAKE_CAP                             # clamp 把超出量截回常量本身
     assert kelly_fraction(0.5399, 2.0) < STAKE_CAP      # 0.019950000000000023，未触上限
 
 

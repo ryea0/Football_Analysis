@@ -183,6 +183,7 @@ def priced(conn):
     probs = model_probs(conn, LEAGUE, HOME, AWAY, ASOF)
     fx = {
         "in": add_fixture(conn, "ev-in", HOME, AWAY, _NOW + timedelta(hours=20)),
+        "at0": add_fixture(conn, "ev-0", HOME, AWAY, _NOW),          # 下端点：恰为 now
         "at52": add_fixture(conn, "ev-52", HOME, AWAY, _NOW + timedelta(hours=52)),
         "at53": add_fixture(conn, "ev-53", HOME, AWAY, _NOW + timedelta(hours=53)),
         "past": add_fixture(conn, "ev-past", HOME, AWAY, _NOW - timedelta(hours=1)),
@@ -218,7 +219,7 @@ def test_in_gate_writes_h_and_o25_recommendations(priced):
     assert all(r["phase"] == "am" for r in mine)
     assert all(r["run_id"] == run for r in mine)
     assert all(r["created_at"] for r in mine)
-    assert len(ids) == 4                                    # fx-in 与 fx-52 各 2 条
+    assert len(ids) == 6                                    # 窗口内 3 场各 2 条
 
 
 def test_model_p_matches_library_training_data(priced):
@@ -369,9 +370,21 @@ def test_52h_window_inclusive_lower_and_upper(priced):
     c, fx, probs = priced
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
     assert recs(c, fx["in"])                                # 窗口内
-    assert recs(c, fx["at52"])                              # 恰 52h（含端点）
+    assert recs(c, fx["at0"])                               # 恰 now（下端点，含）
+    assert recs(c, fx["at52"])                              # 恰 52h（上端点，含）
     assert recs(c, fx["at53"]) == []                        # 53h → 出窗
-    assert recs(c, fx["past"]) == []                        # 已开球 → 出窗
+    assert recs(c, fx["past"]) == []                        # 已开球（now−1h）→ 出窗
+
+
+def test_window_lower_endpoint_is_exactly_now(priced):
+    """kickoff == now 必须入选：钉死区间是闭区间 ``[now, now+52h]``（杀 ``now <`` 突变）。"""
+    c, fx, probs = priced
+    ids = generate_recommendations(c, [LEAGUE], "am", add_run(c))
+    assert recs(c, fx["at0"])                               # 有盘口、对齐、恰在下端点
+    assert {r["market"] for r in recs(c, fx["at0"])} == {"H", "O2.5"}
+    assert {r["id"] for r in recs(c, fx["at0"])} <= set(ids)
+    # 阳性对照：出窗侧在完全相同的盘口下确实为空（排除「靠缺价误绿」）
+    assert recs(c, fx["at53"]) == [] and recs(c, fx["past"]) == []
 
 
 def test_unaligned_fixture_never_recommended(priced):
@@ -396,6 +409,23 @@ def test_phase_is_validated(priced):
     c, fx, probs = priced
     with pytest.raises(ValueError, match="phase"):
         generate_recommendations(c, [LEAGUE], "xx", add_run(c))
+
+
+def test_model_is_fitted_once_per_league_per_run(priced, monkeypatch):
+    """同联赛多场候选只拟合**一次**/run（把拟合提到 fixture 循环外的守卫）。"""
+    c, fx, probs = priced
+    assert len({k for k in ("in", "at0", "at52")}) == 3     # 前置：窗口内 ≥3 场同联赛
+    calls = []
+    orig = value.fit_league
+
+    def counting(matches, asof, league, *args, **kwargs):
+        calls.append(league)
+        return orig(matches, asof, league, *args, **kwargs)
+
+    monkeypatch.setattr(value, "fit_league", counting)
+    ids = generate_recommendations(c, [LEAGUE], "am", add_run(c))
+    assert calls == [LEAGUE]                                # 恰 1 次，且是该联赛
+    assert len(ids) == 6                                    # 拟合结果被全部候选复用
 
 
 # ---------------------------------------------------------------- UNIQUE 刷新
