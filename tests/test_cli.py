@@ -64,6 +64,25 @@ def test_backtest_run_sigma_passthrough(tmp_path, monkeypatch):
     assert seen["cfg"].sigma_att == 0.8 and seen["cfg"].sigma_dfn == 0.8
 
 
+def test_backtest_run_sigma_default_is_canonical(tmp_path, monkeypatch):
+    """不传 --sigma 必须仍是 0.35——钉住主判决（σ=0.35）的复现路径，防默认漂移。"""
+    from fa.cli import _fit_config
+
+    _use_tmp_db(tmp_path, monkeypatch)
+    seen = {}
+
+    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False):
+        seen["cfg"] = cfg
+        return 0
+
+    monkeypatch.setattr("fa.backtest.run.run_backtest", fake_run_backtest)
+    result = runner.invoke(app, ["backtest", "run"])
+    assert result.exit_code == 1, result.output
+    assert seen["cfg"] == _fit_config(100.0, 0.35)
+    assert seen["cfg"].sigma_att == 0.35 and seen["cfg"].sigma_dfn == 0.35
+    assert seen["cfg"].half_life_days == 100.0
+
+
 def test_data_subapp_help():
     result = runner.invoke(app, ["data", "--help"])
     assert result.exit_code == 0

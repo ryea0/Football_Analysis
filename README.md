@@ -26,14 +26,14 @@ uv run fa init && uv run fa data sync-history          # 建库并拉五大联�
 uv run fa backtest run --from 2019 --to 2025           # 全量 walk-forward 回测（~65 s，11,605 行）
 ```
 
-完整审计顺序（含 half-life 50/200/400、σ 0.5/0.8/1.5/3.0 扫描与只读取数一行）见 [docs/m2-verdict.md](./docs/m2-verdict.md) 的「复现命令」「σ 扫描复现命令」节。测试：`uv run pytest -q`（89 项，不触碰 `data/fa.db`）。
+完整审计顺序（含 half-life 50/200/400、σ 0.5/0.8/1.5/3.0 扫描与只读取数一行）见 [docs/m2-verdict.md](./docs/m2-verdict.md) 的「复现命令」「σ 扫描复现命令」节。测试：`uv run pytest -q`（90 项，不触碰 `data/fa.db`）。
 
 ## 仓库结构
 
 ```
 src/fa/    data/（入库·队名映射·walk-forward 取数） model/（DC 拟合与预测）
            backtest/（指标·模拟盘·报告） value/（去水） db.py config.py cli.py
-tests/     89 项 pytest
+tests/     90 项 pytest
 docs/      m1-report.md · m2-report.md · m2-verdict.md · superpowers/plans/
 data/      gitignored（fa.db + CSV 缓存）——新 clone 必须先 sync-history 重建
 spec.md    唯一权威设计文档
