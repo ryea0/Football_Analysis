@@ -36,6 +36,7 @@ def test_ok_path(monkeypatch):
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     out = run_headless("prompt")
     assert out["ok"] is True and out["error"] is None
+    assert out["timeout"] is False
     assert out["output"] == '{"x": 1}' and out["duration_s"] >= 0
     assert calls["argv"][:2] == ["hermes", "-z"]      # -z 吃 prompt 参数
     assert calls["argv"][2] == "prompt"
@@ -49,6 +50,22 @@ def test_timeout_not_raises(monkeypatch):
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     out = run_headless("p")
     assert out["ok"] is False and "300" in out["error"] and out["output"] == ""
+    assert out["timeout"] is True
+
+
+def test_timeout_flag_is_structural_not_textual(monkeypatch):
+    """钉死：超时是结构化键 timeout，分类不得依赖 error 文案——文案一改，
+    timeout 就静默降级成 error（终审发现的字符串耦合）。"""
+    def fake_run(argv, **kw):
+        raise subprocess.TimeoutExpired(argv, kw.get("timeout"))
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    assert run_headless("p")["timeout"] is True
+    # 反向：非超时路径绝不带 timeout=True（防共享 dict 把 True 写死）
+    monkeypatch.setattr(
+        runner.subprocess, "run",
+        lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "{}", ""))
+    assert run_headless("p")["timeout"] is False
 
 
 def test_usage_error_exit_2(monkeypatch):

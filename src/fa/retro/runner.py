@@ -46,7 +46,11 @@ def build_prompt(pack: dict) -> str:
 
 
 def run_headless(prompt: str) -> dict:
-    """调 hermes -z；恒不抛。返回 {ok, output, error, duration_s}。"""
+    """调 hermes -z；恒不抛。返回 {ok, output, error, timeout, duration_s}。
+
+    timeout 是结构化分类键（TimeoutExpired 路径 True，其余恒 False）——
+    超时判定走它而非 error 文案匹配，文案改动不影响落库 status。
+    """
     if not isinstance(prompt, str):        # 编程期误用外抛，不吞成调用失败
         raise TypeError(f"prompt 须为 str，收到 {type(prompt).__name__}")
     t0 = time.monotonic()
@@ -57,14 +61,15 @@ def run_headless(prompt: str) -> dict:
         duration = time.monotonic() - t0
     except subprocess.TimeoutExpired:
         return {"ok": False, "output": "",
-                "error": f"hermes -z 超时（{TIMEOUT_S}s）",
+                "error": f"hermes -z 超时（{TIMEOUT_S}s）", "timeout": True,
                 "duration_s": TIMEOUT_S}
     except FileNotFoundError:
         return {"ok": False, "output": "",
-                "error": f"可执行不存在：{HARNESS}", "duration_s": 0.0}
+                "error": f"可执行不存在：{HARNESS}", "timeout": False,
+                "duration_s": 0.0}
     except Exception as exc:               # 降级不中断批
         return {"ok": False, "output": "",
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": f"{type(exc).__name__}: {exc}", "timeout": False,
                 "duration_s": time.monotonic() - t0}
     # capture_output=True 时为 bytes；容忍 str（测试替身 / 未来 text=True）
     raw_out = proc.stdout or b""
@@ -76,6 +81,6 @@ def run_headless(prompt: str) -> dict:
     if proc.returncode != 0:
         return {"ok": False, "output": "",
                 "error": f"exit {proc.returncode}: {stderr[-200:]}",
-                "duration_s": duration}
+                "timeout": False, "duration_s": duration}
     return {"ok": True, "output": stdout,
-            "error": None, "duration_s": duration}
+            "error": None, "timeout": False, "duration_s": duration}

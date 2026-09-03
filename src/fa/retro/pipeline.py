@@ -44,16 +44,18 @@ def run_retro_batch(conn: sqlite3.Connection, cands: list[dict],
         pack = build_pack(conn, cand)
         res = call(build_prompt(pack))
         if not res["ok"]:
-            status = ("timeout" if "超时" in (res["error"] or "")
-                      else "error")
+            # 结构化键分类（runner 契约）；.get 兼容无该键的替身/旧结果
+            status = "timeout" if res.get("timeout") else "error"
             counts[status] += 1
             conn.execute(
                 "INSERT INTO retro_attributions (batch_id, match_id, league,"
-                " season, date, selector, status, repaired, harness, model,"
-                " duration_s, input_pack_path, tag_set_version, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " season, date, selector, is_control, status, repaired,"
+                " harness, model, duration_s, input_pack_path,"
+                " tag_set_version, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (batch_id, cand["match_id"], cand["league"], cand["season"],
-                 cand["date"], selector, status, 0, HARNESS, None,
+                 cand["date"], selector, 1 if cand.get("is_control") else 0,
+                 status, 0, HARNESS, None,
                  res["duration_s"], str(pack_dir / paths[cand["match_id"]]),
                  TAG_SET_VERSION, _ts()))
             continue
@@ -62,11 +64,13 @@ def run_retro_batch(conn: sqlite3.Connection, cands: list[dict],
             counts["parse_fail"] += 1
             conn.execute(
                 "INSERT INTO retro_attributions (batch_id, match_id, league,"
-                " season, date, selector, status, repaired, harness, model,"
-                " duration_s, input_pack_path, tag_set_version, created_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " season, date, selector, is_control, status, repaired,"
+                " harness, model, duration_s, input_pack_path,"
+                " tag_set_version, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (batch_id, cand["match_id"], cand["league"], cand["season"],
-                 cand["date"], selector, "parse_fail", 0, HARNESS, None,
+                 cand["date"], selector, 1 if cand.get("is_control") else 0,
+                 "parse_fail", 0, HARNESS, None,
                  res["duration_s"], str(pack_dir / paths[cand["match_id"]]),
                  TAG_SET_VERSION, _ts()))
             continue
@@ -74,13 +78,13 @@ def run_retro_batch(conn: sqlite3.Connection, cands: list[dict],
         p = v["parsed"]
         conn.execute(
             "INSERT INTO retro_attributions (batch_id, match_id, league,"
-            " season, date, selector, miss_tags_json, primary_tag,"
+            " season, date, selector, is_control, miss_tags_json, primary_tag,"
             " tags_confidence, model_vs_market, evidence_json, digest,"
             " status, repaired, harness, model, duration_s, input_pack_path,"
             " tag_set_version, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (batch_id, cand["match_id"], cand["league"], cand["season"],
-             cand["date"], selector,
+             cand["date"], selector, 1 if cand.get("is_control") else 0,
              json.dumps(p["miss_tags"], ensure_ascii=False),
              p["primary_tag"], p["tags_confidence"], p["model_vs_market"],
              json.dumps(p["evidence"], ensure_ascii=False), p["digest"],

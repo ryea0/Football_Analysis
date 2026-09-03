@@ -553,6 +553,57 @@ def test_v4_creates_retro_tables(tmp_path):
         conn.close()
 
 
+def test_is_control_column_pinned(tmp_path):
+    """is_control 后补列（2026-09-04 终审）：病例=0/对照=1。钉死三件事——
+    建表即含列、NOT NULL DEFAULT 0（直插不给值不炸且落 0）、SCHEMA_VERSION
+    保持 4（纯加列不走迁移）。"""
+    from fa.db import SCHEMA_VERSION, connect, init_db
+    assert SCHEMA_VERSION == 4
+    db = tmp_path / "ic.db"
+    init_db(db)
+    conn = connect(db)
+    try:
+        cols = {r["name"]: r for r in conn.execute(
+            "PRAGMA table_info(retro_attributions)")}
+        assert "is_control" in cols
+        assert cols["is_control"]["notnull"] == 1
+        assert cols["is_control"]["dflt_value"] == "0"
+        team = conn.execute(
+            "INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+        match_id = conn.execute(
+            "INSERT INTO matches (league, season, date, home_team_id,"
+            " away_team_id, raw_line) VALUES ('E0', 2025, '2025-08-16', ?, ?, '{}')",
+            (team.lastrowid, team.lastrowid)).lastrowid
+        batch = conn.execute(
+            "INSERT INTO retro_runs (selector, params_json, n_selected, n_ok,"
+            " n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+            " VALUES ('divergence', '{}', 1, 0, 0, 0, 0, 0.0,"
+            " '2026-09-04T00:00:00Z')").lastrowid
+        conn.execute(
+            "INSERT INTO retro_attributions (batch_id, match_id, league,"
+            " season, date, selector, is_control, status, harness,"
+            " input_pack_path, tag_set_version, created_at)"
+            " VALUES (?, ?, 'E0', 2025, '2025-08-16', 'divergence', 1, 'ok',"
+            " 'hermes', 'p.json', 'v1', '2026-09-04T00:00:00Z')",
+            (batch, match_id))
+        conn.commit()
+        assert conn.execute("SELECT is_control FROM retro_attributions"
+                            ).fetchone()["is_control"] == 1
+        conn.execute("DELETE FROM retro_attributions")
+        conn.execute(
+            "INSERT INTO retro_attributions (batch_id, match_id, league,"
+            " season, date, selector, status, harness, input_pack_path,"
+            " tag_set_version, created_at)"
+            " VALUES (?, ?, 'E0', 2025, '2025-08-16', 'manual', 'ok',"
+            " 'hermes', 'p.json', 'v1', '2026-09-04T00:00:00Z')",
+            (batch, match_id))
+        conn.commit()
+        assert conn.execute("SELECT is_control FROM retro_attributions"
+                            ).fetchone()["is_control"] == 0
+    finally:
+        conn.close()
+
+
 def test_v3_migrates_to_v4(tmp_path):
     """老库（v3）经 init_db 升级到 v4，retro 表出现且 schema_version=4。"""
     from fa.db import SCHEMA_VERSION, connect, init_db

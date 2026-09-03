@@ -578,8 +578,12 @@ def retro_run(
                 leagues=[s for s in league.split(",") if s] or None,
                 top_k=top, control_k=control, seed=seed)
             params = {"top": top, "control": control, "seed": seed,
-                      "from": date_from, "to": date_to}
+                      "league": league, "from": date_from, "to": date_to}
         elif selector == "manual":
+            if not (matches.strip() or league.strip() or season is not None):
+                typer.echo("--selector manual 须至少给 --matches / --league /"
+                           " --season 之一（零过滤=全库 59k 场逐场调 LLM）")
+                raise typer.Exit(code=1)
             cands = select_manual(conn, match_ids=_parse_int_list(matches),
                                   league=league or None, season=season)
             params = {"matches": matches, "league": league, "season": season}

@@ -87,6 +87,7 @@
 |---|---|
 | id, match_id, league, season, date | 对齐现有预测表，可 join |
 | batch_id, selector | 批次与选择器模式 |
+| is_control | 病例=0/对照=1（divergence 选择器产出；manual 全 0）。后补列（NOT NULL DEFAULT 0，不 bump SCHEMA_VERSION）——关卡 3 分层与 analyze 必须能从 DB 逐行区分病例/对照 |
 | miss_tags_json, primary_tag, tags_confidence, model_vs_market | 契约输出 |
 | evidence_json, digest | 证据与摘要 |
 | status | ok / parse_fail / timeout / error |

@@ -67,6 +67,35 @@ def test_batch_all_ok(conn, clock, tmp_path):
     run = conn.execute("SELECT * FROM retro_runs WHERE id=?",
                        (out["batch_id"],)).fetchone()
     assert run["selector"] == "manual" and run["n_ok"] == 3
+    assert all(r["is_control"] == 0 for r in rows)   # manual 批全病例
+
+
+def test_batch_persists_is_control(conn, clock, tmp_path):
+    """divergence 批：对照行 is_control=1、病例行=0——病例-对照标记必须
+    可从 DB 逐行查（关卡 3 分层与 analyze 的必需字段）。"""
+    from fa.retro.select import select_divergence
+    cands = select_divergence(conn, top_k=1, control_k=1, seed=7)
+    assert len(cands) == 2
+    out = run_retro_batch(conn, cands, "divergence",
+                          {"top": 1, "control": 1, "seed": 7},
+                          tmp_path / "packs", call=_ok_call)
+    assert out["n_ok"] == 2
+    rows = {r["match_id"]: r["is_control"] for r in conn.execute(
+        "SELECT match_id, is_control FROM retro_attributions")}
+    assert rows[1] == 0                              # 唯一正 div → 病例
+    ctrl_id = next(m for m in rows if m != 1)
+    assert rows[ctrl_id] == 1                        # 对照池抽出 → 对照
+
+
+def test_batch_persists_is_control_from_candidate_flag(conn, clock, tmp_path):
+    """落库值取自 cand 的 is_control 标记本身（不只对 divergence 选择器成立）。"""
+    cands = _cands(conn)[:1]
+    cands[0]["is_control"] = True
+    out = run_retro_batch(conn, cands, "manual", {}, tmp_path / "packs",
+                          call=_ok_call)
+    assert out["n_ok"] == 1
+    assert conn.execute("SELECT is_control FROM retro_attributions"
+                        ).fetchone()["is_control"] == 1
 
 
 def test_single_failure_does_not_abort_batch(conn, clock, tmp_path):
@@ -76,7 +105,8 @@ def test_single_failure_does_not_abort_batch(conn, clock, tmp_path):
         calls["n"] += 1
         if calls["n"] == 2:
             return {"ok": False, "output": "",
-                    "error": "hermes -z 超时（300s）", "duration_s": 300.0}
+                    "error": "hermes -z 超时（300s）", "timeout": True,
+                    "duration_s": 300.0}
         if calls["n"] == 3:
             return {"ok": True, "output": "不是 JSON",
                     "error": None, "duration_s": 2.0}
@@ -103,3 +133,17 @@ def test_empty_batch_writes_ledger_only(conn, clock, tmp_path):
                         ).fetchone()["c"] == 0
     assert conn.execute("SELECT COUNT(*) c FROM retro_runs"
                         ).fetchone()["c"] == 1
+
+
+def test_timeout_classified_by_flag_not_message(conn, clock, tmp_path):
+    """钉死：timeout 分类只认 runner 的结构化 timeout 键——error 文案改动
+    （如去掉「超时」二字）不得让超时静默落成 error。"""
+    def timed_out(prompt):
+        return {"ok": False, "output": "", "error": "deadline exceeded",
+                "timeout": True, "duration_s": 300.0}
+
+    out = run_retro_batch(conn, _cands(conn)[:1], "manual", {},
+                          tmp_path / "packs", call=timed_out)
+    assert out["n_timeout"] == 1 and out["n_error"] == 0
+    row = conn.execute("SELECT status FROM retro_attributions").fetchone()
+    assert row["status"] == "timeout"

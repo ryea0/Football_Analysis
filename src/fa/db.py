@@ -124,8 +124,12 @@ CREATE INDEX IF NOT EXISTS idx_bets_status ON bets (status);
 # A 线复盘归因子线两表（spec docs/superpowers/specs/2026-09-04-retro-attribution-design.md
 # §7）。物理隔离：retro 对 recommendations/bets 无任何代码通路。selector 词表含
 # S2/S3 的 paper_t1 / agentline_aligned——SQLite 无法后补 CHECK，趁表空一次到位。
-# 契约字段（miss_tags 等）在 status != 'ok' 的行上为 NULL（parse_fail 只留 raw 与
-# 审计字段）。
+# is_control 是后补列（2026-09-04 终审）：纯加列 + DEFAULT 0，**不 bump
+# SCHEMA_VERSION**——生产库仍 v3，经 _migrate_up 全新建表即含该列；CREATE
+# TABLE IF NOT EXISTS 对已存在的 v4 库不生效，但见过的旧 v4 只有已作废的
+# worktree 快照（data/fa.db 快照与旧表结构不匹配属预期）。
+# 契约字段（miss_tags 等）在 status != 'ok' 的行上为 NULL（parse_fail 只留审计
+# 字段；原始输出留档属下个计划，spec §15 待办）。
 _RETRO_TABLE = """
 CREATE TABLE IF NOT EXISTS retro_runs (
     id           INTEGER PRIMARY KEY,
@@ -150,6 +154,7 @@ CREATE TABLE IF NOT EXISTS retro_attributions (
     date            TEXT NOT NULL,
     selector        TEXT NOT NULL
         CHECK (selector IN ('divergence', 'manual', 'paper_t1', 'agentline_aligned')),
+    is_control      INTEGER NOT NULL DEFAULT 0,  -- 病例=0/对照=1（divergence 选择器产出）
     miss_tags_json  TEXT,            -- JSON 数组；status != ok 时 NULL
     primary_tag     TEXT,
     tags_confidence REAL,

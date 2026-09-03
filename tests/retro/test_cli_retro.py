@@ -59,6 +59,57 @@ def test_run_manual_batch(db, tmp_path, monkeypatch):
     conn.close()
 
 
+def test_run_manual_requires_a_filter(db, tmp_path, monkeypatch):
+    """零过滤护栏（额度纪律）：manual 三参全空 = 全库逐场真调 LLM，
+    必须在选场前拒绝，exit 1 + 明示原因（实测 11.8s/场 × 59k 场）。"""
+    from fa.retro import pipeline
+    calls = {"n": 0}
+
+    def must_not_call(prompt):
+        calls["n"] += 1
+        raise AssertionError("护栏应先退出，不得触达 run_headless")
+
+    monkeypatch.setattr(pipeline, "run_headless", must_not_call)
+    result = runner.invoke(
+        app, ["retro", "run", "--selector", "manual",
+              "--out-root", str(tmp_path / "packs")])
+    assert result.exit_code == 1
+    assert "--matches" in result.output and "--season" in result.output
+    assert calls["n"] == 0
+
+
+def test_run_divergence_batch_records_league_and_control(db, tmp_path,
+                                                         monkeypatch):
+    """divergence 台账 params 记 league（与 manual 对齐）；批内病例/对照落库
+    且 is_control 可逐行区分（0=病例 / 1=对照）。"""
+    from fa.retro import pipeline
+
+    def fake_headless(prompt):
+        return {"ok": True, "output": json.dumps({
+            "miss_tags": ["variance"], "primary_tag": "variance",
+            "tags_confidence": 0.5, "model_vs_market": "variance",
+            "evidence": [], "digest": "波动。"}, ensure_ascii=False),
+            "error": None, "timeout": False, "duration_s": 0.2}
+
+    monkeypatch.setattr(pipeline, "run_headless", fake_headless)
+    r = runner.invoke(
+        app, ["retro", "run", "--selector", "divergence", "--top", "1",
+              "--control", "1", "--league", "E0",
+              "--out-root", str(tmp_path / "p")])
+    assert r.exit_code == 0, r.output
+    conn = connect(db)
+    try:
+        run = conn.execute("SELECT params_json FROM retro_runs").fetchone()
+        assert json.loads(run["params_json"])["league"] == "E0"
+        rows = conn.execute(
+            "SELECT match_id, is_control FROM retro_attributions"
+            " ORDER BY match_id").fetchall()
+        assert len(rows) == 2                       # 1 病例 + 1 对照
+        assert [x["is_control"] for x in rows] == [0, 1]
+    finally:
+        conn.close()
+
+
 def test_audit_flags_late_evidence(db, tmp_path, monkeypatch):
     """证据日期晚于比赛日（2024-04-20）→ 违规；早于 → 通过。"""
     from fa.retro import pipeline
@@ -148,7 +199,7 @@ def test_runs_lists_ledger(db, tmp_path, monkeypatch):
     monkeypatch.setattr(
         pipeline, "run_headless",
         lambda p: {"ok": False, "output": "", "error": "hermes -z 超时（300s）",
-                   "duration_s": 300.0})
+                   "timeout": True, "duration_s": 300.0})
     runner.invoke(app, ["retro", "run", "--selector", "manual",
                         "--matches", "1", "--out-root", str(tmp_path / "p")])
     r = runner.invoke(app, ["retro", "runs"])
