@@ -13,3 +13,4 @@ __pycache__/
 
 # Claude Code 会话产物（worktrees 等）
 .claude/
+.superpowers/
