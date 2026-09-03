@@ -6,7 +6,7 @@
 - pinnacle(ev1) 额外带 spreads market、ev2 的 spreads_only_book 只有 spreads
   （证非 h2h/totals 的 market 被忽略，无可下注 market 的 book 不产快照）
 
-因此解析快照总数 = 2 events × 2 books × 2 markets = 8。
+因此解析快照总数 = 每 region 2 events × 2 books × 2 markets = 8（默认 eu+uk 双请求共 16）。
 """
 import dataclasses
 import json
@@ -27,12 +27,17 @@ def _fixture_events():
 
 @pytest.fixture
 def replay(monkeypatch):
-    """把 _http_get 换成夹具回放，并记录 (url, params) 供断言。"""
+    """把 _http_get 换成夹具回放，并记录 (url, params) 供断言。
+
+    额度头两次取不同值且**最小值不在末位**（483 → 487），以钉死「多 region 取
+    最小值」而非「取最后一次」。
+    """
     calls = []
 
     def fake_http_get(url, params):
         calls.append((url, dict(params)))
-        return _fixture_events(), {"X-Requests-Remaining": QUOTA, "X-Requests-Used": "13"}
+        remaining = "483" if len(calls) == 1 else QUOTA
+        return _fixture_events(), {"X-Requests-Remaining": remaining, "X-Requests-Used": "13"}
 
     monkeypatch.setattr("fa.pipeline.odds_api._http_get", fake_http_get)
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
@@ -53,21 +58,41 @@ def _snaps_of(snaps, event_key, market, bookmaker):
 
 
 def test_fetch_odds_parses_all_snapshots(replay):
-    snaps, quota = fetch_odds("E0")
+    snaps, quota = fetch_odds("E0", regions=("eu",))
     assert len(snaps) == 8                              # 2 events × 2 books × 2 markets
-    assert quota == 487
+    assert quota == 483
     assert all(isinstance(s, OddsSnapshot) for s in snaps)
     assert {s.league for s in snaps} == {"E0"}          # 内部联赛码，非 sport key
     assert {s.event_key for s in snaps} == {"ev1", "ev2"}
-    assert {s.region for s in snaps} == {"eu,uk"}       # 请求的 region 列表
+    assert {s.region for s in snaps} == {"eu"}          # 单 region 请求 → 单值归属
     assert {s.bookmaker for s in snaps} == {"pinnacle", "betfair_ex_eu", "williamhill"}
+
+
+def test_fetch_odds_splits_request_per_region(replay):
+    """控制器裁定：逐 region 发请求——响应不带 bookmaker→region 归属，拆开
+    才有单值 region（DDL `-- eu / uk` 口径），计费按 region × market 等价。"""
+    from fa.pipeline.odds_api import LAST_FETCH_STATS
+
+    snaps, quota = fetch_odds("E0")                     # 默认 eu + uk
+    assert len(replay) == 2                             # 每 region 一次请求
+    assert [params["regions"] for _, params in replay] == ["eu", "uk"]
+    assert all(url == replay[0][0] for url, _ in replay)
+    assert len(snaps) == 16                             # 每 region 各 8 条
+    assert {s.region for s in snaps} == {"eu", "uk"}
+    assert sum(s.region == "eu" for s in snaps) == 8
+    assert quota == 483                                 # min(483, 487)：最小值非末位 → 取最小而非取最后
+    assert LAST_FETCH_STATS == {                        # 统计跨 region 累加
+        "events": 4,
+        "snapshots": 16,
+        "dropped_totals_outcomes": 4,
+    }
 
 
 def test_non_target_lines_dropped_and_counted(replay):
     """spec §11 风险 4：一期只取 2.5 线，其余丢弃并计数。"""
     from fa.pipeline.odds_api import LAST_FETCH_STATS
 
-    snaps, _ = fetch_odds("E0")
+    snaps, _ = fetch_odds("E0", regions=("eu",))
     assert LAST_FETCH_STATS == {
         "events": 2,                                    # 夹具两个事件
         "snapshots": len(snaps),
@@ -79,7 +104,7 @@ def test_stats_cleared_when_fetch_fails(replay, monkeypatch):
     """失败的调用不写统计：读到空 dict 即「最近一次拉取未完成」。"""
     from fa.pipeline.odds_api import LAST_FETCH_STATS
 
-    fetch_odds("E0")
+    fetch_odds("E0", regions=("eu",))
     assert LAST_FETCH_STATS["snapshots"] == 8
 
     def boom(url, params):
@@ -122,7 +147,7 @@ def test_h2h_outcomes_mapped_to_home_draw_away(replay):
 
 
 def test_totals_keeps_only_point_25(replay):
-    snaps, _ = fetch_odds("E0")
+    snaps, _ = fetch_odds("E0", regions=("eu",))
     pin = _snaps_of(snaps, "ev1", "totals", "pinnacle")
     assert len(pin) == 1                                # 2.5 与 3.5 两线只留 2.5
     assert pin[0].outcomes == {"over": 1.95, "under": 1.95}
@@ -219,7 +244,7 @@ def test_malformed_event_is_skipped(monkeypatch):
         lambda url, params: (events, {"x-requests-remaining": QUOTA}),
     )
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
-    snaps, _ = fetch_odds("E0")
+    snaps, _ = fetch_odds("E0", regions=("eu",))
     assert {s.event_key for s in snaps} == {"ev1"}
     assert len(snaps) == 4
 
@@ -232,7 +257,7 @@ def test_quota_absent_header_returns_none(monkeypatch):
         "fa.pipeline.odds_api._http_get", lambda url, params: (_fixture_events(), {})
     )
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
-    snaps, quota = fetch_odds("E0")
+    snaps, quota = fetch_odds("E0", regions=("eu",))
     assert quota is None
     assert len(snaps) == 8                              # 额度缺失不影响解析
 
@@ -254,7 +279,7 @@ def test_refresh_quota_false_skips_quota(monkeypatch):
         lambda url, params: (_fixture_events(), {"x-requests-remaining": QUOTA}),
     )
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
-    snaps, quota = fetch_odds("E0", refresh_quota=False)
+    snaps, quota = fetch_odds("E0", regions=("eu",), refresh_quota=False)
     assert quota is None
     assert len(snaps) == 8
 
@@ -267,8 +292,8 @@ def test_fetch_odds_never_persists_quota(replay, monkeypatch):
 
     monkeypatch.setattr("fa.db.set_meta", boom)
     monkeypatch.setattr("fa.db.get_meta", boom)
-    _, quota = fetch_odds("E0")
-    assert quota == 487
+    _, quota = fetch_odds("E0", regions=("eu",))
+    assert quota == 483                                 # 落库归调用方，此处只交出数值
 
 
 # ---------------------------------------------------------------- 错误面
@@ -393,16 +418,17 @@ def test_http_get_non_json_body_raises(monkeypatch):
 
 
 def test_fetch_odds_requests_expected_query(replay):
-    """单次请求：regions / markets 逗号并参，oddsFormat=decimal（额度按 region×market 计）。"""
+    """逐 region 单值请求；regions 不再逗号并参，markets 仍合并（额度按 region×market 计）。"""
     from fa.config import ODDS_SPORT_KEYS
 
     fetch_odds("E0")
-    url, params = replay[0]
-    assert url == f"https://api.the-odds-api.com/v4/sports/{ODDS_SPORT_KEYS['E0']}/odds"
-    assert params == {
-        "apiKey": "test-key",
-        "regions": "eu,uk",
-        "markets": "h2h,totals",
-        "oddsFormat": "decimal",
-    }
-    assert len(replay) == 1                             # 默认参数只发一次请求
+    expected_url = f"https://api.the-odds-api.com/v4/sports/{ODDS_SPORT_KEYS['E0']}/odds"
+    assert len(replay) == 2
+    for region, (url, params) in zip(("eu", "uk"), replay):
+        assert url == expected_url
+        assert params == {
+            "apiKey": "test-key",
+            "regions": region,                          # 单 region，无逗号
+            "markets": "h2h,totals",
+            "oddsFormat": "decimal",
+        }

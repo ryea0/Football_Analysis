@@ -51,7 +51,8 @@ class OddsSnapshot:
     - totals -> ``{"over": 赔率, "under": 赔率}``，且仅保留 point == 2.5 的线
 
     `kickoff_utc` 保留 API 原文（ISO-8601 UTC，如 ``2026-09-05T14:00:00Z``），
-    不在此处做时区换算；`region` 为请求的 region 列表原文（如 ``"eu,uk"``）。
+    不在此处做时区换算；`region` 为单值（``"eu"`` / ``"uk"``，与
+    `odds_snapshots.region` 口径一致）。
     """
 
     league: str                                  # 内部联赛码（E0…），非 sport key
@@ -73,9 +74,12 @@ def fetch_odds(
 ) -> tuple[list[OddsSnapshot], int | None]:
     """拉某联赛实时盘，返回 ``(快照列表, 剩余额度)``。
 
-    单次请求带全部 regions / markets（The Odds API 计费按 region × market，
-    与拆成多次请求等价，故合并为一次调用）。额度只在 ``refresh_quota=True``
-    时从响应头读取并随返回值交给调用方落库；本函数自身不写 DB。
+    **每个 region 单独发一次请求**（regions 逐个传入）：The Odds API 的响应
+    不带 bookmaker→region 归属，拆开才能让快照的 `region` 落到单值（与
+    `odds_snapshots.region` 的 `eu` / `uk` 口径一致），并留出按 region 降频
+    （spec §3.4）的抓手；计费按 region × market，拆分与合并**等价**。
+    额度只在 ``refresh_quota=True`` 时读各次响应头并取**最小值**（保守真值）
+    随返回值交调用方落库；本函数自身不写 DB。任一 region 失败则整次上抛。
 
     429 / 其他 HTTP 错误 / 网络异常上抛 :class:`OddsApiError`。
     """
@@ -87,60 +91,41 @@ def fetch_odds(
         known = ", ".join(sorted(ODDS_SPORT_KEYS))
         raise OddsApiError(f"未知联赛: {league}（可用: {known}）")
 
-    LAST_FETCH_STATS.clear()                        # 失败的调用不留下上一次的统计
-    payload, headers = _http_get(
-        f"{API_BASE}/{sport_key}/odds",
-        {
-            "apiKey": api_key,
-            "regions": ",".join(regions),
-            "markets": ",".join(markets),
-            "oddsFormat": "decimal",
-        },
-    )
-    if not isinstance(payload, list):
-        raise OddsApiError("Odds API 响应结构异常（应为事件数组）")
-
-    region = ",".join(regions)
+    LAST_FETCH_STATS.clear()                        # 任一 region 失败 → 整次记为未完成
     stats = {"events": 0, "snapshots": 0, "dropped_totals_outcomes": 0}
+    quotas: list[int] = []
     snaps: list[OddsSnapshot] = []
-    for event in payload:
-        stats["events"] += 1
-        home_name = event.get("home_team") or ""
-        away_name = event.get("away_team") or ""
-        if not event.get("id") or not home_name or not away_name:
-            continue                             # 缺 id/队名的事件无法对齐下注，跳过
-        for bookmaker in event.get("bookmakers") or []:
-            book_key = bookmaker.get("key") or ""
-            for market in bookmaker.get("markets") or []:
-                outcomes, dropped = _parse_outcomes(
-                    market.get("key"), market.get("outcomes") or [], home_name, away_name
-                )
-                stats["dropped_totals_outcomes"] += dropped
-                if not outcomes:
-                    continue                     # 只有被滤掉的线（如仅 3.5 totals）→ 不产快照
-                snaps.append(
-                    OddsSnapshot(
-                        league=league,
-                        event_key=event.get("id") or "",
-                        kickoff_utc=event.get("commence_time") or "",
-                        home_name=home_name,
-                        away_name=away_name,
-                        market=market["key"],
-                        region=region,
-                        bookmaker=book_key,
-                        outcomes=outcomes,
-                    )
-                )
+    for region in regions:
+        payload, headers = _http_get(
+            f"{API_BASE}/{sport_key}/odds",
+            {
+                "apiKey": api_key,
+                "regions": region,
+                "markets": ",".join(markets),
+                "oddsFormat": "decimal",
+            },
+        )
+        if not isinstance(payload, list):
+            raise OddsApiError("Odds API 响应结构异常（应为事件数组）")
+        events, region_snaps, dropped = _parse_events(payload, league, region)
+        stats["events"] += events
+        stats["dropped_totals_outcomes"] += dropped
+        snaps.extend(region_snaps)
+        quota = _quota_remaining(headers)
+        if quota is not None:
+            quotas.append(quota)
 
     stats["snapshots"] = len(snaps)
     LAST_FETCH_STATS.update(stats)
-    return snaps, _quota_remaining(headers) if refresh_quota else None
+    quota_left = min(quotas) if quotas else None    # 最小值 = 保守真值（spec §3.4 降频判据）
+    return snaps, (quota_left if refresh_quota else None)
 
 
-# spec §9.8 的 Provider 命名落点：OddsApiProvider 即本模块的 fetch_odds
+# spec §9.8 的 Provider 命名槽位：OddsApiProvider 即本模块的 fetch_odds
 # （get_odds(leagues, markets, regions) 的 B 线单联赛形态，多带 refresh_quota 供
-# 额度记账）；HistoricalCsvProvider 语义由 A 线回测取数路径承担，二期
-# InPlayProvider / ExchangeProvider 实现同一签名即可替换。
+# 额度记账）。命名对齐而非新类型——一期不做类抽象，二期 InPlayProvider /
+# ExchangeProvider 实现同一签名即可原位替换；HistoricalCsvProvider 语义由 A 线
+# 回测取数路径承担，ExecutionProvider 家族一期仅 PaperExecutionProvider（T7）。
 OddsApiProvider = fetch_odds
 
 
@@ -149,10 +134,10 @@ def best_prices(snaps: list[OddsSnapshot], market: str) -> dict[str, tuple[float
 
     返回 ``{outcome: (odds, bookmaker)}``：h2h 键 ``home/draw/away``，
     totals 键 ``over/under``。平价时保留先出现的 bookmaker（快照顺序稳定，
-    结果确定）。**snaps 必须来自同一场比赛**（单一 event_key）——不同场次的
-    home/away 是不同球队，混在一起会得到无意义的「跨场最优价」，直接拒绝；
-    调用方（Task 6）按 event_key 先行过滤。某 outcome 无任何 bookmaker 报价时
-    该键不出现（调用方按缺价处理）。
+    结果确定）。**单场语义：snaps 必须来自同一场比赛**（单一 event_key）——
+    不同场次的 home/away 是不同球队，混在一起会得到无意义的「跨场最优价」，
+    故混入多个 event_key 时抛 ``ValueError``；调用方（Task 6）按 event_key
+    先行过滤。某 outcome 无任何 bookmaker 报价时该键不出现（调用方按缺价处理）。
     """
     if market not in ("h2h", "totals"):
         raise ValueError(f"未知 market: {market}（仅支持 h2h / totals）")
@@ -207,6 +192,42 @@ def _quota_remaining(headers: dict[str, str]) -> int | None:
         return int(float(str(raw).strip()))
     except (TypeError, ValueError):
         return None
+
+
+def _parse_events(payload: list, league: str, region: str) -> tuple[int, list[OddsSnapshot], int]:
+    """解析一个 region 的事件数组，返回 ``(事件数, 快照列表, 被滤掉的非 2.5 线条数)``。"""
+    stats_events = 0
+    dropped_total = 0
+    snaps: list[OddsSnapshot] = []
+    for event in payload:
+        stats_events += 1
+        home_name = event.get("home_team") or ""
+        away_name = event.get("away_team") or ""
+        if not event.get("id") or not home_name or not away_name:
+            continue                             # 缺 id/队名的事件无法对齐下注，跳过
+        for bookmaker in event.get("bookmakers") or []:
+            book_key = bookmaker.get("key") or ""
+            for market in bookmaker.get("markets") or []:
+                outcomes, dropped = _parse_outcomes(
+                    market.get("key"), market.get("outcomes") or [], home_name, away_name
+                )
+                dropped_total += dropped
+                if not outcomes:
+                    continue                     # 只有被滤掉的线（如仅 3.5 totals）→ 不产快照
+                snaps.append(
+                    OddsSnapshot(
+                        league=league,
+                        event_key=event.get("id") or "",
+                        kickoff_utc=event.get("commence_time") or "",
+                        home_name=home_name,
+                        away_name=away_name,
+                        market=market["key"],
+                        region=region,           # 单 region 请求 → 单值归属
+                        bookmaker=book_key,
+                        outcomes=outcomes,
+                    )
+                )
+    return stats_events, snaps, dropped_total
 
 
 def _parse_outcomes(
