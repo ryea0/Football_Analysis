@@ -569,14 +569,25 @@ def test_league_cn_covers_big_five():
 
 
 def test_am_report_groups_candidates_by_league(conn):
-    """多联赛 → 每联赛一块（中文标题 + 子表），同联赛行相邻，块序按固定联赛序。"""
+    """多联赛 → 每联赛一块（中文标题 + 子表），同联赛行相邻，块序按固定联赛序。
+
+    同联赛两行给**不同 EV**（0.12 / 0.05），且把 kickoff **反着排**——ev-2 更早开赛
+    但 EV 更低。SQL 本按 kickoff 升序（会先出 ev-2），报告按 EV 降序（先出 ev-1）：
+    两条序互相矛盾，这条断言才真的钉住「块内 EV 降序」，而非碰巧同序。
+    """
+    conn.execute(
+        "UPDATE fixtures SET kickoff_utc='2026-09-04T18:00:00Z'"
+        " WHERE event_key='ev-1'")
+    conn.execute(
+        "UPDATE fixtures SET kickoff_utc='2026-09-04T11:00:00Z'"
+        " WHERE event_key='ev-2'")
     sp1 = _fixture(conn, "ev-sp1", _team(conn, "Real"), _team(conn, "Barca"),
                    league="SP1")
     conn.commit()
     rid = _run(conn, "am")
-    _rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 2.10)      # E0
-    _rec(conn, rid, _fid(conn, "ev-2"), "O2.5", "am", 1.85)   # E0
-    _rec(conn, rid, sp1, "A", "am", 3.60)                     # SP1
+    _rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 2.10, ev=0.12)      # E0 高
+    _rec(conn, rid, _fid(conn, "ev-2"), "O2.5", "am", 1.85, ev=0.05)   # E0 低
+    _rec(conn, rid, sp1, "A", "am", 3.60)                              # SP1
     conn.commit()
     out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
 
@@ -588,7 +599,7 @@ def test_am_report_groups_candidates_by_league(conn):
     assert "Arsenal vs Chelsea" in e0_block
     assert "Bayern vs Dortmund" in e0_block
     assert e0_block.index("Arsenal vs Chelsea") < e0_block.index(
-        "Bayern vs Dortmund")                          # 同联赛行相邻
+        "Bayern vs Dortmund")                          # 块内 EV 降序：0.12 在 0.05 前
 
 
 def test_am_report_unknown_league_falls_back_to_raw_code(conn):
@@ -615,7 +626,7 @@ def test_am_report_kickoff_column_in_beijing_time(conn):
 
 
 def test_pm_update_sections_grouped_by_league_with_kickoff(conn):
-    """pm 三个 diff 段同样按联赛分块，行内带北京时间开赛。"""
+    """pm 三个 diff 段同样按联赛分块，行内带北京时间开赛；未知代码原样回退。"""
     sp1 = _fixture(conn, "ev-sp1", _team(conn, "Real"), _team(conn, "Barca"),
                    league="SP1")
     conn.commit()
@@ -624,9 +635,16 @@ def test_pm_update_sections_grouped_by_league_with_kickoff(conn):
     _rec(conn, am, _fid(conn, "ev-2"), "O2.5", "am", 1.85)
     _rec(conn, am, sp1, "A", "am", 3.60)
     conn.commit()
+    # pm 才出现的两联赛新增（E0 常规 + PPL 未知代码），新增段才会分出多块
+    new_e0 = _fixture(conn, "ev-new0", _team(conn, "Newc"), _team(conn, "Everton"))
+    new_ppl = _fixture(conn, "ev-new1", _team(conn, "Urawa"), _team(conn, "Kashima"),
+                       league="PPL")
+    conn.commit()
     pm = _run(conn, "pm")
     _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", 1.90)     # E0 移动
     _rec(conn, pm, sp1, "A", "pm", 3.40)                    # SP1 移动
+    _rec(conn, pm, new_e0, "D", "pm", 3.10)                 # E0 新增
+    _rec(conn, pm, new_ppl, "H", "pm", 2.40)                # PPL 新增（未知代码）
     conn.commit()                                            # ev-2 无 pm 行 → 已消失
     out = render_pm_update(conn, am, pm, 430, False)
 
@@ -634,6 +652,11 @@ def test_pm_update_sections_grouped_by_league_with_kickoff(conn):
     assert "### 英超（1）" in moved and "### 西甲（1）" in moved
     assert moved.index("### 英超") < moved.index("### 西甲")
     assert "开赛" in moved and "22:00" in moved
+
+    added = out.split("## 新增候选")[1].split("## 已消失")[0]
+    assert "### 英超（1）" in added and "### PPL（1）" in added   # 未知代码原样回退
+    assert added.index("### 英超") < added.index("### PPL")       # 五大在未知代码前
+    assert "Newc vs Everton" in added and "Urawa vs Kashima" in added
 
     gone = out.split("## 已消失")[1]
     assert "### 英超（1）" in gone
