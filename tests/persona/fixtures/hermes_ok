@@ -1,3 +1,6 @@
 #!/bin/sh
 # hermes_ok——合法 JSON 输出（C1：mock 与实跑同一 subprocess 代码路径）
-echo '{"verdict":"agree","confidence_delta":-0.05,"key_factors":["主队中场停赛"],"report_md":"### 点评\n主队轮换风险。"}'
+# 注：dash 的 echo 会解释 \n，把 JSON 串内变成真实换行（非法 JSON，T8 首个
+# 真解析方暴露）；printf 的 %s 不解释参数转义——串内 \n 保持两字符转义，
+# 与真实 hermes 输出同形。
+printf '%s\n' '{"verdict":"agree","confidence_delta":-0.05,"key_factors":["主队中场停赛"],"report_md":"### 点评\n主队轮换风险。"}'

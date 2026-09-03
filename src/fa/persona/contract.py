@@ -40,8 +40,12 @@ def build_prompt(persona_md: str, input_obj: dict) -> str:
 # ---------------------------------------------------------------- 输入组装
 
 
-def build_input(conn: sqlite3.Connection, fixture_id: int) -> dict:
+def build_input(conn: sqlite3.Connection, fixture_id: int, run_id: int) -> dict:
     """§6.3 输入 JSON 的 dict 形态——字段全部来自库内（§1.4：不发明数字）。
+
+    ``run_id`` = 本次点评所属的 run（run 承载 phase，§3.2）：candidates /
+    model_summary 只取 ``(fixture_id, run_id)`` 的行——am/pm 两窗同 market 各有
+    一行，不过滤会把双窗行一起塞进 candidates（T6 review 裁定修正）。
 
     fixture 不存在 / 主客任一侧未对齐（§3.3 NULL）/ kickoff 不可解析时抛
     :class:`PersonaError`：persona 失败可降级（§6.6，该场按纯模型处理）。
@@ -59,13 +63,13 @@ def build_input(conn: sqlite3.Connection, fixture_id: int) -> dict:
         raise PersonaError(f"fixture {fixture_id} 主客未对齐，persona 无从点评")
     kickoff_date = _kickoff_date(head["kickoff_utc"])
 
-    # 该场 model_persona 轨全部行（按落库序）；summary 从 H/D/A 行拼 model_p，
-    # 同 market 多行（am/pm 两窗）时取后落库者——persona 本就一场一次（§6.2）。
+    # 本 run（=本窗）的 model_persona 行（按落库序）；summary 从 H/D/A 行拼 model_p。
+    # persona 一场一窗一次调用（§6.2），pm 不重跑只沿用 am 判决（apply 层传播）。
     rows = conn.execute(
         "SELECT market, model_p, market_p, best_odds, edge, ev, kelly_stake_frac"
         " FROM recommendations"
-        " WHERE fixture_id = ? AND strategy = 'model_persona' ORDER BY id",
-        (fixture_id,)).fetchall()
+        " WHERE fixture_id = ? AND run_id = ? AND strategy = 'model_persona'"
+        " ORDER BY id", (fixture_id, run_id)).fetchall()
 
     obj: dict = {
         "league": head["league"],

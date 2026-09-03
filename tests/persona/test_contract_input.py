@@ -57,13 +57,17 @@ def add_run(c, phase="am"):
 
 
 def add_rec(c, fixture_id, market, model_p=0.5, market_p=0.4, best_odds=2.0,
-            edge=0.1, ev=0.3, kelly=0.02, strategy="model_persona"):
+            edge=0.1, ev=0.3, kelly=0.02, strategy="model_persona",
+            run_id=None, phase="am"):
+    """run_id 缺省时自建一个 run 行；同一次管线执行的行应挂同一 run
+    （build_input 按 (fixture_id, run_id) 取本窗行，T6 review 裁定）。"""
     return c.execute(
         "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
         " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
         " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (add_run(c), fixture_id, strategy, market, "am", model_p, market_p,
-         best_odds, "pinnacle", edge, ev, kelly, "2026-09-10T09:00:00Z")).lastrowid
+        (add_run(c, phase) if run_id is None else run_id, fixture_id, strategy,
+         market, phase, model_p, market_p, best_odds, "pinnacle", edge, ev,
+         kelly, "2026-09-10T09:00:00Z")).lastrowid
 
 
 def _seed(c):
@@ -71,10 +75,11 @@ def _seed(c):
 
     - home 近 5 场（date DESC）W W D L W；away 近 5 场 L L D W L
     - 两队上赛季交手 2 次（更近的 2026-04-12 主场 4-2）
-    - model_persona 轨两行（H 与 O2.5，H 的 model_p=0.52）
+    - model_persona 轨两行（H 与 O2.5，H 的 model_p=0.52，同一 run——一次管线
+      执行产出本窗全部行）
     - 两行时间边界陷阱（见模块 docstring）
 
-    返回主 fixture id。
+    返回主 fixture id 与该 run id（build_input 需按 run 取候选）。
     """
     # 近 5 场：各自对手不取彼此（避免多出 h2h 行）；两队日期错开便于对账
     add_match(c, HOME, "Freiburg", "2026-09-04", 3, 1)           # W
@@ -96,21 +101,22 @@ def _seed(c):
     add_match(c, HOME, "Union Berlin", "2026-09-08", None, None)
 
     fx = add_fixture(c, "ev-d1-1", HOME, AWAY)
+    run = add_run(c)
     add_rec(c, fx, "H", model_p=0.52, market_p=0.44, best_odds=2.05, edge=0.08,
-            ev=0.16, kelly=0.01)
+            ev=0.16, kelly=0.01, run_id=run)
     add_rec(c, fx, "O2.5", model_p=0.58, market_p=0.545, best_odds=1.95,
-            edge=0.035, ev=0.131, kelly=0.008)
-    return fx
+            edge=0.035, ev=0.131, kelly=0.008, run_id=run)
+    return fx, run
 
 
 @pytest.fixture
 def conn_seeded(tmp_path):
-    """每用例独立新库；yield ``(连接, 主 fixture id)``。"""
+    """每用例独立新库；yield ``(连接, 主 fixture id, run id)``。"""
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
     c.commit()
     try:
-        yield c, _seed(c)
+        yield c, *_seed(c)
     finally:
         c.close()
 
@@ -119,8 +125,8 @@ def conn_seeded(tmp_path):
 
 
 def test_build_input_shape(conn_seeded):
-    conn, fx = conn_seeded
-    obj = build_input(conn, fx)
+    conn, fx, run = conn_seeded
+    obj = build_input(conn, fx, run)
     assert obj["league"] == "D1"
     assert obj["match"] == {"kickoff_utc": KICKOFF, "home": HOME, "away": AWAY}
     assert [c["market"] for c in obj["candidates"]] == ["H", "O2.5"]
@@ -142,14 +148,31 @@ def test_build_input_shape(conn_seeded):
 
 
 def test_build_input_omits_empty_sections(conn_seeded):
-    conn, _ = conn_seeded
+    conn, _fx, run = conn_seeded
     fx = add_fixture(conn, "ev-it1", "Juventus", "Napoli", league="IT1")
-    obj = build_input(conn, fx)
+    obj = build_input(conn, fx, run)
     assert obj["candidates"] == []                # 该场无 model_persona 行
     assert obj["form"] == {"home_last5": [], "away_last5": []}
     assert obj["h2h_recent"] == []
     assert "home_pos" not in obj                   # 无本赛季数据 → 两键俱缺
     assert "away_pos" not in obj
+
+
+def test_build_input_candidates_filtered_by_run(conn_seeded):
+    """am/pm 双窗同 market 各一行：candidates/model_summary 按 (fixture_id, run_id)
+    取**本窗**行（T6 review 裁定）——不按 run 过滤会把两窗同 market 双行一起塞进
+    candidates，persona 一场一次的输入被重复候选污染。"""
+    conn, fx, run_am = conn_seeded
+    run_pm = add_run(conn, phase="pm")
+    add_rec(conn, fx, "H", model_p=0.55, market_p=0.5, kelly=0.02,
+            run_id=run_pm, phase="pm")
+    am = build_input(conn, fx, run_am)
+    pm = build_input(conn, fx, run_pm)
+    assert [c["market"] for c in am["candidates"]] == ["H", "O2.5"]
+    assert [c["market"] for c in pm["candidates"]] == ["H"]
+    assert pm["candidates"][0]["model_p"] == pytest.approx(0.55, abs=1e-9)
+    assert pm["model_summary"] == {"p_home": pytest.approx(0.55, abs=1e-9)}
+    assert am["model_summary"] == {"p_home": pytest.approx(0.52, abs=1e-9)}
 
 
 # ---------------------------------------------------------------- 查询语义
@@ -158,8 +181,8 @@ def test_build_input_omits_empty_sections(conn_seeded):
 def test_sameday_and_unplayed_rows_are_not_history(conn_seeded):
     """kickoff 当日同配对（0-5）与未完赛行（fthg NULL）都不是历史：取走任一行，
     form 串 / h2h 立即变形（当日 0-5 会顶到 h2h 首位、None 行会挤掉最末一个 W）。"""
-    conn, fx = conn_seeded
-    obj = build_input(conn, fx)
+    conn, fx, run = conn_seeded
+    obj = build_input(conn, fx, run)
     assert obj["form"]["home_last5"] == ["W", "W", "D", "L", "W"]
     assert obj["h2h_recent"][0]["date"] == "2026-04-12"
     assert len(obj["h2h_recent"]) == 2
@@ -172,7 +195,7 @@ def test_positions_come_from_current_season_before_kickoff(conn_seeded):
     """E0 四队小联赛，主客两队本赛季**不交手**（h2h 不被积分行污染）：映射按
     team_id 不按主客顺序；上赛季行（date 在前、season≠推断值）与当日行都不得
     计入积分——任一口径写错，Chelsea 都会窜到第 1、home_pos 变 1。"""
-    conn, _ = conn_seeded
+    conn, _fx, run = conn_seeded
     e0 = "E0"
     add_match(conn, "Chelsea", "Spurs", "2026-08-20", 3, 0, league=e0)
     add_match(conn, "Arsenal", "Spurs", "2026-08-24", 1, 0, league=e0)
@@ -184,7 +207,7 @@ def test_positions_come_from_current_season_before_kickoff(conn_seeded):
     add_match(conn, "Chelsea", "Arsenal", NOW, 3, 0, league=e0)
     # Arsenal 6 分(+2) > Chelsea 3 分(+2, 3 净胜球压 Everton 0) > Everton 3 > Spurs 0
     fx = add_fixture(conn, "ev-e0", "Chelsea", "Arsenal", league=e0)
-    obj = build_input(conn, fx)
+    obj = build_input(conn, fx, run)
     assert obj["home_pos"] == 2 and obj["away_pos"] == 1
     assert obj["h2h_recent"] == [{"date": "2026-05-02", "score": "4-0",
                                   "home": "Chelsea"}]
@@ -193,12 +216,12 @@ def test_positions_come_from_current_season_before_kickoff(conn_seeded):
 def test_unaligned_or_missing_fixture_raises(conn_seeded):
     """任一侧未对齐（§3.3 NULL）或 fixture 不存在 → PersonaError（§6.6 可降级，
     该场按纯模型处理，不猜队名）。"""
-    conn, _ = conn_seeded
+    conn, _fx, run = conn_seeded
     unaligned = add_fixture(conn, "ev-null-side", HOME, None)
     with pytest.raises(PersonaError):
-        build_input(conn, unaligned)
+        build_input(conn, unaligned, run)
     with pytest.raises(PersonaError):
-        build_input(conn, 10 ** 9)
+        build_input(conn, 10 ** 9, run)
 
 
 # ---------------------------------------------------------------- prompt 拼装

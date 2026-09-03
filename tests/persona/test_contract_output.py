@@ -6,6 +6,10 @@ from fa.persona.contract import (PersonaContractError, extract_json,
 
 GOOD = {"verdict": "downweight", "confidence_delta": -0.05,
         "key_factors": ["a"], "report_md": "x"}
+# bool 用例取 agree 底座：若去掉 bool 排除，True/False 当作 1/0 会滑过值域与
+# downweight 条款被放行——agree 底座使该两条用例真正钉在类型条款上。
+AGREE = {"verdict": "agree", "confidence_delta": 0.0,
+         "key_factors": ["a"], "report_md": "x"}
 
 
 def test_extract_plain():
@@ -38,6 +42,10 @@ def test_extract_failure():
     ({**GOOD, "key_factors": ["字" * 51]}, "单条超 50 字"),
     ({**GOOD, "report_md": "字" * 501}, "超 500 字"),
     ({**GOOD, "confidence_delta": "0.05"}, "非数值"),
+    ({**GOOD, "confidence_delta": 0.0}, "downweight 恰 0 仍须 <0"),      # T7 遗留
+    ({**AGREE, "confidence_delta": True}, "bool 是 int 子类，显式排除"),
+    ({**AGREE, "confidence_delta": False}, "False 同为 bool"),
+    ({**GOOD, "confidence_delta": float("nan")}, "NaN 过不了值域比较"),
 ])
 def test_validate_rejects(obj, why):
     with pytest.raises(PersonaContractError):
