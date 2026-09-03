@@ -147,3 +147,90 @@ def test_timeout_classified_by_flag_not_message(conn, clock, tmp_path):
     assert out["n_timeout"] == 1 and out["n_error"] == 0
     row = conn.execute("SELECT status FROM retro_attributions").fetchone()
     assert row["status"] == "timeout"
+
+
+# ---- ensemble（N 成员循环 + 聚合行，计划 Task 3）----
+
+_ENS_OK_A = json.dumps({
+    "miss_tags": ["injury", "motivation"], "primary_tag": "injury",
+    "tags_confidence": 0.8, "model_vs_market": "model_wrong",
+    "evidence": [{"title": "t", "date": "2024-04-01",
+                  "url": "https://e.com/1"}],
+    "digest": "伤停为主因。"}, ensure_ascii=False)
+_ENS_OK_B = json.dumps({
+    "miss_tags": ["motivation"], "primary_tag": "motivation",
+    "tags_confidence": 0.6, "model_vs_market": "variance",
+    "evidence": [{"title": "u", "date": "2024-04-02",
+                  "url": "https://e.com/2"}],
+    "digest": "动机为主因。"}, ensure_ascii=False)
+# 偏离计划稿处（唯一）：计划稿 _sequence(A, A, B) 让 injury 多数联盟两个
+# 成员都携带 motivation → 计数域（primary 一致成员）内 2 票 ≥2 → 聚合
+# miss_tags=["injury","motivation"]，与本用例断言 ["injury"]（注释「motivation
+# 1 票」）自相矛盾、必然红。第二枚 injury 成员改用 _ENS_OK_C（miss_tags 仅
+# injury），复现 test_aggregate::test_majority_primary_and_tags 的正典场景；
+# 全部断言与注释逐字保留。
+_ENS_OK_C = json.dumps({
+    "miss_tags": ["injury"], "primary_tag": "injury",
+    "tags_confidence": 0.7, "model_vs_market": "model_wrong",
+    "evidence": [{"title": "v", "date": "2024-04-03",
+                  "url": "https://e.com/3"}],
+    "digest": "伤停为最大因素。"}, ensure_ascii=False)
+
+
+def _call_ok(output):
+    def fake(prompt):
+        return {"ok": True, "output": output, "error": None,
+                "duration_s": 0.5, "timeout": False}
+    return fake
+
+
+def _sequence(*outputs):
+    it = iter(outputs)
+    def fake(prompt):
+        return {"ok": True, "output": next(it), "error": None,
+                "duration_s": 0.5, "timeout": False}
+    return fake
+
+
+def test_ensemble_majority_writes_members_and_aggregate(conn, clock, tmp_path):
+    out = run_retro_batch(conn, _cands(conn)[:1], "manual",
+                          {"attributors": 3}, tmp_path / "p",
+                          call=_sequence(_ENS_OK_A, _ENS_OK_C, _ENS_OK_B),
+                          attributors=3)
+    assert (out["n_ok"], out["n_error"]) == (1, 0)
+    rows = conn.execute(
+        "SELECT attributor, status, primary_tag, miss_tags_json, digest"
+        " FROM retro_attributions ORDER BY attributor").fetchall()
+    assert [r["attributor"] for r in rows] == [0, 1, 2, 3]   # 聚合 0 在前
+    agg = rows[0]
+    assert agg["status"] == "ok" and agg["primary_tag"] == "injury"
+    assert json.loads(agg["miss_tags_json"]) == ["injury"]   # motivation 1 票
+    assert agg["digest"] == "伤停为主因。"                     # 序最小一致成员
+    assert rows[1]["primary_tag"] == "injury"
+    assert rows[3]["primary_tag"] == "motivation"
+
+
+def test_ensemble_all_failed_aggregate_error(conn, clock, tmp_path):
+    def all_timeout(prompt):
+        return {"ok": False, "output": "", "error": "hermes -z 超时（300s）",
+                "duration_s": 300.0, "timeout": True}
+    out = run_retro_batch(conn, _cands(conn)[:1], "manual", {},
+                          tmp_path / "p", call=all_timeout, attributors=3)
+    assert (out["n_ok"], out["n_error"], out["n_timeout"]) == (0, 1, 0)
+    rows = conn.execute(
+        "SELECT attributor, status FROM retro_attributions"
+        " ORDER BY attributor").fetchall()
+    assert [r["attributor"] for r in rows] == [0, 1, 2, 3]
+    assert rows[0]["status"] == "error"            # k=0 统一 error（spec §4）
+    assert all(r["status"] == "timeout" for r in rows[1:])
+
+
+def test_single_attributor_unchanged_no_aggregate(conn, clock, tmp_path):
+    """N=1 默认路径：行为与现行一致，仅多 attributor=1 值，无聚合行。"""
+    out = run_retro_batch(conn, _cands(conn)[:1], "manual", {},
+                          tmp_path / "p", call=_call_ok(_ENS_OK_A))
+    assert (out["n_ok"], out["n_parse_fail"], out["n_timeout"],
+            out["n_error"]) == (1, 0, 0, 0)
+    rows = conn.execute("SELECT attributor, status FROM retro_attributions"
+                        ).fetchall()
+    assert len(rows) == 1 and rows[0]["attributor"] == 1
