@@ -4,6 +4,7 @@
 本模块不 import streamlit（缓存包在 loaders.py）；不碰任何有副作用的
 fa 模块（写库 / hermes / 网络）；指标公式一律复用 fa.backtest.*。
 """
+import json
 import sqlite3
 from pathlib import Path
 
@@ -114,3 +115,24 @@ def b_ab_tracks(conn: sqlite3.Connection) -> dict:
                     "pnl": list((settled["return_amt"].fillna(0) - settled["stake"]).cumsum())},
         }
     return out
+
+
+def b_runs(conn: sqlite3.Connection) -> pd.DataFrame:
+    """页4：run 历史 + runs.summary 关键键展开（诚实降级的巡检入口，spec §9.5）。"""
+    df = pd.read_sql_query(
+        "SELECT id, type, phase, status, started_at, finished_at,"
+        " credits_before, credits_after, summary FROM runs ORDER BY id DESC", conn)
+    if df.empty:
+        return df
+    parsed = df["summary"].map(lambda t: json.loads(t) if t else {})
+    for key in ("fixtures", "aligned", "bets", "degraded", "degraded_reasons"):
+        # object dtype 直建：缺键保持 None、布尔保持 Python bool（不落 NaN/np.bool_）
+        df[key] = pd.Series([d.get(key) for d in parsed], index=df.index, dtype=object)
+    return df
+
+
+def b_unknown_names(conn: sqlite3.Connection) -> pd.DataFrame:
+    """页4：队名隔离表（spec §3.3——匹配不上的进隔离表，绝不静默丢弃）。"""
+    return pd.read_sql_query(
+        "SELECT source, name, first_seen FROM unknown_names"
+        " ORDER BY first_seen, name", conn)

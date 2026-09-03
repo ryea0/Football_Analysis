@@ -2,6 +2,7 @@
 
 种子日期全部用字面量；断言数字均手算钉死。
 """
+import json
 import sqlite3
 
 import pytest
@@ -289,3 +290,60 @@ def test_b_ab_tracks_all_pending(db):
     assert t["model_only"]["n"] == 1 and t["model_only"]["n_settled"] == 0
     assert t["model_only"]["roi"] is None
     assert t["model_only"]["clv_median"] is None              # clv 全 NULL
+
+
+def test_b_runs_expands_summary(db):
+    from queries import b_runs
+
+    db.execute(
+        "INSERT INTO runs (id, type, phase, started_at, finished_at, status,"
+        " credits_before, credits_after, summary)"
+        " VALUES (1, 'matchday', 'am', '2026-09-04T11:00:00', '2026-09-04T11:02:00',"
+        " 'ok', 480, 460, ?)",
+        (json.dumps({"fixtures": 102, "aligned": 48, "bets": 14,
+                     "degraded": False, "degraded_reasons": []}),))
+    db.execute(
+        "INSERT INTO runs (id, type, phase, started_at, status, summary)"
+        " VALUES (2, 'matchday', 'am', '2026-09-05T11:00:00', 'failed',"
+        " ?)",
+        (json.dumps({"fixtures": 0, "degraded": True,
+                     "degraded_reasons": ["persona 超时"]}),))
+    db.commit()
+
+    df = b_runs(db)
+    assert list(df["id"]) == [2, 1]                           # id DESC
+    r1, r2 = df.iloc[1], df.iloc[0]
+    assert r1["fixtures"] == 102 and r1["aligned"] == 48 and r1["bets"] == 14
+    assert bool(r1["degraded"]) is False
+    assert r2["degraded"] is True and r2["degraded_reasons"] == ["persona 超时"]
+    assert r1["credits_before"] == 480 and r1["credits_after"] == 460
+    assert r2["aligned"] is None and r2["bets"] is None       # JSON 缺键 → None
+
+
+def test_b_runs_summary_null(db):
+    from queries import b_runs
+
+    db.execute("INSERT INTO runs (id, type, started_at, status, summary)"
+               " VALUES (1, 'daily', '2026-09-04T06:30:00', 'ok', NULL)")
+    db.commit()
+    df = b_runs(db)
+    assert df.iloc[0]["degraded"] is None                     # summary 为 NULL 不炸
+
+
+def test_b_unknown_names(db):
+    from queries import b_unknown_names
+
+    db.execute("INSERT INTO unknown_names (source, name, first_seen) VALUES"
+               " ('oddsapi', 'FC Koln', '2026-09-04T11:00:00'),"
+               " ('oddsapi', 'M''Gladbach', '2026-09-03T11:00:00')")
+    db.commit()
+    df = b_unknown_names(db)
+    assert list(df["name"]) == ["M'Gladbach", "FC Koln"]      # first_seen 升序
+    assert b_unknown_names(db).source.unique().tolist() == ["oddsapi"]
+
+
+def test_b_runs_empty(db):
+    from queries import b_runs, b_unknown_names
+
+    assert b_runs(db).empty
+    assert b_unknown_names(db).empty
