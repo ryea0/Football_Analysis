@@ -202,9 +202,15 @@ def _verdict_icons(recs):
 
 
 def _persona_note(rec, icons):
-    """新增候选行尾的判决标识；未判 → 空串（不渲染悬空标点）。"""
+    """新增候选行尾的判决标识——**只标 model_persona 行**。
+
+    图标是处理效应标记：persona 只对 model_persona 轨下调仓位/否决，model_only
+    是 persona 盲视的 A/B 对照轨（§6.6/§12.3），把标记挂到对照行上既悬空（该轨
+    仓位实际未动）又污染分账归因的可读性。未判 → 空串（不渲染悬空标点）。
+    """
     icon = icons.get(rec["fixture_id"])
-    return f"，persona {icon}" if icon else ""
+    return (f"，persona {icon}"
+            if icon and rec["strategy"] == _PERSONA_STRATEGY else "")
 
 
 def _is_num(v):

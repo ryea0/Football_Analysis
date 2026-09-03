@@ -574,20 +574,23 @@ def test_pm_update_persona_block_reads_pm_run_summary(conn):
 
 
 def test_pm_update_added_candidate_carries_verdict_icon(conn):
-    """pm 新增候选行尾附判决标识；盘口移动行不带点评。"""
+    """pm 新增候选行尾附判决标识——**只挂 model_persona 行**（处理效应标记，
+    不得污染 persona 盲视的对照轨，§6.6/§12.3）；盘口移动行不带点评。"""
     am = _am_with_two(conn)
     pm = _run(conn, "pm")
     fx = _fixture(conn, "ev-3", _team(conn, "Newc"), _team(conn, "Everton"))
     conn.commit()
     _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", 1.90)   # 移动（am 2.10 → 1.90）
-    _rec(conn, pm, fx, "A", "pm", 3.60)                   # model_only 新增
+    _rec(conn, pm, fx, "A", "pm", 3.60)                   # model_only 新增（同场对照轨）
     _persona_rec(conn, pm, fx, "A", "pm", 3.55, verdict="downweight",
                  delta=-0.05, factors="[]", report_md="x")
     conn.commit()
     out = render_pm_update(conn, am, pm, 430, False)
-    added = [l for l in out.splitlines()
-             if "Newc vs Everton" in l and "模型+persona" in l]
-    assert added and "⚠️" in added[0]                     # 新增行带判决标识
+    added = [l for l in out.splitlines() if "Newc vs Everton" in l]
+    persona_line = [l for l in added if "模型+persona" in l]
+    blind_line = [l for l in added if "纯模型" in l]
+    assert persona_line and "，persona ⚠️" in persona_line[0]   # persona 轨行带判决标识
+    assert blind_line and "，persona" not in blind_line[0]      # 对照轨不带：该轨仓位未下调
     moved = [l for l in out.splitlines() if "2.10 → 1.90" in l]
     assert moved and "persona" not in moved[0]            # 移动行不带点评
 

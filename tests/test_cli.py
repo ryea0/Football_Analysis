@@ -522,9 +522,10 @@ def test_bet_settle_won_default_return_and_bankroll_untouched(tmp_path, monkeypa
     from fa.db import get_meta
     conn = connect(db)
     try:
-        # 手工结算不记账（T7 自动路径才动）；两轨键一个都不写
+        # 手工结算不记账（T7 自动路径才动）；两轨键不写，旧单键也不被复活
         assert get_meta(conn, bankroll_key("model_only")) is None
         assert get_meta(conn, bankroll_key("model_persona")) is None
+        assert get_meta(conn, "paper_bankroll") is None
     finally:
         conn.close()
 
