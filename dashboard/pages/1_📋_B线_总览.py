@@ -37,4 +37,6 @@ else:
 
 st.subheader("最近 run")
 df = runs().head(5)
+if df.empty:
+    st.caption("暂无 run 记录")
 st.dataframe(df, use_container_width=True, hide_index=True)

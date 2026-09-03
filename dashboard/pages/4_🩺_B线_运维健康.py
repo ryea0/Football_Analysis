@@ -26,6 +26,8 @@ else:
     st.success("无降级 run")
 
 st.subheader("runs 历史（summary 已展开）")
+if df.empty:
+    st.caption("暂无 run 记录")
 st.dataframe(df, use_container_width=True, hide_index=True)
 
 st.subheader("队名隔离表（unknown_names）")

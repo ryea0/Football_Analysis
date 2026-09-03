@@ -28,14 +28,17 @@ for col, (name, tr) in zip((c1, c2), t.items()):
         st.metric("CLV 中位数", "—" if tr["clv_median"] is None
                   else f"{tr['clv_median']:+.2%}")
 
-fig = go.Figure()
-for name, tr in t.items():
-    if tr["cum"]["dates"]:
-        fig.add_trace(go.Scatter(x=tr["cum"]["dates"], y=tr["cum"]["pnl"],
-                                 mode="lines+markers", name=name))
-fig.update_layout(height=320, margin=dict(t=30, b=20),
-                  yaxis_title="累计 P&L（已结算）")
-st.plotly_chart(fig, use_container_width=True)
+if any(tr["cum"]["dates"] for tr in t.values()):
+    fig = go.Figure()
+    for name, tr in t.items():
+        if tr["cum"]["dates"]:
+            fig.add_trace(go.Scatter(x=tr["cum"]["dates"], y=tr["cum"]["pnl"],
+                                     mode="lines+markers", name=name))
+    fig.update_layout(height=320, margin=dict(t=30, b=20),
+                      yaxis_title="累计 P&L（已结算）")
+    st.plotly_chart(fig, use_container_width=True)
+else:
+    st.info("两轨均无已结算注——累计 P&L 曲线待首个结算日落库后出现")
 
 st.caption("§12.3 判据：累计 ≥300 注且 model_persona 轨 CLV>0 或 ROI 显著优于 "
            "model_only 才算胜出。当前样本量见上方进度条——远未达标时这些数字"
