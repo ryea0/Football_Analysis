@@ -175,6 +175,86 @@ def _list_unknown(conn, source: str, league: str | None, top: int) -> None:
     typer.echo(f"确认方式：fa data aliases --confirm \"TEAM_ID=别名\"（建议范围：{scope}）")
 
 
+# ---- 线 A：dsh agent 当大脑（spec §12.5）------------------------------------
+
+agentline_app = typer.Typer(help="范式对比线（spec §12.5）——线 A：dsh agent 当大脑")
+app.add_typer(agentline_app, name="agentline")
+
+
+@agentline_app.command("export")
+def agentline_export(league: str = typer.Option(...), season: int = typer.Option(...),
+                     n: int = typer.Option(30), seed: int = typer.Option(42)) -> None:
+    """抽样并导出信息集 JSON（幂等，已存在跳过）"""
+    from fa.agentline.export import export_batch, pick_sample
+    from fa.config import project_root
+    conn = connect()
+    ids = pick_sample(conn, league, season, n, seed)
+    written = export_batch(conn, ids, project_root() / "data" / "agentline")
+    conn.close()
+    typer.echo(f"样本 {len(ids)} 场，新导出 {len(written)} 个信息集"
+               f"（data/agentline/）")
+
+
+@agentline_app.command("run")
+def agentline_run(line: str = typer.Option(..., help="A_base 或 A_enh"),
+                  limit: int = typer.Option(None)) -> None:
+    """跑一批线 A 预测（幂等续跑：只补无 ok 行的场次）"""
+    from fa.agentline.orchestrate import run_line
+    from fa.config import project_root
+    if line not in ("A_base", "A_enh"):
+        typer.echo(f"line 必须是 A_base 或 A_enh，收到 {line}")
+        raise typer.Exit(2)
+    conn = connect()
+    counts = run_line(conn, line, project_root() / "data" / "agentline", limit)
+    conn.close()
+    typer.echo(f"line={line} 完成：{counts}")
+
+
+@agentline_app.command()
+def runs() -> None:
+    """线 A 运行台账"""
+    conn = connect()
+    for r in conn.execute(
+            "SELECT id, line, n_ok, n_parse_fail, n_timeout, n_error,"
+            " started_at, summary FROM agentline_runs"
+            " ORDER BY id DESC LIMIT 20"):
+        typer.echo(f"#{r['id']} {r['line']} ok={r['n_ok']} "
+                   f"parse_fail={r['n_parse_fail']} timeout={r['n_timeout']} "
+                   f"error={r['n_error']} @{r['started_at']}")
+    conn.close()
+
+
+@agentline_app.command()
+def compare(league: str = typer.Option(None), season: int = typer.Option(None),
+            out: str = typer.Option(None)) -> None:
+    """三线对比滚动报告（docs/agentline/compare-YYYYMMDD.md）"""
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from fa.agentline.compare import compare_lines, render_report
+    from fa.config import project_root
+    conn = connect()
+    try:
+        cmp = compare_lines(conn,
+                            [league] if league else None,
+                            [season] if season else None)
+    except (ValueError, sqlite3.OperationalError) as exc:
+        # 空表（evaluate 抛 ValueError）与未迁移（表不存在 → OperationalError）
+        # 都是可预期的初装状态，给友好出口而非 traceback（先例：_a_line_summary）。
+        conn.close()
+        typer.echo(f"对比报告未生成：无预测行——先跑回测，或数据库未迁移"
+                   f"（先 fa init）（{exc}）")
+        raise typer.Exit(code=1)
+    conn.close()
+    # 文件名与报告内时间戳统一 UTC：compare-YYYYMMDD 不随本机时区漂移，
+    # 报告首行的「生成于 … UTC」才能对得上同一个文件名。
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    p = Path(out) if out else (
+        project_root() / "docs" / "agentline" / f"compare-{stamp}.md")
+    render_report(cmp, p)
+    typer.echo(f"报告已写：{p}")
+
+
 backtest_app = typer.Typer(help="回测")
 app.add_typer(backtest_app, name="backtest")
 

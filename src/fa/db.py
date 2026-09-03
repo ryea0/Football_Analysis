@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -177,6 +177,44 @@ CREATE INDEX IF NOT EXISTS idx_retro_attr_batch ON retro_attributions (batch_id)
 CREATE INDEX IF NOT EXISTS idx_retro_attr_match ON retro_attributions (match_id);
 """
 
+# 范式对比线两表（spec §12.5 / 设计 §6）：线 A 专用，与 B 线表物理隔离——
+# 本模块的 B 线边界注释同样适用于这里：绝不写 recommendations / bets 等。
+# v4/v5 分层由并行分支合并产生（2026-09-04）：retro 先占 v4，本线抬 v5。
+_AL_TABLE = """
+CREATE TABLE IF NOT EXISTS agentline_predictions (
+    id                INTEGER PRIMARY KEY,
+    match_id          INTEGER NOT NULL REFERENCES matches(id),
+    line              TEXT NOT NULL
+        CHECK (line IN ('A_base', 'A_enh')),
+    p_home REAL, p_draw REAL, p_away REAL, p_over25 REAL,   -- parse_fail 时 NULL
+    confidence        REAL,
+    reasoning_digest  TEXT,
+    sources_json      TEXT,           -- 增强层引用来源（基线层 '[]'）
+    raw_output        TEXT NOT NULL,  -- agent 原始返回全文（审计/重放）
+    status            TEXT NOT NULL
+        CHECK (status IN ('ok', 'parse_fail', 'timeout', 'error')),
+    repaired          INTEGER,        -- 是否经 JSON 修复（0/1）
+    harness           TEXT,           -- dsh 版本审计
+    model             TEXT,
+    duration_s        REAL,
+    created_at        TEXT NOT NULL,
+    UNIQUE (match_id, line)           -- 幂等：一场一line一行
+);
+CREATE INDEX IF NOT EXISTS idx_alp_line ON agentline_predictions (line);
+
+CREATE TABLE IF NOT EXISTS agentline_runs (
+    id          INTEGER PRIMARY KEY,
+    line        TEXT NOT NULL,
+    profile     TEXT NOT NULL,
+    model       TEXT,
+    n_ok INTEGER NOT NULL DEFAULT 0, n_parse_fail INTEGER NOT NULL DEFAULT 0,
+    n_timeout  INTEGER NOT NULL DEFAULT 0, n_error INTEGER NOT NULL DEFAULT 0,
+    started_at  TEXT NOT NULL,
+    finished_at TEXT,
+    summary     TEXT                          -- JSON（样本筛选条件等）
+);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
@@ -222,7 +260,7 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-""" + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE
+""" + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE + _AL_TABLE
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -255,13 +293,17 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     """顺序升级，逐级纯加法、无数据搬迁：
     v1->v2 新增 backtest_predictions；v2->v3 新增 B 线五表
     （fixtures / odds_snapshots / runs / recommendations / bets）；v3->v4 新增
-    retro 两表（retro_runs / retro_attributions，A 线复盘归因子线）。"""
+    retro 两表（retro_runs / retro_attributions，A 线复盘归因子线）；
+    v4->v5 新增范式对比线两表（agentline_predictions / agentline_runs），
+    v5 分层由 2026-09-04 并行分支合并产生（retro 与本线同日各自 bump v4）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
         conn.executescript(_BLINE_TABLE)
     if from_v < 4:
         conn.executescript(_RETRO_TABLE)
+    if from_v < 5:
+        conn.executescript(_AL_TABLE)
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 

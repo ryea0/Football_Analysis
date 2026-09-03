@@ -24,6 +24,8 @@ def conn(tmp_path):
 
 # B 线五表（schema v3）：表边界见 spec §12.1——B 线独占，绝不写 backtest_predictions
 _BLINE_TABLES = ("fixtures", "odds_snapshots", "recommendations", "bets", "runs")
+# 范式对比线两表（schema v5；v4 为 retro 线）：线 A 专属，物理隔离分账（spec §12.5）
+_AGENTLINE_TABLES = ("agentline_predictions", "agentline_runs")
 
 
 def _table_cols(c, table: str) -> dict:
@@ -82,10 +84,12 @@ def test_meta_roundtrip(conn):
     assert get_meta(conn, "k") == "v2"
 
 
-def test_fresh_db_is_v4(tmp_path):
+def test_fresh_db_is_current(tmp_path):
+    """版本断言钉 SCHEMA_VERSION 而非字面量：schema 每次演进（如 v3→v4）无须改用例。"""
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
@@ -126,8 +130,8 @@ def _assert_legacy_rows_intact(c, bp_count: int = 1) -> None:
                 bp["total_goals"]) == ('E0', 2025, 'H', 3)
 
 
-def test_v2_upgrades_to_v4(tmp_path):
-    """v2→v4：纯加法。B 线五表与 retro 两表新出现且为空，既有表与数据一字不动。"""
+def test_v2_upgrades_to_current(tmp_path):
+    """v2→当前：纯加法。B 线五表与 retro/agentline 各两表新出现且为空，既有表与数据一字不动。"""
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
     _seed_legacy_rows(c)
@@ -136,28 +140,32 @@ def test_v2_upgrades_to_v4(tmp_path):
     init_db(tmp_path / "t.db")                               # 不抛异常即升级成功
 
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
-    for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions"):
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+    for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions", *_AGENTLINE_TABLES):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c)
     c.close()
 
 
-def test_v1_upgrades_to_v4(tmp_path):
-    """v1→v4 跨级升级：backtest_predictions、B 线五表与 retro 两表一并补齐。"""
+def test_v1_upgrades_to_current(tmp_path):
+    """v1→当前 跨级升级：backtest_predictions 与 B 线五表一并补齐。"""
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
     _seed_legacy_rows(c)
     c.commit(); c.close()
     _set_version(tmp_path / "t.db", 1,
-                 drop=("backtest_predictions", *_BLINE_TABLES))
+                 drop=("backtest_predictions", *_BLINE_TABLES,
+                       "retro_runs", "retro_attributions", *_AGENTLINE_TABLES))
     init_db(tmp_path / "t.db")
 
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     assert c.execute(
         "SELECT COUNT(*) c FROM backtest_predictions").fetchone()["c"] == 0
-    for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions"):
+    for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions",
+              *_AGENTLINE_TABLES):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c, bp_count=0)
     c.close()
@@ -292,7 +300,7 @@ def test_bline_vocab_accepts_all_legal_values(conn, bline_ids):
 
 
 def test_migrate_up_v1_adds_everything(tmp_path):
-    """_migrate_up 单独跑就能把 v1 库补齐到 v4（不依赖 _SCHEMA 兜底）。"""
+    """_migrate_up 单独跑就能把 v1 库补齐到当前版本（不依赖 _SCHEMA 兜底）。"""
     p = tmp_path / "v1.db"
     _legacy_db(p, version=1, with_bp=False)
     c = connect(p)
@@ -301,7 +309,7 @@ def test_migrate_up_v1_adds_everything(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
     assert c.execute(
-        "SELECT version FROM schema_version").fetchone()["version"] == 4
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     c.close()
 
 
@@ -321,21 +329,21 @@ def test_migrate_up_v2_adds_bline_and_retro(tmp_path):
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='backtest_predictions'").fetchone()["sql"] == bp_before
     assert c.execute(
-        "SELECT version FROM schema_version").fetchone()["version"] == 4
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     c.close()
 
 
 def test_migrate_and_fresh_schemas_match(tmp_path):
     """新建与迁移两条路径产出的全部表/索引 DDL 必须逐字一致（M2 教训的推广）。"""
-    init_db(tmp_path / "a.db")                      # 全新 v4
-    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回 v4
+    init_db(tmp_path / "a.db")                      # 全新库
+    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回当前版本
     _set_version(tmp_path / "b.db", 1,
                  drop=("backtest_predictions", *_BLINE_TABLES,
-                       "retro_runs", "retro_attributions"))
+                       "retro_runs", "retro_attributions", *_AGENTLINE_TABLES))
     init_db(tmp_path / "b.db")
 
     tables = ("backtest_predictions", *_BLINE_TABLES,
-              "retro_runs", "retro_attributions")
+              "retro_runs", "retro_attributions", *_AGENTLINE_TABLES)
     a = connect(tmp_path / "a.db")
     b = connect(tmp_path / "b.db")
     for t in tables:
@@ -371,7 +379,7 @@ def bline_ids(conn):
 
 
 def test_backtest_predictions_schema_unchanged(conn):
-    """B 线边界烟测：A 线独占表的列集/约束在 schema v4 下不得有任何变动。"""
+    """B 线边界烟测：A 线独占表的列集/约束在历次 schema 升级下不得有任何变动。"""
     cols = _table_cols(conn, "backtest_predictions")
     assert list(cols) == ["id", "league", "season", "week_index", "match_id",
                           "date", "p_home", "p_draw", "p_away", "p_over25",
@@ -554,11 +562,13 @@ def test_v4_creates_retro_tables(tmp_path):
 
 
 def test_is_control_column_pinned(tmp_path):
-    """is_control 后补列（2026-09-04 终审）：病例=0/对照=1。钉死三件事——
-    建表即含列、NOT NULL DEFAULT 0（直插不给值不炸且落 0）、SCHEMA_VERSION
-    保持 4（纯加列不走迁移）。"""
+    """is_control 后补列（2026-09-04 终审）：病例=0/对照=1。钉死两件事——
+    建表即含列、NOT NULL DEFAULT 0（直插不给值不炸且落 0）。
+    原「SCHEMA_VERSION 保持 4」断言在 agentline 分支抬 v5（2026-09-04 并行
+    合并）后不再成立：retro 的 is_control 加列本身仍不 bump，但库版本随
+    v5 整体上移，故此断言改为不依赖具体版本值。"""
     from fa.db import SCHEMA_VERSION, connect, init_db
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION >= 4
     db = tmp_path / "ic.db"
     init_db(db)
     conn = connect(db)
@@ -604,8 +614,9 @@ def test_is_control_column_pinned(tmp_path):
         conn.close()
 
 
-def test_v3_migrates_to_v4(tmp_path):
-    """老库（v3）经 init_db 升级到 v4，retro 表出现且 schema_version=4。"""
+def test_v3_migrates_to_current(tmp_path):
+    """老库（v3）经 init_db 升级到当前版本，retro 表出现且 version==SCHEMA_VERSION
+    （v4=retro 两表、v5=agentline 两表，见 _migrate_up docstring）。"""
     from fa.db import SCHEMA_VERSION, connect, init_db
     db = tmp_path / "old.db"
     init_db(db)
@@ -619,8 +630,9 @@ def test_v3_migrates_to_v4(tmp_path):
     conn = connect(db)
     try:
         assert conn.execute(
-            "SELECT version FROM schema_version").fetchone()["version"] == 4
-        assert SCHEMA_VERSION == 4
+            "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+        # v4=retro 层已并入（agentline 分支抬 v5），钉下限而非具体值
+        assert SCHEMA_VERSION >= 4
         names = {r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"retro_runs", "retro_attributions"} <= names
@@ -630,7 +642,7 @@ def test_v3_migrates_to_v4(tmp_path):
 
 def test_migrate_up_v3_adds_retro(tmp_path):
     """_migrate_up 单独跑就能给 v3 库补上 retro 两表（不经 _SCHEMA 兜底）——
-    init_db 会先跑 _SCHEMA 把缺口兜掉，单看 init_db 测不出 v4 分支死活。"""
+    init_db 会先跑 _SCHEMA 把缺口兜掉，单看 init_db 测不出迁移分支死活。"""
     p = tmp_path / "v3.db"
     _legacy_db(p, version=3, with_bp=True)
     c = connect(p)
@@ -641,5 +653,5 @@ def test_migrate_up_v3_adds_retro(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"retro_runs", "retro_attributions"} <= names
     assert c.execute(
-        "SELECT version FROM schema_version").fetchone()["version"] == 4
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     c.close()
