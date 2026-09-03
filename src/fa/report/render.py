@@ -12,6 +12,7 @@ CLV 预览方向与 spec §7.3 一致：odds_taken / 收盘价 − 1。pm 视角
 给负 CLV。
 """
 import json
+from datetime import datetime, timedelta, timezone
 
 from fa.db import get_meta
 from fa.model.fit import FitConfig
@@ -29,6 +30,15 @@ _STRATEGY = {"model_only": "纯模型", "model_persona": "模型+persona"}
 
 # 价格比较容差：best_odds 经 JSON/浮点往返，1e-9 级差异视为未变，不产假「盘口移动」
 _ODDS_EPS = 1e-9
+
+# §7.1 第 1 条本就是「各联赛候选场次」——按联赛分块是回正（用户反馈：同一联赛
+# 应放到一起）。五大联赛给中文名，块序固定；未知代码回退原文、字母序殿后。
+_LEAGUE_CN = {"E0": "英超", "SP1": "西甲", "D1": "德甲", "I1": "意甲", "F1": "法甲"}
+_LEAGUE_ORDER = ("E0", "SP1", "D1", "I1", "F1")
+
+# 开赛时间统一换算北京时间：+8 固定偏移，不读运行机器的系统时区（跑在哪都对）。
+_CN_TZ = timezone(timedelta(hours=8))
+_WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 
 # run summary 的样本量键名已由 T9 钉死为 train_n（summary 同时落 half_life）。
 # 缺失时给中性占位「样本量：未提供」，报告骨架不缺行。
@@ -153,17 +163,114 @@ def _strategy(rec):
     return _STRATEGY.get(rec["strategy"], rec["strategy"])
 
 
+def _kickoff_cn(iso, *, ref=None):
+    """开赛时刻（北京时间）：当日 → ``周X HH:MM``，跨日 → ``MM-DD 周X HH:MM``。
+
+    ``fixtures.kickoff_utc`` 落的是 Odds API 原文（ISO-8601 UTC，``Z`` 结尾）；
+    换算用 +8 固定偏移。带不带日期以**北京日历日**为准——不是当天的都补 MM-DD，
+    否则次日凌晨（欧洲晚间场）会被误读成当天。``ref`` 仅供测试注入「当前时刻」，
+    缺省取真实的北京时间现在。NULL / 空串（Odds API 无 commence_time）/ 不可解析
+    → ``—``，脏数据不得崩掉整张表。
+    """
+    if not iso:
+        return "—"
+    try:
+        parsed = datetime.fromisoformat(str(iso).strip().replace("Z", "+00:00"))
+    except ValueError:
+        return "—"
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)   # 裸时间按 UTC 读（同 value 层）
+    loc = parsed.astimezone(_CN_TZ)
+    now = (ref if ref is not None else datetime.now(timezone.utc)).astimezone(_CN_TZ)
+    stamp = f"{_WEEKDAY_CN[loc.weekday()]} {loc:%H:%M}"
+    return stamp if loc.date() == now.date() else f"{loc:%m-%d} {stamp}"
+
+
+def _league_cn(code):
+    """五大联赛给中文名，其余原样回退（未知代码不失真、也不渲染 None）。"""
+    return _LEAGUE_CN.get(code) or code or "未知联赛"
+
+
+def _league_sort_key(code):
+    """块序：五大联赛按固定序，未知代码按字母序殿后（不挤进五大之间）。"""
+    if code in _LEAGUE_ORDER:
+        return (0, _LEAGUE_ORDER.index(code))
+    return (1, str(code or ""))
+
+
+def _league_blocks(items, league_of=lambda r: r["league"],
+                   ev_of=lambda r: r["ev"]):
+    """[(联赛代码, [item…])]：块间按联赛固定序，块内按 EV 降序（高置信先看）。
+
+    ``sorted`` 稳定——EV 打平时保持入参序（am 为 SQL 的 kickoff 序，pm 为 diff
+    配对序），分组本身不额外打乱行。
+    """
+    buckets: dict = {}
+    for it in items:
+        buckets.setdefault(league_of(it), []).append(it)
+    return [(code, sorted(group, key=lambda it: -float(ev_of(it))))
+            for code, group in sorted(buckets.items(),
+                                      key=lambda kv: _league_sort_key(kv[0]))]
+
+
+def _league_header(code, n):
+    return f"### {_league_cn(code)}（{n}）"
+
+
+def _kickoff_cell(rec):
+    return f"· 开赛 {_kickoff_cn(rec['kickoff_utc'])}"
+
+
 def _candidate_table(recs):
-    """§7.1 第 1 条：市场/赔率/模型 p vs 市场 p/EV/仓位（+ 策略列，A/B 双轨）。"""
-    header = ("| 联赛 | 场次 | 市场 | 策略 | 最优价 | 模型 p | 市场 p | EV "
-              "| 仓位 | 博彩商 |")
-    sep = "|---|---|---|---|---|---|---|---|---|---|"
+    """§7.1 第 1 条：市场/赔率/模型 p vs 市场 p/EV/仓位（+ 策略列，A/B 双轨）
+    + 开赛（北京时间，紧跟场次）。"""
+    header = ("| 联赛 | 场次 | 开赛 | 市场 | 策略 | 最优价 | 模型 p | 市场 p "
+              "| EV | 仓位 | 博彩商 |")
+    sep = "|---|---|---|---|---|---|---|---|---|---|---|"
     rows = [
-        f"| {r['league']} | {_label(r)} | {_mkt(r)} | {_strategy(r)} "
+        f"| {r['league']} | {_label(r)} | {_kickoff_cn(r['kickoff_utc'])} "
+        f"| {_mkt(r)} | {_strategy(r)} "
         f"| {r['best_odds']:.2f} | {r['model_p']:.3f} | {r['market_p']:.3f} "
         f"| {r['ev']:+.2%} | {r['kelly_stake_frac']:.2%} | {r['bookmaker']} |"
         for r in recs]
     return [header, sep] + rows
+
+
+def _candidate_section(recs):
+    """候选场次按联赛分块：每块 `### 中文名（n）` + 完整子表。
+
+    每块都带表头——Telegram 里块与块隔得远，单独截看一块也对得上列。
+    """
+    if not recs:
+        return ["- 无候选（门槛未过或无赛程）"]
+    lines = []
+    for i, (code, group) in enumerate(_league_blocks(recs)):
+        if i:
+            lines.append("")
+        lines += [_league_header(code, len(group)), ""]
+        lines += _candidate_table(group)
+    return lines
+
+
+def _grouped_lines(items, league_of, fmt, ev_of=lambda r: r["ev"]):
+    """pm diff 段的联赛分块：块间空行，空列表 → 显式「- 无」不塌段。"""
+    if not items:
+        return ["- 无"]
+    lines = []
+    for i, (code, group) in enumerate(_league_blocks(items, league_of, ev_of)):
+        if i:
+            lines.append("")
+        lines += [_league_header(code, len(group)), ""]
+        lines += [fmt(it) for it in group]
+    return lines
+
+
+def _pm_league(item):
+    return item[0]["league"]      # 盘口移动的元素是 (am_rec, pm_rec)
+
+
+def _pm_ev(item):
+    return item[0]["ev"]
 
 
 def _key(rec):
@@ -193,7 +300,7 @@ def render_matchday_report(conn, run_id, phase, summary, quota_left, degraded):
     lines = [f"# 比赛日报告 — {phase_cn}", ""]
 
     lines += _heading("候选场次", len(recs))
-    lines += _candidate_table(recs) if recs else ["- 无候选（门槛未过或无赛程）"]
+    lines += _candidate_section(recs)
     lines.append("")
 
     lines += _risk_block(quota_left, degraded, summary or {})
@@ -240,26 +347,28 @@ def render_pm_update(conn, am_run_id, pm_run_id, quota_left, degraded):
     lines = ["# 比赛日更新（pm）", ""]
 
     lines += _heading("盘口移动", len(moved))
-    lines += [
-        f"- {r['league']} {_label(r)} · {_mkt(r)} · {_strategy(r)}："
-        f"{r['best_odds']:.2f} → {p['best_odds']:.2f} "
-        f"{_clv_note(r['best_odds'], p['best_odds'])}"
-        for r, p in moved] or ["- 无"]
+    lines += _grouped_lines(
+        moved, _pm_league,
+        lambda rp: (f"- {_label(rp[0])} {_kickoff_cell(rp[0])} · {_mkt(rp[0])} "
+                    f"· {_strategy(rp[0])}：{rp[0]['best_odds']:.2f} → "
+                    f"{rp[1]['best_odds']:.2f} "
+                    f"{_clv_note(rp[0]['best_odds'], rp[1]['best_odds'])}"),
+        ev_of=_pm_ev)
     lines.append("")
 
     lines += _heading("新增候选", len(added))
-    lines += [
-        f"- {r['league']} {_label(r)} · {_mkt(r)} · {_strategy(r)} "
-        f"@ {r['best_odds']:.2f}，EV {r['ev']:+.2%}，"
-        f"仓位 {r['kelly_stake_frac']:.2%}"
-        for r in added] or ["- 无"]
+    lines += _grouped_lines(
+        added, lambda r: r["league"],
+        lambda r: (f"- {_label(r)} {_kickoff_cell(r)} · {_mkt(r)} "
+                   f"· {_strategy(r)} @ {r['best_odds']:.2f}，EV {r['ev']:+.2%}，"
+                   f"仓位 {r['kelly_stake_frac']:.2%}"))
     lines.append("")
 
     lines += _heading("已消失", len(gone))
-    lines += [
-        f"- {r['league']} {_label(r)} · {_mkt(r)} · {_strategy(r)}"
-        f"（am @ {r['best_odds']:.2f}）——已消失"
-        for r in gone] or ["- 无"]
+    lines += _grouped_lines(
+        gone, lambda r: r["league"],
+        lambda r: (f"- {_label(r)} {_kickoff_cell(r)} · {_mkt(r)} "
+                   f"· {_strategy(r)}（am @ {r['best_odds']:.2f}）——已消失"))
     lines.append("")
 
     lines += ["## 未变", "",

@@ -8,11 +8,14 @@ CLV 预览方向与 spec §7.3 一致：odds_taken / 收盘价 − 1。pm 视角
 CLV，价「走低」（2.10→2.30）给负 CLV。
 """
 import json
+from datetime import datetime, timezone
 
 import pytest
 
 from fa.db import connect, init_db
 from fa.report.render import (
+    _LEAGUE_CN,
+    _kickoff_cn,
     render_matchday_report,
     render_pm_update,
     render_settlement_brief,
@@ -20,6 +23,10 @@ from fa.report.render import (
 
 LG = "E0"
 SUMMARY = {"train_n": 1234, "half_life": 100.0}
+
+# 「现在」冻结在北京 2026-09-05 14:00（UTC 06:00）：_kickoff_cn 的当日/跨日分支
+# 用注入时刻判定，测试不依赖墙钟，也不会踩到周边界。
+FROZEN_NOW = datetime(2026, 9, 5, 6, 0, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------- 种子助手
@@ -30,12 +37,13 @@ def _team(conn, name):
     return conn.execute("SELECT id FROM teams WHERE name=?", (name,)).fetchone()["id"]
 
 
-def _fixture(conn, event_key, home_id, away_id, kickoff="2026-09-04T14:00:00Z"):
+def _fixture(conn, event_key, home_id, away_id, kickoff="2026-09-04T14:00:00Z",
+             league=LG):
     cur = conn.execute(
         "INSERT INTO fixtures (league, event_key, source, kickoff_utc,"
         " home_team_id, away_team_id, status, created_at)"
         " VALUES (?,?,?,?,?,?, 'scheduled', '2026-09-03T03:00:00Z')",
-        (LG, event_key, "oddsapi", kickoff, home_id, away_id))
+        (league, event_key, "oddsapi", kickoff, home_id, away_id))
     return cur.lastrowid
 
 
@@ -126,7 +134,7 @@ def test_am_report_markdown_structure(conn):
     out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
     assert out.startswith("# ")
     assert out.endswith("\n")
-    assert "| 联赛 | 场次 | 市场 |" in out
+    assert "| 联赛 | 场次 | 开赛 | 市场 |" in out
     assert "|---|" in out
 
 
@@ -144,7 +152,8 @@ def test_am_report_empty_candidates(conn):
     conn.commit()
     out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
     assert "无候选" in out
-    assert "| 联赛 | 场次 |" not in out
+    assert "| 联赛 | 场次 | 开赛 |" not in out
+    assert "### 英超" not in out
     assert "persona 未接入（M4）" in out
     assert "bankroll" in out
     assert "未结" in out
@@ -524,3 +533,108 @@ def test_pm_update_sub_epsilon_price_change_counts_as_unchanged(conn):
     out = render_pm_update(conn, am, pm, 430, False)
     assert "## 盘口移动（0）" in out
     assert "未变" in out and "2" in out
+
+
+# ------------------------------------- 开赛时间列（北京时间） + 按联赛分组
+
+# 用户反馈：候选散着看不通——同一联赛放到一起；开赛时间要北京时间。
+# spec §7.1 第 1 条本就是「各联赛候选场次」，分组是回正而不是加戏。
+
+
+def test_kickoff_cn_utc_afternoon_is_beijing_same_evening():
+    """UTC 14:00 → 北京 22:00（+8 固定偏移，不依赖系统时区）。"""
+    assert _kickoff_cn("2026-09-05T14:00:00Z", ref=FROZEN_NOW) == "周六 22:00"
+    assert _kickoff_cn("2026-09-05T11:30:00Z", ref=FROZEN_NOW) == "周六 19:30"
+
+
+def test_kickoff_cn_cross_day_prefixes_date():
+    """跨日（如美州的「今晚」已是北京次日）→ 带 MM-DD，不让人误以为是当天。"""
+    assert _kickoff_cn("2026-09-06T14:00:00Z", ref=FROZEN_NOW) == "09-06 周日 22:00"
+    late = datetime(2026, 9, 3, 6, 0, tzinfo=timezone.utc)
+    assert _kickoff_cn("2026-09-05T14:00:00Z", ref=late) == "09-05 周六 22:00"
+
+
+def test_kickoff_cn_null_or_garbage_renders_dash_never_crashes():
+    """kickoff_utc 缺失 / 空串（odds_api 无 commence_time）/ 垃圾 → 一律 —。"""
+    for bad in (None, "", "   ", "not-a-date", "2026-13-99T99:00:00Z"):
+        assert _kickoff_cn(bad, ref=FROZEN_NOW) == "—"
+
+
+def test_league_cn_covers_big_five():
+    assert _LEAGUE_CN["E0"] == "英超"
+    assert _LEAGUE_CN["SP1"] == "西甲"
+    assert _LEAGUE_CN["D1"] == "德甲"
+    assert _LEAGUE_CN["I1"] == "意甲"
+    assert _LEAGUE_CN["F1"] == "法甲"
+
+
+def test_am_report_groups_candidates_by_league(conn):
+    """多联赛 → 每联赛一块（中文标题 + 子表），同联赛行相邻，块序按固定联赛序。"""
+    sp1 = _fixture(conn, "ev-sp1", _team(conn, "Real"), _team(conn, "Barca"),
+                   league="SP1")
+    conn.commit()
+    rid = _run(conn, "am")
+    _rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 2.10)      # E0
+    _rec(conn, rid, _fid(conn, "ev-2"), "O2.5", "am", 1.85)   # E0
+    _rec(conn, rid, sp1, "A", "am", 3.60)                     # SP1
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+
+    assert "### 英超（2）" in out and "### 西甲（1）" in out
+    e0, es1 = out.index("### 英超"), out.index("### 西甲")
+    assert e0 < es1                       # 固定联赛序：E0 在 SP1 前
+    e0_block = out[e0:es1]
+    assert "Real vs Barca" not in e0_block            # 西甲不混进英超块
+    assert "Arsenal vs Chelsea" in e0_block
+    assert "Bayern vs Dortmund" in e0_block
+    assert e0_block.index("Arsenal vs Chelsea") < e0_block.index(
+        "Bayern vs Dortmund")                          # 同联赛行相邻
+
+
+def test_am_report_unknown_league_falls_back_to_raw_code(conn):
+    """_LEAGUE_CN 没有的代码 → 标题原样回退，不丢块。"""
+    ppl = _fixture(conn, "ev-ppl", _team(conn, "Urawa"), _team(conn, "Kashima"),
+                   league="PPL")
+    conn.commit()
+    rid = _run(conn, "am")
+    _rec(conn, rid, ppl, "H", "am", 2.40)
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "### PPL（1）" in out
+    assert "Urawa vs Kashima" in out
+
+
+def test_am_report_kickoff_column_in_beijing_time(conn):
+    """开赛列紧跟场次列，北京时间渲染（默认种子 14:00Z → 22:00）。"""
+    rid = _am_with_two(conn)
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "| 联赛 | 场次 | 开赛 | 市场 | 策略 |" in out
+    assert "|---|---|---|---|---|---|---|---|---|---|---|" in out
+    assert "22:00" in out
+    assert "None" not in out
+
+
+def test_pm_update_sections_grouped_by_league_with_kickoff(conn):
+    """pm 三个 diff 段同样按联赛分块，行内带北京时间开赛。"""
+    sp1 = _fixture(conn, "ev-sp1", _team(conn, "Real"), _team(conn, "Barca"),
+                   league="SP1")
+    conn.commit()
+    am = _run(conn, "am")
+    _rec(conn, am, _fid(conn, "ev-1"), "H", "am", 2.10)
+    _rec(conn, am, _fid(conn, "ev-2"), "O2.5", "am", 1.85)
+    _rec(conn, am, sp1, "A", "am", 3.60)
+    conn.commit()
+    pm = _run(conn, "pm")
+    _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", 1.90)     # E0 移动
+    _rec(conn, pm, sp1, "A", "pm", 3.40)                    # SP1 移动
+    conn.commit()                                            # ev-2 无 pm 行 → 已消失
+    out = render_pm_update(conn, am, pm, 430, False)
+
+    moved = out.split("## 新增候选")[0]
+    assert "### 英超（1）" in moved and "### 西甲（1）" in moved
+    assert moved.index("### 英超") < moved.index("### 西甲")
+    assert "开赛" in moved and "22:00" in moved
+
+    gone = out.split("## 已消失")[1]
+    assert "### 英超（1）" in gone
+    assert "Bayern vs Dortmund" in gone
