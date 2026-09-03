@@ -462,6 +462,11 @@ def test_unique_conflict_refreshes_prices_and_keeps_persona(priced):
     assert second["best_odds"] > first["best_odds"]
     assert second["bookmaker"] == "betfair"
     assert second["run_id"] == run2                         # 归属刷新它的 run
+    # kelly 重算的有效 pin（控制器裁定）：best_odds 刷新前后确已变化（上一行断言
+    # second > first），故 kelly 必须等于「新价」的重算值——若 DO UPDATE 漏刷该列，
+    # 这里读到的是旧价的 kelly，恒真假象被拆穿
+    assert second["kelly_stake_frac"] == kelly_fraction(
+        second["model_p"], second["best_odds"])
     # M4 persona 三列**不被** M3 的刷新清掉
     assert second["verdict"] == "keep"
     assert second["confidence_delta"] == 0.1

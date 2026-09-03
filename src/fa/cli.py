@@ -285,20 +285,26 @@ def _a_line_summary(conn) -> str:
             f"（判据：劣化 ≤ +1.00%）")
 
 
+_TRACK = {"model_only": "纯模型", "model_persona": "模型+persona"}
+
+
 def _b_line_summary(conn) -> list[str]:
-    """B 线各行：paper 台账汇总 + 额度水位 + 最近 runs + 隔离队名计数。"""
+    """B 线各行：paper 双轨台账汇总（D2，每轨一行）+ 额度水位 + 最近 runs
+    + 隔离队名计数。（两轨各占一行是 T12 的最小适配；版式精修归 T14。）"""
     from fa.db import get_meta
     from fa.pipeline.fixtures import QUOTA_META_KEY
-    from fa.pipeline.paper import BANKROLL_KEY, INITIAL_BANKROLL, paper_summary
+    from fa.pipeline.paper import INITIAL_BANKROLL, bankroll_key, paper_summary
 
-    s = paper_summary(conn)
-    bankroll = ("未初始化（首次落注时按 "
-                f"{INITIAL_BANKROLL:.0f} 写 meta {BANKROLL_KEY}）"
-                if s["bankroll"] is None else _money(s["bankroll"]))
-    lines = [f"注数={s['n']}（pending {s['pending']}）  "
-             f"已结算注金={_money(s['staked'])}  回报={_money(s['returned'])}"
-             f"  ROI={_pct(s['roi'])}  bankroll={bankroll}"
-             f"  CLV 中位数={_pct(s['clv_median'])}"]
+    lines = []
+    for strategy, s in paper_summary(conn).items():
+        bankroll = ("未初始化（首次落注时按 "
+                    f"{INITIAL_BANKROLL:.0f} 写 meta {bankroll_key(strategy)}）"
+                    if s["bankroll"] is None else _money(s["bankroll"]))
+        lines.append(f"{_TRACK.get(strategy, strategy)}："
+                     f"注数={s['n']}（pending {s['pending']}）  "
+                     f"已结算注金={_money(s['staked'])}  回报={_money(s['returned'])}"
+                     f"  ROI={_pct(s['roi'])}  bankroll={bankroll}"
+                     f"  CLV 中位数={_pct(s['clv_median'])}")
 
     quota = get_meta(conn, QUOTA_META_KEY)
     if quota is None:
@@ -390,7 +396,7 @@ def bet_add(
         typer.echo(f"--odds 须 > 1（赔率下限），收到 {odds}")
         raise typer.Exit(code=1)
 
-    from fa.pipeline.paper import BANKROLL_KEY, INITIAL_BANKROLL
+    from fa.pipeline.paper import INITIAL_BANKROLL, bankroll_key
     conn = connect()
     try:
         rec = conn.execute("SELECT * FROM recommendations WHERE id=?",
@@ -410,7 +416,7 @@ def bet_add(
             frac = (rec["final_stake_frac"] if rec["final_stake_frac"] is not None
                     else rec["kelly_stake_frac"])
             raw = conn.execute("SELECT value FROM meta WHERE key=?",
-                               (BANKROLL_KEY,)).fetchone()
+                               (bankroll_key(rec["strategy"]),)).fetchone()
             bankroll = INITIAL_BANKROLL if raw is None else float(raw["value"])
             stake = round(frac * bankroll, 2)
             _require_positive_stake(stake, f"派生注金（仓位 {frac} × bankroll）")
