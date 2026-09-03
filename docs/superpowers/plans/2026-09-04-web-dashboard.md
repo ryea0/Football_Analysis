@@ -25,6 +25,8 @@
 ---
 
 > **执行期裁定（2026-09-04，T2 评审触发）**：void 注记账 = 查询侧排除。本计划 Task 2/Task 4 代码块中的 `status != 'pending'`（界定「已结算」）一律按 **`status IN ('won', 'lost')`** 执行——void（作废/push）不进 pnl、不进 staked、不进 pending 计数。依据：spec §3.2 status 词表含 void、push 零损益；改 CLI 侧（void 写 return_amt=stake）违反「核心管线零改动」约束。测试相应追加 void 排除与 live 模式过滤用例。裁定全文见 .superpowers/sdd/2026-09-04-web-dashboard/progress.md。
+>
+> **执行期裁定（2026-09-04，T7 评审触发）**：Task 7 的 `band_label` 成员判定由全闭 `lo <= o <= hi` 改为**非末档半开 `lo <= o < hi`、末档闭（含 ODDS_MAX）**——与 `_odds_bands` 标签文本 `[1.4,2.0)`/`[2.0,3.0)`/`[3.0,6.0]` 的语义对齐（odds 恰 2.00 归下半档）。测试三档断言相应换位（[1.4,2.0)=0、[2.0,3.0)=1、[3.0,6.0]=1）。另：Task 4 断言算式 `(25-10)/20` 为笔误，修正为 `(25-20)/20`（=0.25 不变）；Task 5 种子 SQL 引号改 SQLite 标准双单引号转义、summary 展开列改 object dtype 直建（均经评审独立实测确证为简报自身缺陷）。
 
 ### Task 1: 依赖组 + 只读连接 `connect_ro`
 
