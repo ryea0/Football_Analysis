@@ -263,7 +263,11 @@ def run_matchday_cmd(
     if out["quota_left"] is not None:
         typer.echo(f"  额度：剩余 {out['quota_left']} credits（Odds API）")
     if out["degraded"]:
-        typer.echo("  降级：非实时盘（复用最近快照）——价格类字段可能滞后")
+        if out["status"] == "skipped":
+            # 空跑 + 降级只可能是「额度低于水位且当日无赛事」：没拉盘，别写复用快照
+            typer.echo("  降级：额度低于水位——本次空跑未拉盘")
+        else:
+            typer.echo("  降级：非实时盘（复用最近快照）——价格类字段可能滞后")
     if out["sent"] is None:
         typer.echo("  推送：未推送（空跑 / 无密钥）")
     elif out["sent"]:

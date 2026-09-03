@@ -37,6 +37,8 @@ def run_daily(conn: sqlite3.Connection) -> dict:
     try:
         return _run(conn, run_id)
     except Exception as exc:
+        # 先回滚：半写的阶段产物不得搭 finish_run 的 commit 一起入库
+        conn.rollback()
         finish_run(conn, run_id, STATUS_FAILED,
                    {"error": f"{type(exc).__name__}: {exc}"})
         raise
@@ -52,6 +54,12 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
         sync_error = f"{type(exc).__name__}: {exc}"
 
     settle = settle_paper_bets(conn)
+    # 降级判据看 SyncReport 而非「是否抛错」：sync_history 对单文件失败自记账不外溢
+    # （§3.4 容错设计），所以「抛错」几乎不发生；真用了旧数据结算是「一个文件都没成
+    # 却报了错」——files_ok==0 且 file_errors>0。部分成功（files_ok>0）仍算拿到新完
+    # 赛，不算降级
+    sync_degraded = bool(sync_error) or bool(
+        rep is not None and rep.file_errors and not rep.files_ok)
     summary = {
         "settled": settle["settled"],
         "won": settle["won"],
@@ -61,6 +69,7 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
                  {"files_ok": rep.files_ok, "inserted": rep.inserted,
                   "file_errors": len(rep.file_errors)}),
         "sync_error": sync_error,
+        "sync_degraded": sync_degraded,
         "telegram": None,
     }
 
@@ -71,7 +80,7 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
                                {"sent": False,
                                 "error": last_error() or "推送失败（未记录原因）"})
 
-    status = STATUS_DEGRADED if sync_error else STATUS_OK
+    status = STATUS_DEGRADED if sync_degraded else STATUS_OK
     finish_run(conn, run_id, status, summary)
     return {"status": status, "run_id": run_id, "settled": settle["settled"],
             "won": settle["won"], "pnl": settle["pnl"],

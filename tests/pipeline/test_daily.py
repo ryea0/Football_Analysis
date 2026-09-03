@@ -167,6 +167,39 @@ def test_pending_but_unplayable_also_stays_silent(env):
     assert out["settled"] == 0 and env.pushed == []
 
 
+def test_all_files_failed_is_degraded_but_settlement_still_runs(env):
+    """降级判据看 SyncReport：一个文件都没成（file_errors>0 且 files_ok==0）
+    ＝用了旧数据结算 → degraded_ok，且结算照常。"""
+    c = env.conn
+    _seed_settleable(c)
+    env.sync_report = SyncReport(
+        files_ok=0, file_errors=[("E0", 2026, "HTTP 403"), ("SP1", 2026, "超时")])
+
+    out = daily.run_daily(c)
+
+    assert env.order == ["sync", "settle"]           # 顺序语义不变
+    assert out["status"] == "degraded_ok"
+    assert out["settled"] == 1 and out["won"] == 1   # 降级不阻断结算
+    summary = summary_of(c, out["run_id"])
+    assert summary["sync_degraded"] is True
+    assert summary["sync"] == {"files_ok": 0, "inserted": 0, "file_errors": 2}
+    assert summary["sync_error"] is None             # 没抛错，是报告口径判定
+    assert run_row(c, out["run_id"])["status"] == "degraded_ok"
+
+
+def test_partial_sync_success_is_not_degraded(env):
+    """部分赛季失败（files_ok>0）：拿到了新完赛，不算降级，也不标注。"""
+    c = env.conn
+    _seed_settleable(c)
+    env.sync_report = SyncReport(files_ok=168, inserted=59000,
+                                 file_errors=[("F1", 1997, "空文件")])
+
+    out = daily.run_daily(c)
+
+    assert out["status"] == "ok"
+    assert summary_of(c, out["run_id"])["sync_degraded"] is False
+
+
 def test_sync_runs_before_settlement(env, monkeypatch):
     """顺序钉死：结算依赖新完赛数据，sync 必须先行（哪怕真实 sync 内部容错）。"""
     def stub_settle(conn):

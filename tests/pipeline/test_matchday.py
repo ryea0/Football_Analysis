@@ -129,7 +129,8 @@ def env(tmp_path, monkeypatch):
         replay={"h2h": True, "totals": False, "quota": QUOTA,
                 "kickoff": KO, "fail": False, "fail_events": False,
                 "events": [{"id": "ev-probe", "commence_time": KO,
-                            "home_team": HOME, "away_team": AWAY}]})
+                            "home_team": HOME, "away_team": AWAY}],
+                "events_quota": QUOTA})
     prices: dict = {}
 
     def fake_fetch_odds(league, *args, **kwargs):
@@ -153,7 +154,7 @@ def env(tmp_path, monkeypatch):
         box.events.append(league)
         if box.replay["fail_events"]:
             raise OddsApiError("Odds API 请求失败: HTTP 429（额度耗尽或限流）")
-        return box.replay["events"], box.replay["quota"]
+        return box.replay["events"], box.replay["events_quota"]
 
     monkeypatch.setattr(fixtures_mod, "fetch_odds", fake_fetch_odds)
     monkeypatch.setattr(matchday, "list_events", fake_list_events)
@@ -358,7 +359,7 @@ def test_probe_failure_falls_through_to_sync(env):
 def test_probe_quota_header_is_recorded_even_when_free(env):
     """探测若真带回额度头：写 meta 并作 credits_after——E2E 据水位差验证「免费」。"""
     c = env.conn
-    env.replay["quota"] = 77
+    env.replay["events_quota"] = 77
     env.replay["kickoff"] = KO_FAR
     env.replay["events"] = []                        # 探测证实无赛事 → 空跑
     out = matchday.run_matchday(c, "am", [LEAGUE])
@@ -366,6 +367,83 @@ def test_probe_quota_header_is_recorded_even_when_free(env):
     assert out["status"] == "skipped"
     assert get_meta(c, "odds_quota_remaining") == "77"
     assert run_row(c, out["run_id"])["credits_after"] == 77
+
+
+def test_probe_quota_carries_through_full_run_as_evidence(env):
+    """探测到赛事也把额度头存档：meta 先落探测值，summary 存档不被 sync 覆盖。"""
+    c = env.conn
+    env.replay["events_quota"] = 77                   # 探测读到的头
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert out["status"] == "ok"
+    summary = summary_of(c, out["run_id"])
+    assert summary["probe"] == "found"
+    assert summary["probe_quota"] == 77               # 证据存档（sync 会覆盖 meta）
+    assert out["quota_left"] == QUOTA                 # credits_after 取拉盘后的真值
+    assert get_meta(c, "odds_quota_remaining") == str(QUOTA)
+
+
+def test_empty_leagues_skips_without_probe(env):
+    """leagues 为空：没发探测，probe='none'（非 'events'），仍空跑收尾。"""
+    c = env.conn
+    out = matchday.run_matchday(c, "am", [])
+
+    assert out["status"] == "skipped"
+    assert env.events == [] and env.fetch == []
+    assert summary_of(c, out["run_id"])["probe"] == "none"
+
+
+def test_unparseable_kickoff_in_fixtures_fails_open(env):
+    """库内 fixture 的 kickoff 解析不了：无法确认窗口为空 → 走常规流程，不空跑。"""
+    c = env.conn
+    _seed_fixture(c, kickoff="not-a-timestamp")
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.events == []                           # 窗口判定 fail-open，未判空
+    assert env.fetch == [LEAGUE]                      # 照常拉盘
+    assert out["status"] == "ok"
+
+
+def test_unparseable_commence_time_in_probe_fails_open(env):
+    """探测响应里有解析不了的时间：无法确认 → 走常规流程，绝不据此空跑。"""
+    c = env.conn
+    env.replay["events"] = [{"id": "ev-bad", "commence_time": "???"}]
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.events == [LEAGUE]                     # 探测发生了
+    assert env.fetch == [LEAGUE]                      # 但没据此空跑
+    assert out["status"] == "ok"
+    assert summary_of(c, out["run_id"])["probe"] == "unavailable"
+
+
+def test_exception_mid_run_rolls_back_stage_writes(env, monkeypatch):
+    """中途上抛：先回滚半写的阶段产物，'failed' 的 run 行不带残局。"""
+    c = env.conn
+
+    def boom(conn_, run_id):
+        # 模拟「半写」：阶段产物已插但未提交，随后上抛
+        c.execute(
+            "INSERT INTO fixtures (league, event_key, source, kickoff_utc,"
+            " home_team_id, away_team_id, status, created_at)"
+            " VALUES ('E0','half-written','oddsapi','2026-09-04T05:00:00Z',"
+            " NULL, NULL, 'scheduled', '2026-09-03T09:00:00Z')")
+        raise RuntimeError("落注炸了")
+
+    monkeypatch.setattr(matchday, "place_paper_bets", boom)
+    with pytest.raises(RuntimeError):
+        matchday.run_matchday(c, "am", [LEAGUE])
+
+    reader = c
+    # 半写（未提交）被回滚——'failed' 的 run 行不带残局
+    assert reader.execute("SELECT COUNT(*) c FROM fixtures"
+                          " WHERE event_key='half-written'").fetchone()["c"] == 0
+    # 已提交的阶段产物不受回滚影响（sync/推荐各自 commit 过）
+    assert reader.execute("SELECT COUNT(*) c FROM fixtures").fetchone()["c"] == 1
+    assert reader.execute(
+        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 1
+    row = reader.execute(
+        "SELECT status, summary FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["status"] == "failed" and "落注炸了" in row["summary"]
 
 
 def test_no_key_returns_before_any_fetch(env, monkeypatch):
@@ -622,6 +700,26 @@ def test_reporting_send_and_last_error_delegate_to_t8(monkeypatch):
 
 
 # ---------------------------------------------------------------- CLI 面
+
+
+def test_cli_skipped_and_degraded_prints_empty_run_reason(tmp_path, monkeypatch):
+    """空跑 + 降级：只说「未拉盘」，不出现「复用最近快照」的误导文案。"""
+    from typer.testing import CliRunner
+    from fa.cli import app
+
+    db = tmp_path / "t.db"
+    monkeypatch.setenv("FA_DB", str(db))
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    init_db(db)
+    monkeypatch.setattr(fixtures_mod, "fetch_odds",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("触网")))
+    monkeypatch.setattr(matchday, "list_events", lambda *a, **k: ([], None))
+    result = CliRunner().invoke(
+        app, ["run", "matchday", "--phase", "pm", "--leagues", LEAGUE])
+
+    assert result.exit_code == 0, result.output
+    assert "空跑" in result.output
+    assert "复用最近快照" not in result.output
 
 
 def test_cli_matchday_no_key_exits_zero(tmp_path, monkeypatch):
