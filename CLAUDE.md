@@ -29,3 +29,10 @@
 
 - Hermes **TG 平台未配置**（2026-09-03 E2E 实测：`~/.hermes/.env` 全注释、无任何 token，`hermes send --to telegram` 报 `Platform 'telegram' is not configured`）；配好后 `fa` 的推送自动恢复，代码侧降级路径已验证（`runs.summary` 记推送失败、不中断 run）；`hermes -z` headless 一次性运行；默认模型 ark-code-latest（火山方舟，跑现有额度）
 - `ODDS_API_KEY` 走环境变量（`.env`，gitignore）
+
+### TG 推送代理依赖（2026-09-04 实测）
+
+- 本机直连 api.telegram.org 不通（区域封锁），必须走 Clash 代理 `127.0.0.1:7890`（clash-verge 常驻）
+- 交互式跑法：`export https_proxy=http://127.0.0.1:7890 http_proxy=http://127.0.0.1:7890 && uv run fa run matchday --phase am`
+- 代理离线时：推送失败按设计降级（runs.summary 记原因、run 不中断、报告静默落库）——不是 bug
+- bot: @Cheung_football_analysis_bot，home channel 8853969879
