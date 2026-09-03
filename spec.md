@@ -101,7 +101,7 @@ hermes cron（调度）
 | `odds_snapshots` | id, fetched_at, source, event_key, match_id(可空), market(h2h/totals), region, bookmaker, outcomes(JSON), raw(JSON) | 实时盘快照；对齐完成前 match_id 允许为空 |
 | `recommendations` | id, run_id, match_id, strategy(model_only / model_persona), market, model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac, verdict, confidence_delta, final_stake_frac, created_at | A/B 双轨：两套 strategy 各存一份（见 6.6） |
 | `bets` | id, recommendation_id, mode(paper/live), placed_at, bookmaker, odds_taken, stake, status(pending/won/lost/void), settled_at, return_amt, closing_odds, clv | 投注台账，模拟 / 实盘分模式统计 |
-| `runs` | id, type(daily/matchday_am/matchday_pm/backtest/manual), started_at, finished_at, status, credits_before/after, summary(JSON) | 每次 run 的审计记录 |
+| `runs` | id, type(daily/matchday/backtest/manual), phase(am/pm, 可空), started_at, finished_at, status, credits_before/after, summary(JSON) | 每次 run 的审计记录（v0.5：am/pm 移入 phase 列，type 词表四值加 CHECK 约束） |
 | `meta` | key, value | bankroll、Odds API 额度水位等 KV |
 
 ### 3.3 队名对齐
