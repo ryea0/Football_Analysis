@@ -87,3 +87,30 @@ def b_bets(conn: sqlite3.Connection) -> pd.DataFrame:
         LEFT JOIN teams ta ON ta.id = f.away_team_id
         ORDER BY b.placed_at DESC, b.id DESC
     """, conn)
+
+
+def b_ab_tracks(conn: sqlite3.Connection) -> dict:
+    """页3：两轨注数/ROI/CLV 中位数 + 按结算日累计 P&L（§6.6/§12.3）。
+
+    样本量语义交给页面展示（进度条 + 警示）；这里只算数，不判结论。
+    """
+    df = pd.read_sql_query("""
+        SELECT r.strategy AS strategy, b.status, b.stake, b.return_amt,
+               b.clv, b.settled_at
+        FROM bets b JOIN recommendations r ON r.id = b.recommendation_id
+        WHERE b.mode = 'paper'""", conn)
+    out: dict = {}
+    for strat in ("model_only", "model_persona"):
+        g = df[df["strategy"] == strat]
+        settled = g[g["status"].isin(["won", "lost"])].sort_values("settled_at")
+        pnl = float(settled["return_amt"].fillna(0).sum() - settled["stake"].sum()) if len(settled) else 0.0
+        staked = float(settled["stake"].sum()) if len(settled) else 0.0
+        out[strat] = {
+            "n": int(len(g)),
+            "n_settled": int(len(settled)),
+            "roi": (pnl / staked) if staked else None,
+            "clv_median": float(g["clv"].median()) if g["clv"].notna().any() else None,
+            "cum": {"dates": list(settled["settled_at"]),
+                    "pnl": list((settled["return_amt"].fillna(0) - settled["stake"]).cumsum())},
+        }
+    return out

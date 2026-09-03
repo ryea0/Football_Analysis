@@ -203,3 +203,89 @@ def test_b_recommendations_empty(db):
 
     assert b_recommendations(db).empty
     assert b_bets(db).empty
+
+
+def _seed_ab_tracks(db):
+    """两轨各 2 注（1 won + 1 lost），手算基准见断言。
+
+    model_only     ：won(stake 10, ret 25, clv +0.05, d1) + lost(stake 10, clv −0.02, d2)
+    model_persona  ：won(stake 4,  ret 12, clv +0.10, d1) + lost(stake 6,  clv −0.04, d2)
+    需 4 条**各带一注**的独立 recommendation（bets UNIQUE(recommendation_id, mode)）：
+    base 提供 rec 1/2（两轨各一），本夹具补 rec 5/6（两轨各一）。刻意不基于
+    _seed_rec_chain——它已给 rec 1/3 下注，会撞 UNIQUE 约束。
+    """
+    _seed_bline_base(db)                                     # rec 1/2、run 1、fixture 1 已在
+    db.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac, created_at)"
+        " VALUES (5, 1, 1, 'model_only', 'A', 'am', 0.40, 0.35, 3.0, 'Pinnacle',"
+        " 0.05, 0.20, 0.010, '2026-09-04T11:30:00'),"
+        " (6, 1, 1, 'model_persona', 'A', 'am', 0.40, 0.35, 3.0, 'Pinnacle',"
+        " 0.05, 0.20, 0.008, '2026-09-04T11:30:00')")
+    db.execute(
+        "INSERT INTO bets (id, recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status, settled_at, return_amt, closing_odds, clv)"
+        " VALUES (20, 1, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 10.0, 'won',"
+        " '2026-09-05T06:30:00', 25.0, NULL, 0.05),"
+        " (21, 5, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.0, 10.0, 'lost',"
+        " '2026-09-06T06:30:00', 0.0, NULL, -0.02),"
+        " (22, 2, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.0, 4.0, 'won',"
+        " '2026-09-05T06:30:00', 12.0, NULL, 0.10),"
+        " (23, 6, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.0, 6.0, 'lost',"
+        " '2026-09-06T06:30:00', 0.0, NULL, -0.04)")
+    db.commit()
+
+
+def test_b_ab_tracks(db):
+    from queries import b_ab_tracks
+
+    _seed_ab_tracks(db)
+    db.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac, created_at)"
+        " VALUES (7, 1, 1, 'model_only', 'D', 'am', 0.30, 0.25, 3.6, 'Pinnacle',"
+        " 0.05, 0.15, 0.009, '2026-09-04T11:30:00')")
+    db.execute(
+        "INSERT INTO bets (id, recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status, settled_at, return_amt, closing_odds, clv)"
+        " VALUES (24, 7, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.6, 5.0, 'void',"
+        " '2026-09-06T06:30:00', 0.0, NULL, NULL)")
+    db.commit()
+    t = b_ab_tracks(db)
+    mo = t["model_only"]
+    assert mo["n"] == 3 and mo["n_settled"] == 2          # void 计入 n、不计入已结算
+    assert mo["roi"] == pytest.approx((25 - 20) / 20)     # 0.25（void 不进分子分母）
+    assert mo["clv_median"] == pytest.approx((0.05 - 0.02) / 2)   # 0.015
+    assert mo["cum"]["dates"] == ["2026-09-05T06:30:00", "2026-09-06T06:30:00"]
+    assert mo["cum"]["pnl"] == [pytest.approx(15.0), pytest.approx(5.0)]
+    mp = t["model_persona"]
+    assert mp["n"] == 2 and mp["n_settled"] == 2
+    assert mp["roi"] == pytest.approx((12 - 10) / 10)         # 0.20
+    assert mp["clv_median"] == pytest.approx((0.10 - 0.04) / 2)   # 0.03
+    assert mp["cum"]["pnl"] == [pytest.approx(8.0), pytest.approx(2.0)]
+
+
+def test_b_ab_tracks_empty(db):
+    from queries import b_ab_tracks
+
+    t = b_ab_tracks(db)
+    for strat in ("model_only", "model_persona"):
+        assert t[strat]["n"] == 0
+        assert t[strat]["roi"] is None and t[strat]["clv_median"] is None
+        assert t[strat]["cum"] == {"dates": [], "pnl": []}
+
+
+def test_b_ab_tracks_all_pending(db):
+    """全是 pending：roi/clv 有 None 路径（分母 0 → None），不抛异常。"""
+    from queries import b_ab_tracks
+
+    _seed_bline_base(db)
+    db.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status) VALUES (1, 'paper', '2026-09-04T12:00:00', 'Pinnacle',"
+        " 2.5, 10.0, 'pending')")
+    db.commit()
+    t = b_ab_tracks(db)
+    assert t["model_only"]["n"] == 1 and t["model_only"]["n_settled"] == 0
+    assert t["model_only"]["roi"] is None
+    assert t["model_only"]["clv_median"] is None              # clv 全 NULL
