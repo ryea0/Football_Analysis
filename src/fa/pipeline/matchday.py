@@ -16,6 +16,10 @@
 - **pm**（17:00 更新版）：额度低于水位 → **跳过拉盘**、复用 am 已落库快照（§9.5
   「额度耗尽 → 跳过拉盘、用最近快照并标注」）；报告走 ``render_pm_update`` 对照
   当日最近一次成功的 am run；当日没有 am run 就回退全量报告（phase='pm'）。
+- **额度降频梯子**（§3.4，读 meta 水位三档，判据相互独立）：quota ≥
+  ``QUOTA_MERGE_FLOOR`` 双区全扫；<``QUOTA_MERGE_FLOOR`` 拉盘收窄到单 eu（summary
+  记 ``region_merged=True`` 并标注，am / 非降级 pm 都生效）；<``QUOTA_FLOOR`` pm
+  跳拉盘复用快照（上一条，既有）。合并 region 只**缩范围**、从不跳拉盘。
 - **拉盘失败**（:class:`OddsApiError`，§9.5「数据源失败 → 用最近缓存 + 告警」）：
   不中断 run，复用既有快照并标注降级。
 - **推送失败**：只把原因（:func:`fa.pipeline.reporting.last_error`）写进
@@ -38,7 +42,8 @@ from datetime import date, datetime, timedelta, timezone
 from fa.config import odds_api_key
 from fa.db import get_meta, set_meta
 from fa.model.fit import FitConfig, training_rows
-from fa.pipeline.fixtures import QUOTA_META_KEY, sync_fixtures
+from fa.pipeline.fixtures import (DEFAULT_REGIONS, QUOTA_META_KEY,
+                                  sync_fixtures)
 from fa.pipeline.odds_api import OddsApiError, list_events
 from fa.pipeline.paper import place_paper_bets
 from fa.pipeline.reporting import (last_error, render_matchday_report,
@@ -50,6 +55,10 @@ from fa.pipeline.value import (MIN_TRAIN_ROWS, WINDOW_HOURS,
                                _parse_kickoff, generate_recommendations)
 
 QUOTA_FLOOR = 100        # spec §3.4「低于阈值（如 100）」
+# 额度节流第二档（spec §3.4「合并 region」）：500/月档 · 双区全扫≈20/次 →
+# ≥200 双区；<200 单 eu（Pinnacle 在 eu，最优价损失极小）；<100 pm 跳拉盘（既有）。
+QUOTA_MERGE_FLOOR = 200
+MERGE_REGIONS = ("eu",)  # 告急档收窄后的 region 集（Pinnacle 所在，最优价锚点）
 PHASES = ("am", "pm")
 
 
@@ -61,6 +70,8 @@ def run_matchday(conn: sqlite3.Connection, phase: str,
     ``phase``、``fixtures`` / ``aligned`` / ``unknown``、``recs`` / ``bets``、
     ``quota_left``、``degraded``、``sent``（None = 本次未推送）、``am_run_id``
     （仅 pm 有对照对象）。``phase`` 非法上抛 :class:`ValueError`。
+    额度告急收窄 region（``quota_before < QUOTA_MERGE_FLOOR``）时 ``runs.summary``
+    另记 ``region_merged=True`` 与理由串——只进 summary，不入本返回 dict（契约不变）。
     """
     if phase not in PHASES:
         raise ValueError(f"phase 须为 am/pm，收到 {phase!r}")
@@ -91,12 +102,22 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         return _result(STATUS_NO_KEY, run_id, phase, quota_left=quota_before)
 
     low = quota_before is not None and quota_before < QUOTA_FLOOR
+    # 降频梯子中间档（spec §3.4「合并 region」）：<QUOTA_MERGE_FLOOR 只拉 eu。
+    # 只**缩窄拉取范围**、绝不武装 pm 跳拉盘——跳拉盘专属 <QUOTA_FLOOR（``low``，
+    # 判据独立），故 100≤quota<200 的 pm 照常拉盘（单区）；合并也计入 degraded，
+    # 因为 uk 侧最优价没了属覆盖缩水，须在报告如实标注（§3.4「在报告标注」）。
+    merge = (quota_before is not None and quota_before < QUOTA_MERGE_FLOOR
+             and not (phase == "pm" and low))
+    regions = MERGE_REGIONS if merge else DEFAULT_REGIONS
     reasons: list[str] = []
     if low:
         reasons.append(
             f"额度 {quota_before} < {QUOTA_FLOOR}："
             + ("跳过拉盘，复用最近快照（非实时盘）" if phase == "pm"
                else "比赛日照常拉盘，仅标注水位"))
+    if merge:
+        reasons.append(
+            f"额度 {quota_before} < {QUOTA_MERGE_FLOOR}：额度降频，合并 region（eu）")
 
     # pm 的报告对照「当日最近一次成功的 am run」；当日没有 am run 就回退全量报告
     am_run_id = _latest_am_run(conn, _today()) if phase == "pm" else None
@@ -138,7 +159,7 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
     sync = None
     if not (phase == "pm" and low):                  # pm 降级才跳过拉盘
         try:
-            sync = sync_fixtures(conn, leagues)
+            sync = sync_fixtures(conn, leagues, regions=regions)
         except OddsApiError as exc:
             reasons.append(f"Odds API 拉盘失败：{exc}；复用最近快照（非实时盘）")
     quota_left = (sync["quota_left"] if sync else
@@ -166,6 +187,10 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
     }
     if probe:
         summary["probe"] = probe        # found / unavailable / none；缺省＝库内已有赛事
+    if merge:
+        # 机器可读档位标记（与 degraded_reasons 文案并存）：E2E / 报告层据此区分
+        # 「缩范围拉盘」与「跳拉盘复用快照」两种降频，不必解析中文理由串
+        summary["region_merged"] = True
     if probe_quota is not None:
         summary["probe_quota"] = probe_quota   # /events 额度头存档（meta 会被 sync 覆盖）
     # 报告必须在**本相位内**即时渲染推送（run_id 归因=最后刷新者，见模块 docstring）

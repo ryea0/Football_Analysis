@@ -38,14 +38,22 @@ from fa.pipeline.odds_api import OddsApiError, OddsSnapshot, fetch_odds
 QUOTA_META_KEY = "odds_quota_remaining"     # spec §3.4 钉死的 meta 键
 SOURCE = "oddsapi"                          # fixtures.source / 队名别名 source 同源
 STATUS_NEW = "scheduled"                    # 新 fixture 初始状态（词表见 db.py 注释）
+DEFAULT_REGIONS = ("eu", "uk")              # 双区全扫（与 odds_api.fetch_odds 默认一致）
 
 
-def sync_fixtures(conn: sqlite3.Connection, leagues: list[str]) -> dict:
+def sync_fixtures(conn: sqlite3.Connection, leagues: list[str],
+                  regions: tuple[str, ...] = DEFAULT_REGIONS) -> dict:
     """逐联赛拉实时盘，upsert fixtures 并落全部快照；返回同步摘要。
 
     返回 ``{"fixtures": 本次 upsert 的场次数, "aligned": 双侧都对齐的场次数,
     "unknown": 未对齐队名（去重、字典序）, "quota_left": 剩余额度或 None}``。
     不做 kickoff 窗口筛选——窗口归报告层（brief 明示）。
+
+    **额度节流契约**（spec §3.4「合并 region」）：``regions`` 原样透传给每次
+    :func:`fetch_odds`（计费按 region × market，收窄到 ``("eu",)`` 即把单次全扫
+    的 credits 减半）。本函数**只透传、不读水位**——降频决策归编排层（matchday
+    读 ``meta[QUOTA_META_KEY]`` 的水位判档），保持本模块是纯数据同步；默认双区，
+    既有调用方零改动。
     """
     fetched_at = _utc_now_iso()
     unknown: set[str] = set()
@@ -55,7 +63,7 @@ def sync_fixtures(conn: sqlite3.Connection, leagues: list[str]) -> dict:
 
     for league in leagues:
         try:
-            snaps, quota = fetch_odds(league)
+            snaps, quota = fetch_odds(league, regions=regions)
         except OddsApiError as err:
             # 该联赛内部已部分成功（前一 region 拿到额度头、后一 region 才炸）：
             # 并入已见最小值并即写 meta，再上抛——观测到的额度头一张都不丢。

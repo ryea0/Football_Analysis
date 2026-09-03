@@ -3,6 +3,7 @@
 全离线，三层替身：
 - ``fetch_odds`` 在 ``fa.pipeline.fixtures`` 命名空间被替换为回放（同 T5 测试），
   ``urlopen`` 打成炸弹——实现若绕过该命名空间直连真函数会立即炸出而非静默触网；
+  ``box.regions`` 顺带记下每次实际发到线上的 region 集（额度节流 §3.4 的断言面）；
 - 渲染 / 推送缝（``matchday.render_*`` / ``matchday.send`` / ``matchday.last_error``）
   换成记录器：T8（``fa.report.*``）尚未合流，本文件不依赖它，只钉「渲染 → 推送 →
   降级标注」的编排契约；接缝自身的降级 / 透传另有一节直接测；
@@ -125,7 +126,7 @@ def env(tmp_path, monkeypatch):
     c.commit()
 
     box = SimpleNamespace(
-        conn=c, fetch=[], events=[], pushed=[], render=[], update=[],
+        conn=c, fetch=[], regions=[], events=[], pushed=[], render=[], update=[],
         replay={"h2h": True, "totals": False, "quota": QUOTA,
                 "kickoff": KO, "fail": False, "fail_events": False,
                 "events": [{"id": "ev-probe", "commence_time": KO,
@@ -135,6 +136,8 @@ def env(tmp_path, monkeypatch):
 
     def fake_fetch_odds(league, *args, **kwargs):
         box.fetch.append(league)
+        # 实际发到线上的 region 集（额度节流断言用）：未传＝sync_fixtures 的默认双区
+        box.regions.append(kwargs.get("regions", fixtures_mod.DEFAULT_REGIONS))
         if box.replay["fail"]:
             raise OddsApiError("Odds API 请求失败: HTTP 429（额度耗尽或限流）")
         if not prices:
@@ -475,6 +478,123 @@ def test_am_quota_below_floor_is_degraded_but_still_syncs(env):
     assert env.render[0]["degraded"] is True
     assert summary_of(c, out["run_id"])["degraded_reasons"]
     assert run_row(c, out["run_id"])["credits_before"] == QUOTA_FLOOR - 1
+
+
+# ---------------------------------------------------------------- 额度节流（合并 region）
+
+
+def test_am_quota_above_merge_floor_keeps_both_regions(env):
+    """quota ≥ QUOTA_MERGE_FLOOR：双区全扫（默认），无合并标注。"""
+    c = env.conn
+    set_meta(c, "odds_quota_remaining", "250")
+    c.commit()
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.fetch == [LEAGUE]
+    assert env.regions == [fixtures_mod.DEFAULT_REGIONS]     # 双区全扫
+    summary = summary_of(c, out["run_id"])
+    assert "region_merged" not in summary
+    assert summary["degraded_reasons"] == []
+    assert out["status"] == "ok" and out["degraded"] is False
+
+
+def test_am_quota_at_merge_floor_is_exclusive_threshold(env):
+    """quota 恰为 QUOTA_MERGE_FLOOR：不收窄（判据是严格小于，与 250 同档）。"""
+    c = env.conn
+    set_meta(c, "odds_quota_remaining", str(matchday.QUOTA_MERGE_FLOOR))
+    c.commit()
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.regions == [fixtures_mod.DEFAULT_REGIONS]
+    assert "region_merged" not in summary_of(c, out["run_id"])
+    assert out["status"] == "ok"
+
+
+def test_am_quota_below_merge_floor_scans_eu_only(env):
+    """quota < QUOTA_MERGE_FLOOR：照常拉盘但收窄到单 eu，summary 记 region_merged。"""
+    c = env.conn
+    set_meta(c, "odds_quota_remaining", "150")
+    c.commit()
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.fetch == [LEAGUE]                     # 缩范围，不跳拉盘
+    assert env.regions == [matchday.MERGE_REGIONS]
+    summary = summary_of(c, out["run_id"])
+    assert summary["region_merged"] is True
+    assert any("合并 region" in r for r in summary["degraded_reasons"])
+    assert out["status"] == "degraded_ok" and out["degraded"] is True
+    assert env.render[0]["degraded"] is True
+    assert run_row(c, out["run_id"])["credits_before"] == 150
+
+
+def test_pm_quota_between_floors_pulls_single_region_instead_of_skipping(env):
+    """梯子不越档：QUOTA_FLOOR ≤ quota < QUOTA_MERGE_FLOOR 的 pm **照常拉盘**。
+
+    合并 region 只缩范围——「跳拉盘复用快照」专属 <QUOTA_FLOOR，判据独立，
+    不得因理由串进了 degraded_reasons 而被武装（否则 150 也白白丢一窗实时盘）。
+    """
+    c = env.conn
+    am = matchday.run_matchday(c, "am", [LEAGUE])
+    env.fetch.clear()
+    env.regions.clear()
+    env.pushed.clear()
+    env.render.clear()
+    env.update.clear()
+    set_meta(c, "odds_quota_remaining", str(matchday.QUOTA_MERGE_FLOOR - 50))
+    c.commit()
+
+    out = matchday.run_matchday(c, "pm", [LEAGUE])
+
+    assert env.fetch == [LEAGUE]                     # 未跳拉盘
+    assert env.regions == [matchday.MERGE_REGIONS]   # 只收窄到单 eu
+    summary = summary_of(c, out["run_id"])
+    assert summary["region_merged"] is True
+    assert not any("跳过拉盘" in r for r in summary["degraded_reasons"])
+    assert out["am_run_id"] == am["run_id"]
+    assert env.update[0]["am_run_id"] == am["run_id"]
+
+
+def test_below_quota_floor_pm_skips_entirely_and_never_merges(env):
+    """quota < QUOTA_FLOOR 的 pm：整次不拉盘（最严档），region_merged 不出现。"""
+    c = env.conn
+    assert matchday.run_matchday(c, "am", [LEAGUE])["status"] == "ok"
+    env.fetch.clear()
+    env.regions.clear()
+    set_meta(c, "odds_quota_remaining", str(QUOTA_FLOOR - 1))
+    c.commit()
+
+    out = matchday.run_matchday(c, "pm", [LEAGUE])
+
+    assert env.fetch == [] and env.regions == []     # 第三档：一次盘都不拉
+    summary = summary_of(c, out["run_id"])
+    assert "region_merged" not in summary
+    assert any("快照" in r for r in summary["degraded_reasons"])
+    assert out["status"] == "degraded_ok"
+
+
+def test_am_below_quota_floor_stacks_both_lever_rungs(env):
+    """am 在最严档：拉盘照发（比赛日是拉盘窗）且单 eu——两档理由并存。"""
+    c = env.conn
+    set_meta(c, "odds_quota_remaining", str(QUOTA_FLOOR - 1))
+    c.commit()
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.fetch == [LEAGUE]
+    assert env.regions == [matchday.MERGE_REGIONS]
+    summary = summary_of(c, out["run_id"])
+    assert summary["region_merged"] is True
+    joined = " | ".join(summary["degraded_reasons"])
+    assert "仅标注水位" in joined and "合并 region" in joined
+
+
+def test_no_quota_watermark_defaults_to_dual_region(env):
+    """meta 从未记过水位（quota=None）：无从判档 → 默认双区，不节流。"""
+    c = env.conn
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.regions == [fixtures_mod.DEFAULT_REGIONS]
+    assert "region_merged" not in summary_of(c, out["run_id"])
+    assert out["status"] == "ok"
 
 
 # ---------------------------------------------------------------- pm 两窗

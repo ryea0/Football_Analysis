@@ -326,6 +326,27 @@ def test_empty_league_yield_writes_nothing(conn, replay, monkeypatch):
     assert _fixtures(conn) == [] and _snapshots(conn) == []
 
 
+def test_regions_thread_verbatim_to_fetch_odds(conn, monkeypatch):
+    """regions 原样透传每次 fetch_odds（spec §3.4 额度节流的抓手）。
+
+    默认双区不改既有调用方；收窄到单 eu 时逐联赛仍各传一次——节流决策归
+    matchday，本函数只透传、不读水位（见 sync_fixtures docstring 的契约）。
+    """
+    seen = []
+
+    def fake(league, markets=("h2h", "totals"), regions=("eu", "uk"),
+             refresh_quota=True):
+        seen.append(regions)
+        snaps, quota = _replay()[league]
+        return list(snaps), quota
+
+    monkeypatch.setattr("fa.pipeline.fixtures.fetch_odds", fake)
+    sync_fixtures(conn, ["E0", "D1"])
+    sync_fixtures(conn, ["E0"], regions=("eu",))
+
+    assert seen == [("eu", "uk"), ("eu", "uk"), ("eu",)]
+
+
 # ---------------------------------------------------------------- 边界 / 表纪律
 
 
