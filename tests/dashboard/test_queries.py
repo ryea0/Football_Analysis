@@ -138,3 +138,68 @@ def test_b_summary_missing_meta_keys(db):
     s = b_summary(db)
     assert s["bankroll"] is None  # 「未记录」而非 0（设计 §6）
     assert s["quota_remaining"] is None
+
+
+def _seed_rec_chain(db):
+    """页2 链：2 队、2 fixture（1 个对齐 / 1 个未对齐）、2 run、4 推荐、2 注。"""
+    _seed_bline_base(db)                                    # rec 1/2 已在
+    db.execute(
+        "INSERT INTO runs (id, type, phase, started_at, status)"
+        " VALUES (2, 'matchday', 'pm', '2026-09-04T17:00:00', 'ok')")
+    db.execute(
+        "INSERT INTO fixtures (id, league, event_key, source, kickoff_utc,"
+        " home_team_id, away_team_id, status, created_at)"
+        " VALUES (2, 'E0', 'evt2', 'oddsapi', '2026-09-05T21:00:00Z', NULL, NULL,"
+        " 'scheduled', '2026-09-04T17:05:00')")              # 未对齐 fixture
+    db.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac, created_at)"
+        " VALUES (3, 2, 2, 'model_only', 'O2.5', 'pm', 0.60, 0.54, 1.95, 'Bet365',"
+        " 0.06, 0.17, 0.012, '2026-09-04T17:30:00'),"
+        " (4, 2, 2, 'model_persona', 'O2.5', 'pm', 0.60, 0.54, 1.95, 'Bet365',"
+        " 0.06, 0.17, 0.010, '2026-09-04T17:30:00')")
+    db.execute(
+        "INSERT INTO bets (id, recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status, settled_at, return_amt, closing_odds, clv)"
+        " VALUES (10, 1, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 10.0, 'won',"
+        " '2026-09-06T06:30:00', 25.0, 2.2, 0.136364),"
+        " (11, 3, 'paper', '2026-09-04T18:00:00', 'Bet365', 1.95, 12.0, 'pending',"
+        " NULL, NULL, NULL, NULL)")
+    db.commit()
+
+
+def test_b_recommendations(db):
+    from queries import b_recommendations
+
+    _seed_rec_chain(db)
+    df = b_recommendations(db)
+    assert len(df) == 4
+    assert list(df["id"]) == [4, 3, 2, 1]                    # created_at DESC
+    row_evt1 = df[df["event_key"] == "evt1"].iloc[0]
+    assert row_evt1["home"] == "Team A" and row_evt1["away"] == "Team B"
+    row_evt2 = df[df["event_key"] == "evt2"].iloc[0]
+    assert row_evt2["home"] is None and row_evt2["away"] is None   # 未对齐可空
+    assert row_evt2["league"] == "E0"
+    assert {"strategy", "phase", "market", "model_p", "market_p", "best_odds",
+            "bookmaker", "edge", "ev", "kelly_stake_frac", "kickoff_utc"} <= set(df.columns)
+
+
+def test_b_bets(db):
+    from queries import b_bets
+
+    _seed_rec_chain(db)
+    df = b_bets(db)
+    assert len(df) == 2
+    assert list(df["id"]) == [11, 10]                        # placed_at DESC
+    row = df[df["id"] == 10].iloc[0]
+    assert row["market"] == "H" and row["strategy"] == "model_only"
+    assert row["home"] == "Team A" and row["status"] == "won"
+    assert row["clv"] == pytest.approx(0.136364)
+    assert {"closing_odds", "return_amt", "settled_at", "phase", "edge"} <= set(df.columns)
+
+
+def test_b_recommendations_empty(db):
+    from queries import b_recommendations, b_bets
+
+    assert b_recommendations(db).empty
+    assert b_bets(db).empty

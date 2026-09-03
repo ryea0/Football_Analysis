@@ -7,6 +7,8 @@ fa 模块（写库 / hermes / 网络）；指标公式一律复用 fa.backtest.*
 import sqlite3
 from pathlib import Path
 
+import pandas as pd
+
 from fa.config import db_path
 
 
@@ -50,3 +52,38 @@ def b_summary(conn: sqlite3.Connection) -> dict:
             "n_bets": agg["n"], "n_pending": agg["n_pending"],
             "pnl": agg["pnl"], "staked": agg["staked"],
             "quota_series": [dict(r) for r in quota]}
+
+
+def b_recommendations(conn: sqlite3.Connection) -> pd.DataFrame:
+    """页2 上表：推荐全维度 + fixture 队名/开球时间（未对齐队名为 NULL）。"""
+    return pd.read_sql_query("""
+        SELECT r.id, r.created_at, r.phase, r.strategy, r.market,
+               r.model_p, r.market_p, r.best_odds, r.bookmaker,
+               r.edge, r.ev, r.kelly_stake_frac,
+               r.verdict, r.confidence_delta, r.final_stake_frac,
+               f.league, f.kickoff_utc, f.event_key,
+               th.name AS home, ta.name AS away
+        FROM recommendations r
+        JOIN fixtures f ON f.id = r.fixture_id
+        LEFT JOIN teams th ON th.id = f.home_team_id
+        LEFT JOIN teams ta ON ta.id = f.away_team_id
+        ORDER BY r.created_at DESC, r.id DESC
+    """, conn)
+
+
+def b_bets(conn: sqlite3.Connection) -> pd.DataFrame:
+    """页2 下表：paper/live 注明细 + 推荐维度（market/strategy 等）+ 队名。"""
+    return pd.read_sql_query("""
+        SELECT b.id, b.mode, b.placed_at, b.status, b.bookmaker,
+               b.odds_taken, b.stake, b.settled_at, b.return_amt,
+               b.closing_odds, b.clv,
+               r.strategy, r.phase, r.market, r.model_p, r.market_p,
+               r.edge, r.ev,
+               f.kickoff_utc, th.name AS home, ta.name AS away
+        FROM bets b
+        JOIN recommendations r ON r.id = b.recommendation_id
+        JOIN fixtures f ON f.id = r.fixture_id
+        LEFT JOIN teams th ON th.id = f.home_team_id
+        LEFT JOIN teams ta ON ta.id = f.away_team_id
+        ORDER BY b.placed_at DESC, b.id DESC
+    """, conn)
