@@ -1,6 +1,16 @@
+import sqlite3
+
 import pytest
 
-from fa.db import SCHEMA_VERSION, connect, get_meta, init_db, set_meta
+from fa.db import (
+    SCHEMA_VERSION,
+    _BP_TABLE,
+    _migrate_up,
+    connect,
+    get_meta,
+    init_db,
+    set_meta,
+)
 
 
 @pytest.fixture
@@ -11,10 +21,46 @@ def conn(tmp_path):
     c.close()
 
 
+# B 线五表（schema v3）：表边界见 spec §12.1——B 线独占，绝不写 backtest_predictions
+_BLINE_TABLES = ("fixtures", "odds_snapshots", "recommendations", "bets", "runs")
+
+
+def _table_cols(c, table: str) -> dict:
+    """PRAGMA table_info → {列名: (类型, notnull, pk)}，保持声明顺序。"""
+    return {r["name"]: (r["type"], r["notnull"], r["pk"])
+            for r in c.execute(f"PRAGMA table_info({table})")}
+
+
+def _unique_columns(c, table: str) -> set:
+    """表上所有 UNIQUE 索引的列序集合（含表级 UNIQUE 约束与唯一 CREATE INDEX）。"""
+    out = set()
+    for ix in c.execute(f"PRAGMA index_list({table})").fetchall():
+        if not ix["unique"]:
+            continue
+        cols = tuple(r["name"] for r in
+                     c.execute(f"PRAGMA index_info({ix['name']})").fetchall())
+        out.add(cols)
+    return out
+
+
+def _set_version(path, version: int, drop: tuple = ()) -> None:
+    """把库降到指定版本并可选删表——模拟老库（迁移测试的通用前置）。
+
+    drop 逆序执行（子表先删、父表后删），外键开启下不会因引用残留而炸。
+    """
+    c = connect(path)
+    for t in reversed(drop):
+        c.execute(f"DROP TABLE IF EXISTS {t}")
+    c.execute("UPDATE schema_version SET version=?", (version,))
+    c.commit()
+    c.close()
+
+
 def test_init_creates_tables(conn):
     names = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"teams", "team_aliases", "unknown_names", "matches", "meta"} <= names
+    assert {"teams", "team_aliases", "unknown_names", "matches", "meta",
+            "backtest_predictions", *_BLINE_TABLES} <= names
 
 
 def test_init_is_idempotent(tmp_path):
@@ -35,20 +81,18 @@ def test_meta_roundtrip(conn):
     assert get_meta(conn, "k") == "v2"
 
 
-def test_fresh_db_is_v2(tmp_path):
+def test_fresh_db_is_v3(tmp_path):
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 2
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 3
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    assert "backtest_predictions" in names
+    assert {"backtest_predictions", *_BLINE_TABLES} <= names
     c.close()
 
 
-def test_v1_upgrades_to_v2(tmp_path):
-    init_db(tmp_path / "t.db")
-    c = connect(tmp_path / "t.db")
-    # 先放数据，验证迁移是纯加法、不搬迁不丢数据
+def _seed_legacy_rows(c):
+    """放老库就有的一批数据，用于验证迁移纯加法、不搬迁不丢数据。"""
     th = c.execute("INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
     ta = c.execute("INSERT INTO teams (league, name) VALUES ('E0','Chelsea')")
     c.execute(
@@ -56,14 +100,15 @@ def test_v1_upgrades_to_v2(tmp_path):
         "raw_line) VALUES ('E0', 2025, '2025-08-16', ?, ?, '{}')",
         (th.lastrowid, ta.lastrowid))
     c.execute("INSERT INTO meta (key, value) VALUES ('last_sync', '2025-08-17')")
-    c.execute("UPDATE schema_version SET version=1")
-    c.execute("DROP TABLE backtest_predictions")   # 模拟老库
-    c.commit(); c.close()
-    init_db(tmp_path / "t.db")                      # 不抛异常即升级成功
-    c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 2
-    assert c.execute("SELECT COUNT(*) c FROM backtest_predictions").fetchone()["c"] == 0
-    # 原有数据原样保留
+    c.execute(
+        "INSERT INTO backtest_predictions (league, season, week_index, match_id, "
+        "date, p_home, p_draw, p_away, outcome, total_goals) "
+        "VALUES ('E0', 2025, 1, 1, '2025-08-16', 0.5, 0.3, 0.2, 'H', 3)")
+    return th.lastrowid, ta.lastrowid
+
+
+def _assert_legacy_rows_intact(c, bp_count: int = 1) -> None:
+    """v2 库就有的数据原样保留。bp_count=0 用于 v1 库（该表尚不存在，重建为空）。"""
     assert c.execute("SELECT COUNT(*) c FROM teams").fetchone()["c"] == 2
     m = c.execute(
         "SELECT league, season, date, raw_line FROM matches").fetchone()
@@ -72,27 +117,263 @@ def test_v1_upgrades_to_v2(tmp_path):
     assert c.execute(
         "SELECT value FROM meta WHERE key='last_sync'").fetchone()["value"] \
         == '2025-08-17'
+    assert c.execute(
+        "SELECT COUNT(*) c FROM backtest_predictions").fetchone()["c"] == bp_count
+    if bp_count:
+        bp = c.execute("SELECT * FROM backtest_predictions").fetchone()
+        assert (bp["league"], bp["season"], bp["outcome"],
+                bp["total_goals"]) == ('E0', 2025, 'H', 3)
+
+
+def test_v2_upgrades_to_v3(tmp_path):
+    """v2→v3：纯加法。B 线五表新出现且为空，既有表与数据一字不动。"""
+    init_db(tmp_path / "t.db")
+    c = connect(tmp_path / "t.db")
+    _seed_legacy_rows(c)
+    c.commit(); c.close()
+    _set_version(tmp_path / "t.db", 2, drop=_BLINE_TABLES)   # 模拟 v2 老库
+    init_db(tmp_path / "t.db")                               # 不抛异常即升级成功
+
+    c = connect(tmp_path / "t.db")
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 3
+    for t in _BLINE_TABLES:
+        assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
+    _assert_legacy_rows_intact(c)
+    c.close()
+
+
+def test_v1_upgrades_to_v3(tmp_path):
+    """v1→v3 跨级升级：backtest_predictions 与 B 线五表一并补齐。"""
+    init_db(tmp_path / "t.db")
+    c = connect(tmp_path / "t.db")
+    _seed_legacy_rows(c)
+    c.commit(); c.close()
+    _set_version(tmp_path / "t.db", 1,
+                 drop=("backtest_predictions", *_BLINE_TABLES))
+    init_db(tmp_path / "t.db")
+
+    c = connect(tmp_path / "t.db")
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 3
+    assert c.execute(
+        "SELECT COUNT(*) c FROM backtest_predictions").fetchone()["c"] == 0
+    for t in _BLINE_TABLES:
+        assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
+    _assert_legacy_rows_intact(c, bp_count=0)
+    c.close()
+
+
+# 手工造的 v1 库：只含 v1 就有的表（形状最小化）。迁移是纯加法，老表形状与本组
+# 测试无关——关键是这些表**不经 _SCHEMA** 就存在，使 _migrate_up 的各级分支真正
+# 可观测（init_db 会先跑 _SCHEMA，把缺口兜掉，单看 init_db 测不出迁移分支死活）。
+_V1_DDL = """
+CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS teams (
+    id INTEGER PRIMARY KEY, league TEXT NOT NULL, name TEXT NOT NULL,
+    UNIQUE (league, name));
+CREATE TABLE IF NOT EXISTS team_aliases (
+    team_id INTEGER NOT NULL REFERENCES teams(id), source TEXT NOT NULL,
+    alias TEXT NOT NULL, UNIQUE (source, alias));
+CREATE TABLE IF NOT EXISTS unknown_names (
+    source TEXT NOT NULL, name TEXT NOT NULL, first_seen TEXT NOT NULL,
+    PRIMARY KEY (source, name));
+CREATE TABLE IF NOT EXISTS matches (
+    id INTEGER PRIMARY KEY, league TEXT NOT NULL, season INTEGER NOT NULL,
+    date TEXT NOT NULL, home_team_id INTEGER NOT NULL REFERENCES teams(id),
+    away_team_id INTEGER NOT NULL REFERENCES teams(id), raw_line TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+"""
+
+
+def _legacy_db(path, version: int, with_bp: bool) -> None:
+    c = sqlite3.connect(path)
+    c.executescript(_V1_DDL)
+    if with_bp:
+        c.executescript(_BP_TABLE)
+    c.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
+    c.commit()
+    c.close()
+
+
+def test_migrate_up_v1_adds_everything(tmp_path):
+    """_migrate_up 单独跑就能把 v1 库补齐到 v3（不依赖 _SCHEMA 兜底）。"""
+    p = tmp_path / "v1.db"
+    _legacy_db(p, version=1, with_bp=False)
+    c = connect(p)
+    _migrate_up(c, 1)
+    names = {r["name"] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"backtest_predictions", *_BLINE_TABLES} <= names
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == 3
+    c.close()
+
+
+def test_migrate_up_v2_adds_only_bline(tmp_path):
+    """v2 库走 _migrate_up 只补 B 线五表，不动 backtest_predictions。"""
+    p = tmp_path / "v2.db"
+    _legacy_db(p, version=2, with_bp=True)
+    c = connect(p)
+    bp_before = c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='backtest_predictions'").fetchone()["sql"]
+    _migrate_up(c, 2)
+    names = {r["name"] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert set(_BLINE_TABLES) <= names
+    assert c.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='backtest_predictions'").fetchone()["sql"] == bp_before
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == 3
     c.close()
 
 
 def test_migrate_and_fresh_schemas_match(tmp_path):
-    """新建与迁移两条路径产出的 backtest_predictions 表结构必须逐字一致。"""
-    init_db(tmp_path / "a.db")                      # 全新 v2
-    init_db(tmp_path / "b.db")                      # 降级到 v1 再升级
-    c = connect(tmp_path / "b.db")
-    c.execute("UPDATE schema_version SET version=1")
-    c.execute("DROP TABLE backtest_predictions")
-    c.commit(); c.close()
+    """新建与迁移两条路径产出的全部表/索引 DDL 必须逐字一致（M2 教训的推广）。"""
+    init_db(tmp_path / "a.db")                      # 全新 v3
+    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回 v3
+    _set_version(tmp_path / "b.db", 1,
+                 drop=("backtest_predictions", *_BLINE_TABLES))
     init_db(tmp_path / "b.db")
 
-    sql = "SELECT sql FROM sqlite_master WHERE type='table' " \
-          "AND name='backtest_predictions'"
+    tables = ("backtest_predictions", *_BLINE_TABLES)
     a = connect(tmp_path / "a.db")
     b = connect(tmp_path / "b.db")
-    sql_a = a.execute(sql).fetchone()["sql"]
-    sql_b = b.execute(sql).fetchone()["sql"]
+    for t in tables:
+        sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
+        assert a.execute(sql, (t,)).fetchone()["sql"] == \
+            b.execute(sql, (t,)).fetchone()["sql"], t
+        # 索引（含 UNIQUE 自动索引之外的命名索引）也须一致
+        sql = "SELECT name, sql FROM sqlite_master " \
+              "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name"
+        assert a.execute(sql, (t,)).fetchall() == \
+            b.execute(sql, (t,)).fetchall(), t
+        # 列级形状（名/类型/非空/主键）逐列一致
+        assert _table_cols(a, t) == _table_cols(b, t), t
     a.close(); b.close()
-    assert sql_a == sql_b
+
+
+# ---------------------------------------------------------------------------
+# B 线五表 DDL 语义（brief 逐条）
+# ---------------------------------------------------------------------------
+
+def test_backtest_predictions_schema_unchanged(conn):
+    """B 线边界烟测：A 线独占表的列集/约束在 schema v3 下不得有任何变动。"""
+    cols = _table_cols(conn, "backtest_predictions")
+    assert list(cols) == ["id", "league", "season", "week_index", "match_id",
+                          "date", "p_home", "p_draw", "p_away", "p_over25",
+                          "p_under25", "p_btts", "mkt_home", "mkt_draw",
+                          "mkt_away", "mkt_over25", "odds_home", "odds_draw",
+                          "odds_away", "outcome", "total_goals"]
+    assert cols["id"] == ("INTEGER", 0, 1)          # 单列整型主键
+    notnull = {n for n, (_, nn, _) in cols.items() if nn}
+    assert notnull == {"league", "season", "week_index", "match_id", "date",
+                       "p_home", "p_draw", "p_away", "outcome", "total_goals"}
+    assert "UNIQUE (match_id)" in conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' "
+        "AND name='backtest_predictions'").fetchone()["sql"]
+
+
+def test_bline_unique_constraints(conn):
+    """三处去重键（brief）：fixtures.event_key、recommendations 四元组、bets 二元组。"""
+    assert ("event_key",) in _unique_columns(conn, "fixtures")
+    assert ("fixture_id", "market", "strategy", "phase") in \
+        _unique_columns(conn, "recommendations")
+    # 注级跨 run 去重（fixture+market+strategy+mode）是逻辑层（T7）的事，
+    # DDL 只钉 (recommendation_id, mode)。
+    assert ("recommendation_id", "mode") in _unique_columns(conn, "bets")
+
+
+def test_bline_nullability(conn):
+    """M4 才填的位与可空外键必须可空；业务键必须非空。"""
+    nullable = {
+        "fixtures": ("home_team_id", "away_team_id"),
+        "odds_snapshots": ("fixture_id",),
+        "recommendations": ("verdict", "confidence_delta", "final_stake_frac"),
+        "bets": ("settled_at", "return_amt", "closing_odds", "clv"),
+        "runs": ("phase", "finished_at", "credits_before", "credits_after",
+                 "summary"),
+    }
+    for t, cols in nullable.items():
+        info = _table_cols(conn, t)
+        for n in cols:
+            assert n in info, f"{t}.{n} 缺列"
+            assert info[n][1] == 0, f"{t}.{n} 应可空"
+
+    required = {
+        "fixtures": ("league", "event_key", "source", "kickoff_utc", "status",
+                     "created_at"),
+        "odds_snapshots": ("fetched_at", "event_key", "market", "region",
+                           "bookmaker", "outcomes", "raw"),
+        "recommendations": ("run_id", "fixture_id", "strategy", "market",
+                            "phase", "model_p", "market_p", "best_odds",
+                            "bookmaker", "edge", "ev", "kelly_stake_frac",
+                            "created_at"),
+        "bets": ("recommendation_id", "mode", "placed_at", "bookmaker",
+                 "odds_taken", "stake", "status"),
+        "runs": ("type", "started_at", "status"),
+    }
+    for t, cols in required.items():
+        info = _table_cols(conn, t)
+        for n in cols:
+            assert info[n][1] == 1, f"{t}.{n} 应 NOT NULL"
+
+
+def test_bline_fk_chain_roundtrip(conn):
+    """runs → fixtures → odds_snapshots / recommendations → bets 外键链可用，
+    且坏引用被外键开启时的连接拒绝。"""
+    run = conn.execute(
+        "INSERT INTO runs (type, phase, started_at, status, credits_before, "
+        "credits_after, summary) VALUES "
+        "('matchday_am', 'am', '2026-09-03T11:00:00Z', 'ok', 500, 490, '{}')")
+    fx = conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, "
+        "home_team_id, away_team_id, status, created_at) VALUES "
+        "('E0', 'ev-1', 'oddsapi', '2026-09-04T14:00:00Z', NULL, NULL, "
+        "'scheduled', '2026-09-03T11:00:00Z')")
+    conn.execute(
+        "INSERT INTO odds_snapshots (fetched_at, fixture_id, event_key, market, "
+        "region, bookmaker, outcomes, raw) VALUES "
+        "('2026-09-03T11:00:00Z', ?, 'ev-1', 'h2h', 'eu', 'Pinnacle', "
+        "'{\"home\":2.1}', '{}')", (fx.lastrowid,))
+    rec = conn.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market, "
+        "phase, model_p, market_p, best_odds, bookmaker, edge, ev, "
+        "kelly_stake_frac, verdict, confidence_delta, final_stake_frac, "
+        "created_at) VALUES (?, ?, 'model_only', 'H', 'am', 0.55, 0.50, 2.10, "
+        "'Pinnacle', 0.05, 0.155, 0.01, NULL, NULL, NULL, "
+        "'2026-09-03T11:00:00Z')", (run.lastrowid, fx.lastrowid))
+    conn.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker, "
+        "odds_taken, stake, status) VALUES "
+        "(?, 'paper', '2026-09-03T11:00:05Z', 'Pinnacle', 2.10, 10.0, 'pending')",
+        (rec.lastrowid,))
+    conn.commit()
+
+    assert conn.execute("SELECT COUNT(*) c FROM runs").fetchone()["c"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM odds_snapshots").fetchone()["c"] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 1
+    assert conn.execute("SELECT COUNT(*) c FROM bets").fetchone()["c"] == 1
+
+    # 坏 run_id 被外键拒绝（connect 已 PRAGMA foreign_keys=ON）
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO recommendations (run_id, fixture_id, strategy, market, "
+            "phase, model_p, market_p, best_odds, bookmaker, edge, ev, "
+            "kelly_stake_frac, created_at) VALUES "
+            "(999999, ?, 'model_only', 'A', 'am', 0.4, 0.3, 3.0, 'x', 0.1, "
+            "0.3, 0.01, '2026-09-03T11:00:00Z')", (fx.lastrowid,))
+
+    # bets 的 (recommendation_id, mode) 唯一键生效
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker, "
+            "odds_taken, stake, status) VALUES "
+            "(?, 'paper', '2026-09-03T11:10:00Z', 'Pinnacle', 2.10, 10.0, "
+            "'pending')", (rec.lastrowid,))
+    conn.rollback()
 
 
 def test_future_version_refused(tmp_path):

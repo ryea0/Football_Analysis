@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -25,6 +25,89 @@ CREATE TABLE IF NOT EXISTS backtest_predictions (
 );
 CREATE INDEX IF NOT EXISTS idx_bp_league_season
     ON backtest_predictions (league, season);
+"""
+
+# B 线（paper 运营）五表：spec §3.2 / §12.1。表边界硬约束——B 线只写这五张
+# （外加 meta），绝不写 backtest_predictions / matches。与 _BP_TABLE 同理，
+# 新建与迁移共用同一常量，两条路径的表结构由构造即一致。
+# M4 persona 才落的位（verdict / confidence_delta / final_stake_frac）建库即可空。
+_BLINE_TABLE = """
+CREATE TABLE IF NOT EXISTS fixtures (
+    id           INTEGER PRIMARY KEY,
+    league       TEXT NOT NULL,
+    event_key    TEXT NOT NULL UNIQUE,        -- Odds API event id（对齐业务键）
+    source       TEXT NOT NULL,               -- 'oddsapi'
+    kickoff_utc  TEXT NOT NULL,               -- ISO UTC 开球时间
+    home_team_id INTEGER REFERENCES teams(id),   -- 未对齐时 NULL（spec §3.3）
+    away_team_id INTEGER REFERENCES teams(id),
+    status       TEXT NOT NULL,               -- scheduled / finished
+    created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS odds_snapshots (
+    id         INTEGER PRIMARY KEY,
+    fetched_at TEXT NOT NULL,
+    fixture_id INTEGER REFERENCES fixtures(id),  -- 对齐完成前可空
+    event_key  TEXT NOT NULL,
+    market     TEXT NOT NULL,                -- h2h / totals
+    region     TEXT NOT NULL,                -- eu / uk
+    bookmaker  TEXT NOT NULL,
+    outcomes   TEXT NOT NULL,                -- JSON：各 outcome 赔率
+    raw        TEXT NOT NULL                 -- JSON：原始响应片段留档
+);
+CREATE INDEX IF NOT EXISTS idx_odds_snap_event
+    ON odds_snapshots (event_key, market, fetched_at);
+
+CREATE TABLE IF NOT EXISTS runs (
+    id             INTEGER PRIMARY KEY,
+    type           TEXT NOT NULL,            -- daily / matchday_am / matchday_pm / backtest / manual
+    phase          TEXT,                     -- am / pm（仅 matchday run 有）
+    started_at     TEXT NOT NULL,
+    finished_at    TEXT,
+    status         TEXT NOT NULL,            -- ok / skipped / failed / no_key
+    credits_before INTEGER,                  -- Odds API 剩余额度（spec §3.4）
+    credits_after  INTEGER,
+    summary        TEXT                      -- JSON
+);
+
+CREATE TABLE IF NOT EXISTS recommendations (
+    id               INTEGER PRIMARY KEY,
+    run_id           INTEGER NOT NULL REFERENCES runs(id),
+    fixture_id       INTEGER NOT NULL REFERENCES fixtures(id),
+    strategy         TEXT NOT NULL,          -- model_only / model_persona
+    market           TEXT NOT NULL,          -- H / D / A / O2.5（每个结果一行）
+    phase            TEXT NOT NULL,          -- am / pm
+    model_p          REAL NOT NULL,
+    market_p         REAL NOT NULL,
+    best_odds        REAL NOT NULL,          -- 可成交最优价
+    bookmaker        TEXT NOT NULL,
+    edge             REAL NOT NULL,
+    ev               REAL NOT NULL,
+    kelly_stake_frac REAL NOT NULL,
+    verdict          TEXT,                   -- M4 persona 填写
+    confidence_delta REAL,                   -- M4
+    final_stake_frac REAL,                   -- M4
+    created_at       TEXT NOT NULL,
+    UNIQUE (fixture_id, market, strategy, phase)
+);
+CREATE INDEX IF NOT EXISTS idx_recs_run ON recommendations (run_id);
+
+CREATE TABLE IF NOT EXISTS bets (
+    id                INTEGER PRIMARY KEY,
+    recommendation_id INTEGER NOT NULL REFERENCES recommendations(id),
+    mode              TEXT NOT NULL,         -- paper / live（真实下注禁止，§12.2）
+    placed_at         TEXT NOT NULL,
+    bookmaker         TEXT NOT NULL,
+    odds_taken        REAL NOT NULL,
+    stake             REAL NOT NULL,
+    status            TEXT NOT NULL,         -- pending / won / lost / void
+    settled_at        TEXT,
+    return_amt        REAL,
+    closing_odds      REAL,                  -- CLV 基准（Pinnacle 收盘）
+    clv               REAL,
+    UNIQUE (recommendation_id, mode)
+);
+CREATE INDEX IF NOT EXISTS idx_bets_status ON bets (status);
 """
 
 _SCHEMA = """
@@ -72,7 +155,7 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-""" + _BP_TABLE
+""" + _BP_TABLE + _BLINE_TABLE
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -102,9 +185,13 @@ def init_db(path: Path | None = None) -> None:
 
 
 def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
-    """顺序升级。v1->v2：仅新增 backtest_predictions 表（加法，无数据搬迁）。"""
+    """顺序升级，逐级纯加法、无数据搬迁：
+    v1->v2 新增 backtest_predictions；v2->v3 新增 B 线五表
+    （fixtures / odds_snapshots / runs / recommendations / bets）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
+    if from_v < 3:
+        conn.executescript(_BLINE_TABLE)
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
