@@ -53,7 +53,7 @@ def test_backtest_run_sigma_passthrough(tmp_path, monkeypatch):
     _use_tmp_db(tmp_path, monkeypatch)
     seen = {}
 
-    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False):
+    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False, **kwargs):
         seen["cfg"] = cfg
         return 0                                   # 0 行预测 → CLI 退出码 1
 
@@ -71,16 +71,33 @@ def test_backtest_run_sigma_default_is_canonical(tmp_path, monkeypatch):
     _use_tmp_db(tmp_path, monkeypatch)
     seen = {}
 
-    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False):
+    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False, **kwargs):
         seen["cfg"] = cfg
+        seen["form"] = kwargs.get("with_form")
         return 0
 
     monkeypatch.setattr("fa.backtest.run.run_backtest", fake_run_backtest)
     result = runner.invoke(app, ["backtest", "run"])
     assert result.exit_code == 1, result.output
+    assert seen["form"] is False                     # 默认关闭 §4.5 消融（主判决路径）
     assert seen["cfg"] == _fit_config(100.0, 0.35)
     assert seen["cfg"].sigma_att == 0.35 and seen["cfg"].sigma_dfn == 0.35
     assert seen["cfg"].half_life_days == 100.0
+
+
+def test_backtest_run_form_flag_passthrough(tmp_path, monkeypatch):
+    """--form 直通 run_backtest(with_form=True)（spec §4.5 消融入口）。"""
+    _use_tmp_db(tmp_path, monkeypatch)
+    seen = {}
+
+    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False, **kwargs):
+        seen["form"] = kwargs.get("with_form")
+        return 0
+
+    monkeypatch.setattr("fa.backtest.run.run_backtest", fake_run_backtest)
+    result = runner.invoke(app, ["backtest", "run", "--form"])
+    assert result.exit_code == 1, result.output
+    assert seen["form"] is True
 
 
 def test_data_subapp_help():

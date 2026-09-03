@@ -107,6 +107,8 @@ def backtest_run(
     sigma: float = typer.Option(0.35, "--sigma", help="队级先验宽度（sigma_att=sigma_dfn）"),
     leagues: str = typer.Option("", "--leagues", help="逗号分隔联赛码，空=全部"),
     no_refit: bool = typer.Option(False, "--no-refit", help="跳过拟合，用表内预测出报告"),
+    form: bool = typer.Option(False, "--form",
+                              help="启用近 6 场净胜球状态协变量（spec §4.5 消融）"),
 ) -> None:
     """跑 walk-forward 回测并写 docs/m2-report.md（spec §8）"""
     from datetime import datetime
@@ -121,7 +123,7 @@ def backtest_run(
         cfg = _fit_config(half_life, sigma)
         t0 = datetime.now()
         n = run_backtest(conn, lgs, range(from_season, to_season + 1), cfg,
-                         verbose=True)
+                         verbose=True, with_form=form)
         typer.echo(f"回测完成：{n} 行预测，耗时 {datetime.now() - t0}")
     rows = fetch_predictions(conn, leagues=lgs,
                              seasons=list(range(from_season, to_season + 1)))

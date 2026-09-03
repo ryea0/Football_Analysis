@@ -6,14 +6,22 @@ from fa.model.fit import FitConfig, LeagueFit, _design_arrays
 _RHO_GRID = np.linspace(-0.12, 0.12, 25)
 
 
-def expected_goals(fit: LeagueFit, home: str, away: str) -> tuple[float, float]:
-    """未知队（升班马/新赛季新队名）attack/defence 取 0 = 联赛均值（spec §4.4）。"""
+def expected_goals(fit: LeagueFit, home: str, away: str,
+                   f_home: float = 0.0, f_away: float = 0.0) -> tuple[float, float]:
+    """未知队（升班马/新赛季新队名）attack/defence 取 0 = 联赛均值（spec §4.4）。
+
+    fit.beta_form 非 None 时再叠加近 6 场状态协变量（log 域线性项）；
+    f_home/f_away 缺省 0.0 → 未传时与无 form 通路逐位一致。
+    """
     att_h = fit.att.get(home, 0.0)
     dfn_h = fit.dfn.get(home, 0.0)
     att_a = fit.att.get(away, 0.0)
     dfn_a = fit.dfn.get(away, 0.0)
-    lh = float(np.exp(fit.mu + fit.home_adv + att_h - dfn_a))
-    la = float(np.exp(fit.mu + att_a - dfn_h))
+    b = fit.beta_form
+    bh = 0.0 if b is None else b * f_home
+    ba = 0.0 if b is None else b * f_away
+    lh = float(np.exp(fit.mu + fit.home_adv + att_h - dfn_a + bh))
+    la = float(np.exp(fit.mu + att_a - dfn_h + ba))
     return lh, la
 
 

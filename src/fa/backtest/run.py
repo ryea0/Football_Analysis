@@ -4,6 +4,7 @@ import numpy as np
 
 from fa.data.walkforward import iter_matchweeks
 from fa.model.fit import FitConfig, fit_league, training_rows
+from fa.model.form import current_form, form_features
 from fa.model.predict import (btts_prob, expected_goals, fit_rho,
                               over25_probs, outcome_probs, score_matrix)
 from fa.value.devig import devig_ou, devig_proportional
@@ -42,7 +43,14 @@ def _week_matches(conn, league, season, week):
 
 
 def run_backtest(conn, leagues, seasons, cfg: FitConfig = FitConfig(),
-                 rho: float | None = None, verbose: bool = False) -> int:
+                 rho: float | None = None, verbose: bool = False,
+                 with_form: bool = False) -> int:
+    """walk-forward 回测（spec §8）。
+
+    with_form=True 时启用近 6 场净胜球状态协变量（spec §4.5 消融）：每周用训练
+    窗内各队「该周之前」的比赛生成特征（严格防泄漏），拟合追加 β，预测时以各队
+    截至 week.start 的近 6 场场均净胜球修正 λ。False 路径与原实现完全一致。
+    """
     written = 0
     for league in leagues:
         for season in seasons:
@@ -60,15 +68,23 @@ def run_backtest(conn, leagues, seasons, cfg: FitConfig = FitConfig(),
                     continue                          # 数据不足（早期赛季）跳过
                 mu_g, ha_g = global_targets(conn, week.start, cfg)
                 try:
-                    fit = fit_league(train, week.start, league,
-                                     mu_g, ha_g, cfg)
+                    fit = fit_league(train, week.start, league, mu_g, ha_g, cfg,
+                                     form_pairs=form_features(train)
+                                     if with_form else None)
                 except ValueError:
                     continue
+                cf = current_form(train) if with_form else None
+
+                def _lh_la(h, a, _fit=fit, _cf=cf):
+                    if _cf is None:
+                        return expected_goals(_fit, h, a)
+                    return expected_goals(_fit, h, a,
+                                          _cf.get(h, 0.0), _cf.get(a, 0.0))
+
                 rho_eff = rho if rho is not None else fit_rho(
-                    train, week.start, cfg,
-                    lambda h, a: expected_goals(fit, h, a))
+                    train, week.start, cfg, _lh_la)
                 for r in rows:
-                    lh, la = expected_goals(fit, r["home"], r["away"])
+                    lh, la = _lh_la(r["home"], r["away"])
                     m = score_matrix(lh, la, rho_eff)
                     ph, pd, pa = outcome_probs(m)
                     po, _pu = over25_probs(m)

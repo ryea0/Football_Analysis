@@ -113,3 +113,82 @@ def test_fit_league_rejects_thin_sample():
     with pytest.raises(ValueError, match="训练样本不足"):
         fit_league(rows, asof="2024-01-01", league="X",
                    mu_global=0.15, ha_global=0.25)
+
+
+# ---- §4.5 近 6 场状态协变量（可选通路；不传时必须与扩展前逐位一致） ----
+
+def test_fit_without_form_unchanged():
+    """form_pairs=None（默认）时与扩展前的拟合输出逐位一致——向后兼容回归守卫。"""
+    # 私有 RNG：不受同进程其它测试消耗模块级 RNG 的影响，数值可复现
+    rng = np.random.default_rng(123)
+    teams = [f"T{i}" for i in range(6)]
+    att = {"T0": 0.5, "T1": 0.25, "T2": 0.0, "T3": -0.1, "T4": -0.25, "T5": -0.4}
+    dfn = {t: -a * 0.5 for t, a in att.items()}
+    rows = []
+    for k in range(40):
+        h, a = rng.choice(6, size=2, replace=False)
+        h, a = teams[h], teams[a]
+        lh = float(np.exp(0.15 + 0.25 + att[h] - dfn[a]))
+        la = float(np.exp(0.15 + att[a] - dfn[h]))
+        rows.append({"home": h, "away": a, "fthg": int(rng.poisson(lh)),
+                     "ftag": int(rng.poisson(la)),
+                     "date": f"2023-{1 + k % 12:02d}-{1 + k % 28:02d}"})
+
+    f = fit_league(rows, asof="2024-01-01", league="X",
+                   mu_global=0.15, ha_global=0.25, cfg=FitConfig())
+    assert f.beta_form is None                      # 未启用 → 无 β
+    # 以下数值钉死自扩展前代码（git HEAD）在同一数据上的输出，防回归
+    assert f.att == pytest.approx({
+        "T0": 0.1907996114144802, "T1": 0.04153347698524865,
+        "T2": -0.04283672761153019, "T3": 0.07845948948890745,
+        "T4": -0.05433635130931519, "T5": -0.05565980023841156})
+    assert f.dfn == pytest.approx({
+        "T0": -0.2569177542103923, "T1": -0.008932174517124363,
+        "T2": 0.0639433544561719, "T3": -0.02150988109048491,
+        "T4": 0.03933165430601891, "T5": 0.02612510232643144})
+    assert f.mu == pytest.approx(0.23059487557509703)
+    assert f.home_adv == pytest.approx(0.29140297790251357)
+    from fa.model.predict import expected_goals
+    assert expected_goals(f, "T0", "T5") == pytest.approx(
+        (1.987092196943918, 1.5401084400249272))
+
+
+def test_fit_with_form_moves_lambda():
+    """强正自相关（动量）序列：β > 0，且状态好的队 λ 上升、状态差的下降。"""
+    def _momentum(n_rounds=80, phi=0.9, seed=7):
+        """每轮 2 场 4 队循环；λ 由 AR(1) 动量驱动 → 近况与进球强正相关。"""
+        rng = np.random.default_rng(seed)
+        teams = ["A", "B", "C", "D"]
+        m = dict.fromkeys(teams, 0.0)
+        rows, d = [], date(2023, 1, 1)
+        for k in range(n_rounds):
+            order = teams[k % 4:] + teams[:k % 4]
+            for h, a in ((order[0], order[1]), (order[2], order[3])):
+                # 先按当前动量出比分，再更新动量（本场不进自身历史）
+                lh, la = np.exp(0.15 + 0.25 + m[h]), np.exp(0.15 + m[a])
+                rows.append({"home": h, "away": a,
+                             "fthg": int(rng.poisson(lh)), "ftag": int(rng.poisson(la)),
+                             "date": d.isoformat()})
+                for t in (h, a):
+                    m[t] = phi * m[t] + rng.normal(0, 0.5)
+            d += timedelta(days=7)
+        return rows
+
+    rows = _momentum()
+    from fa.model.form import current_form, form_features
+    from fa.model.predict import expected_goals
+    fp = form_features(rows)
+    f0 = fit_league(rows, asof="2025-01-01", league="X",
+                    mu_global=0.15, ha_global=0.25)
+    f1 = fit_league(rows, asof="2025-01-01", league="X",
+                    mu_global=0.15, ha_global=0.25, form_pairs=fp)
+    assert f0.beta_form is None and f1.beta_form is not None
+    assert f1.beta_form > 0, f1.beta_form
+    # 单独隔离 form 通道：同一拟合下，近况为正 → λ 高于协变量置 0；为负 → 更低
+    cf = current_form(rows)
+    best = max(cf, key=lambda t: cf[t])
+    worst = min(cf, key=lambda t: cf[t])
+    assert cf[best] > 0 > cf[worst], cf
+    on_best = expected_goals(f1, best, worst, cf[best], cf[worst])
+    off_best = expected_goals(f1, best, worst, 0.0, 0.0)
+    assert on_best[0] > off_best[0] and on_best[1] < off_best[1], (on_best, off_best)

@@ -114,6 +114,47 @@ def test_global_targets_excludes_asof_day(tmp_path):
     c.close()
 
 
+def test_run_backtest_form_flag(conn):
+    """§4.5 消融开关：with_form=True 跑通、写入行数与 off 一致，且概率确实改变。"""
+    from fa.model.form import current_form, form_features
+    from fa.model.fit import fit_league
+    from fa.model.predict import expected_goals
+    from fa.backtest.run import global_targets as _gt, training_rows as _tr
+
+    n0 = run_backtest(conn, ["E0"], range(2023, 2024),
+                      FitConfig(window_days=800), rho=0.0)
+    rows0 = [dict(r) for r in conn.execute(
+        "SELECT match_id, week_index, p_home, p_draw, p_away"
+        " FROM backtest_predictions ORDER BY week_index, match_id")]
+
+    run_backtest(conn, ["E0"], range(2023, 2024),
+                 FitConfig(window_days=800), rho=0.0, with_form=True)
+    rows1 = [dict(r) for r in conn.execute(
+        "SELECT match_id, week_index, p_home, p_draw, p_away"
+        " FROM backtest_predictions ORDER BY week_index, match_id")]
+
+    assert n0 == 8 and len(rows1) == len(rows0) == 8
+    assert [(r["match_id"], r["week_index"]) for r in rows1] == \
+        [(r["match_id"], r["week_index"]) for r in rows0]
+    # 阳性对照：开关确实接到了预测上（概率非逐位相同）
+    assert any((a["p_home"], a["p_draw"], a["p_away"]) !=
+               (b["p_home"], b["p_draw"], b["p_away"])
+               for a, b in zip(rows0, rows1))
+    # 且方向正确：种子数据主队近 6 场均为 +2 净胜球 → 主队 λ 上移
+    asof = "2023-08-12"
+    train = _tr(conn, "E0", asof, 800)
+    fp = form_features(train)
+    mu_g, ha_g = _gt(conn, asof, FitConfig(window_days=800))
+    f0 = fit_league(train, asof, "E0", mu_g, ha_g, FitConfig(window_days=800))
+    f1 = fit_league(train, asof, "E0", mu_g, ha_g, FitConfig(window_days=800),
+                    form_pairs=fp)
+    assert f1.beta_form > 0, f1.beta_form
+    cf = current_form(train)
+    h0, _ = expected_goals(f0, "T0", "T7")
+    h1, _ = expected_goals(f1, "T0", "T7", cf["T0"], cf["T7"])
+    assert h1 > h0, (h0, h1)
+
+
 def test_global_targets_recency_decays_with_age(tmp_path):
     """衰减方向钉死：新比赛权重必须高于旧比赛（asof − date 为正指数）。"""
     init_db(tmp_path / "t.db")
