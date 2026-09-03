@@ -2,7 +2,7 @@
 
 日期：2026-09-04 · 分支 `worktree-m3-quota-throttle`（基于 main@cccc006）· 全程离线，未跑 matchday（不耗真实额度）
 
-## 状态：完成 · 417 tests green（409 既有 + 8 新增）
+## 状态：完成 · 426 tests green（round 1 后；首版 417 = 409 既有 + 8 新增）
 
 ## 改动
 
@@ -76,13 +76,11 @@ pm 跳拉盘的判据是 `low = quota_before < QUOTA_FLOOR`，与 `reasons` 列�
 matchday（真额度）应复核 `runs.summary.region_merged` 触发时机与 `credits_before/after`
 水位差，再回填 CLAUDE.md 的 E2E 实测栏。
 
-## 边界 / 未做
+## 边界 / 未做（round 1 后已部分更新，见文末）
 
-- 未动 `odds_api.py`（`fetch_odds` 默认双区保持原样）；未动 reporting / CLI /
-  daily（daily 本就不调 sync_fixtures，无拉盘路径可节流）。
-- 未把 `region_merged` 渲染进报告正文——它已随 `summary` / `degraded_reasons`
-  传给 renderer；是否单独成栏留给 T8/报告层裁决，避免本次越界改版式。
-- `region_merged` 只进 `runs.summary`，不进 `run_matchday` 返回 dict（返回形状契约不变）。
+- 未动 `odds_api.py`（`fetch_odds` 默认双区保持原样）；未动 daily（本就不调
+  sync_fixtures，无拉盘路径可节流）。
+- `region_merged` 进 `runs.summary`；round 1 起也随返回 dict 暴露（CLI 选文案需要）。
 
 ## 顾虑
 
@@ -93,4 +91,75 @@ matchday（真额度）应复核 `runs.summary.region_merged` 触发时机与 `c
    T6 口径损失极小，但**paper 注的最优价可比性跨档不可比**（某场 am 双区、pm 单 eu）。
    若后续做最优价滑点分析，需按 `odds_snapshots.region` 过滤成同口径。
 3. `DEFAULT_REGIONS` 与 `odds_api.fetch_odds` 的默认值仍是两份字面量（本次未动
-   odds_api）；若日后改档需两处同步。
+   odds_api）；若日后改档需两处同步——round 1 已加签名断言测试钉住（见下）。
+
+---
+
+## Fix round 1（2026-09-04，评审通过后）：报告降级文案三态真实化 + 节流收尾三项
+
+### 1.（Important）降级文案与真实拉取形态一致
+
+**问题**：`render.py` 把 `degraded` 布尔直接翻成「是——本窗复用既有快照，价格类字段
+可能滞后」。quota=150 的 run 拉的是**实时盘**（只是收窄到单 eu），价格并不滞后——
+这句是向用户谎报价格新鲜度。同一句谎话也在 `cli.py` 的降级分支里。
+
+**修法（未改两个 renderer 公开签名）**：matchday 把本窗事实落成两个机器可读键，
+渲染层按键选句、不解析中文理由串：
+
+- `runs.summary["snapshot_reused"] = True`（新）：本窗没拉盘（pm 低水位跳拉盘）或
+  拉盘失败（OddsApiError）——价格确实滞后，保留原句。
+- `runs.summary["region_merged"] = True`（既有）：本窗实时盘、uk 侧最优价缺失 →
+  新句「是——本窗为实时盘，但已按额度收窄到单 eu（uk 侧最优价缺失）」。
+- 两键并存时**快照复用优先**（合并档拉盘失败，真话是「没有实时盘」）。
+- 都没有却 `degraded=True` → 中性句「是（原因见 runs.summary 的 degraded_reasons）」，
+  不猜原因、绝不复用滞后句。
+
+两处面已同步：`fa/report/render.py`（`_risk_block` 新增私有 `state` 参 +
+`_degraded_s` 三态）与 `fa/cli.py`（降级分支按键四分支）。另两处关键裁定：
+
+- **pm_update 的三态读 pm 自己的 summary**（`_risk_block(quota, degraded, am_summary,
+  pm_summary)`）——样本量/半衰期沿用 am（pm 不重拟合），但「本窗拉取形态」以 pm 为
+  准，am 的降级不得污染 pm 的风险行。
+- **`region_merged` / `snapshot_reused` 同时进 `run_matchday` 返回 dict**（加键，
+  不破既有契约）：CLI 在 `conn.close()` 后只剩 `out` 可读，加键比让 CLI 回读
+  runs.summary 再解析 JSON 干净得多。`degraded` 布尔语义不变（「有降级」）。
+
+### 2.（Minor）空跑降级带理由
+
+`_finish_skipped` 原来只收 `degraded: bool`，落 summary 时没有 `degraded_reasons`
+（pm 低水位 + 当日无赛事会留下「为何标降」无法解释的行）。改为收 `reasons: list[str]`，
+`degraded` 由它推导（两参冗余且可能分叉），summary 一并落 `degraded_reasons`。
+
+### 3.（Minor）默认双区漂移守卫
+
+`test_default_regions_match_fetch_odds_signature`：断言
+`inspect.signature(fetch_odds).parameters["regions"].default == DEFAULT_REGIONS`。
+两个常量分叉会让 quota≥200 的全扫基线悄悄移动，行为测试测不出（各见一份）。
+
+### 4.（Minor）透传测试改走 replay 替身 + pm 双区断言
+
+- `test_fixtures.replay` 替身改为返回 `_Calls(list)`（带 `regions` 侧信道，仍是 list，
+  既有 `replay == ["E0","D1"]` 断言零改动），`test_regions_thread_verbatim_to_fetch_odds`
+  改收 `replay`：触网炸弹与「一次两 market」守卫照常生效，不再自带一份 markets 断言。
+- `test_pm_full_chain_diffs_against_am_and_places_new_market` 补
+  `assert env.regions == [DEFAULT_REGIONS]`（正常档 pm＝双区全扫的既有路径回归）。
+
+### 测试净增 9（417 → 426）
+
+render 三态 5（双区否 / 快照复用保留滞后句 / 合并不许说滞后 / 无键中性句 /
+pm_update 读 pm 状态且 am 状态不泄漏）+ matchday 2（空跑降级带理由串、真空跑落空列表）
++ fixtures 1（签名守卫）+ CLI 1（quota=150 am：无「复用最近快照」、有「收窄到单 eu」，
+且替身断言 regions 确为单 eu）。
+
+### 报告勘误
+
+首版「未把 region_merged 渲染进报告正文」的说法已过时：round 1 起风险提示块的
+「降级」行按键三态渲染，quota=150 的报告明确写「本窗为实时盘，但已按额度收窄到单 eu」。
+首版「region_merged 只进 summary 不入返回 dict」同样过时（见上）。
+
+### 未改（有意）
+
+- `tests/pipeline/test_matchday.py::test_cli_skipped_and_degraded_prints_empty_run_reason`
+  的断言（「本次空跑未拉盘」+ 不得出现「复用最近快照」）在改后仍成立，无需动。
+  评审提到的「pinned 旧文案的那一个测试」实际不存在——全库唯一写死旧句的地方是
+  `render.py` 本体与 `cli.py`，测试只断言「降级/是」子串。

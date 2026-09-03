@@ -10,6 +10,7 @@
 - D1 ``Bayern München``（Odds 全称+变音符）→ 模糊 0.88 自动别名 → 对齐；
   ``Dortmund`` 原文精确命中
 """
+import inspect
 import json
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -18,8 +19,8 @@ import pytest
 
 from fa.data.teams import get_or_create_team
 from fa.db import connect, get_meta, init_db
-from fa.pipeline.fixtures import sync_fixtures
-from fa.pipeline.odds_api import OddsApiError, OddsSnapshot
+from fa.pipeline.fixtures import DEFAULT_REGIONS, sync_fixtures
+from fa.pipeline.odds_api import OddsApiError, OddsSnapshot, fetch_odds
 
 KO_IN = "2026-09-05T14:00:00Z"          # 距 _NOW 约 43h，落在任何窗口讨论之外
 KO_FAR = "2026-12-01T19:30:00Z"         # 远超 48h 窗口 → 也必须入库（不做窗口过滤）
@@ -54,15 +55,24 @@ def _replay():
     }
 
 
+class _Calls(list):
+    """league 调用顺序 + ``regions`` 侧信道（额度节流断言用）。
+
+    仍是 list：既有测试的 ``replay == ["E0", "D1"]`` 形状一字不改。
+    """
+
+
 @pytest.fixture
 def replay(monkeypatch):
     """替换 fixtures 命名空间的 fetch_odds，并记录调用顺序供断言。"""
-    calls = []
+    calls = _Calls()
+    calls.regions = []
 
     def fake_fetch(league, markets=("h2h", "totals"), regions=("eu", "uk"),
                    refresh_quota=True):
         assert set(markets) == {"h2h", "totals"}          # 一次拉取须两 market 供 T6
         calls.append(league)
+        calls.regions.append(regions)
         snaps, quota = _replay()[league]
         return list(snaps), quota
 
@@ -326,25 +336,28 @@ def test_empty_league_yield_writes_nothing(conn, replay, monkeypatch):
     assert _fixtures(conn) == [] and _snapshots(conn) == []
 
 
-def test_regions_thread_verbatim_to_fetch_odds(conn, monkeypatch):
+def test_regions_thread_verbatim_to_fetch_odds(conn, replay):
     """regions 原样透传每次 fetch_odds（spec §3.4 额度节流的抓手）。
 
     默认双区不改既有调用方；收窄到单 eu 时逐联赛仍各传一次——节流决策归
     matchday，本函数只透传、不读水位（见 sync_fixtures docstring 的契约）。
+    走 ``replay`` 替身：触网炸弹与「一次两 market」守卫照常生效。
     """
-    seen = []
-
-    def fake(league, markets=("h2h", "totals"), regions=("eu", "uk"),
-             refresh_quota=True):
-        seen.append(regions)
-        snaps, quota = _replay()[league]
-        return list(snaps), quota
-
-    monkeypatch.setattr("fa.pipeline.fixtures.fetch_odds", fake)
     sync_fixtures(conn, ["E0", "D1"])
     sync_fixtures(conn, ["E0"], regions=("eu",))
 
-    assert seen == [("eu", "uk"), ("eu", "uk"), ("eu",)]
+    assert replay == ["E0", "D1", "E0"]               # 逐联赛各拉一次
+    assert replay.regions == [("eu", "uk"), ("eu", "uk"), ("eu",)]
+
+
+def test_default_regions_match_fetch_odds_signature():
+    """漂移守卫：``DEFAULT_REGIONS`` 须与 ``fetch_odds`` 的默认双区一致。
+
+    降频梯子的「另一档」就是这份默认——两处字面量一旦分叉，quota≥200 的全扫
+    基线会悄悄移动，而任何行为测试都测不出（它们只见其中一份）。
+    """
+    default = inspect.signature(fetch_odds).parameters["regions"].default
+    assert DEFAULT_REGIONS == default
 
 
 # ---------------------------------------------------------------- 边界 / 表纪律

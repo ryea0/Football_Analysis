@@ -108,16 +108,36 @@ def _sample_line(summary):
     return "- 样本量：未提供（run summary 未带训练样本数）"
 
 
-def _risk_block(quota_left, degraded, summary):
+def _degraded_s(degraded, state):
+    """降级三态各说各话：文案必须与「本窗到底有没有实时盘」一致。
+
+    - 快照复用（本窗没拉盘 / 拉盘失败）→ 价格确实滞后
+    - region 合并（本窗拉了实时盘，只是按额度收窄到 eu）→ **不是**滞后，是 uk
+      侧最优价缺失——绝不能套「复用既有快照」的句子
+    - 都不是却 degraded=True → 不猜原因，指向落库的理由串
+    状态读 runs.summary 的机器可读键（matchday 落库），不解析中文理由串。
+    """
+    if state.get("snapshot_reused"):
+        return "是——本窗复用既有快照，价格类字段可能滞后"
+    if state.get("region_merged"):
+        return "是——本窗为实时盘，但已按额度收窄到单 eu（uk 侧最优价缺失）"
+    if degraded:
+        return "是（原因见 runs.summary 的 degraded_reasons）"
+    return "否"
+
+
+def _risk_block(quota_left, degraded, summary, state=None):
+    """风险提示块。``state`` 是**本窗** run 的 summary：pm_update 的样本量/半衰期
+    沿用 am 落库值（``summary``），但降级三态描述的是 pm 自己的拉取形态。"""
+    state = summary if state is None else state
     half = summary.get("half_life")
     half_s = (f"{float(half):.0f}" if _is_num(half)
               else f"{_DEFAULT_HALF_LIFE:.0f}")
     quota_s = "未知（本次未拉到额度头）" if quota_left is None else str(quota_left)
-    degraded_s = "是——本窗复用既有快照，价格类字段可能滞后" if degraded else "否"
     return ["## 风险提示", "",
             _sample_line(summary),
             f"- 半衰期：{half_s} 天（时间衰减窗口，越旧权重越低）",
-            f"- 降级：{degraded_s}",
+            f"- 降级：{_degraded_s(degraded, state or {})}",
             f"- 额度水位：剩余 {quota_s}（Odds API credits）"]
 
 
@@ -199,7 +219,9 @@ def render_pm_update(conn, am_run_id, pm_run_id, quota_left, degraded):
     - 已消失：am 已推但 pm 无对应行（pm 未过门槛 / 报价撤除）
     - 新增候选：pm 才出现的候选
     未变候选只计数，不成行——去重不重发全量。
-    样本量/半衰期沿用 am run 落库 summary（pm 不重拟合）。
+    样本量/半衰期沿用 am run 落库 summary（pm 不重拟合）；降级三态取 **pm run**
+    自己的 summary——本窗的拉取形态（双区 / 单 eu / 复用快照）以 pm 为准，am 的
+    降级不该污染 pm 的风险行。
     """
     am, pm = _recs(conn, am_run_id), _recs(conn, pm_run_id)
     am_by, pm_by = {_key(r): r for r in am}, {_key(r): r for r in pm}
@@ -244,7 +266,8 @@ def render_pm_update(conn, am_run_id, pm_run_id, quota_left, degraded):
               f"- 未变候选 {len(unchanged)} 条，不重发（去重）"]
     lines.append("")
 
-    lines += _risk_block(quota_left, degraded, _run_summary(conn, am_run_id))
+    lines += _risk_block(quota_left, degraded, _run_summary(conn, am_run_id),
+                         _run_summary(conn, pm_run_id))
     lines.append("")
     lines += _persona_block()
     lines.append("")

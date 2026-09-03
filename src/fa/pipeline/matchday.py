@@ -71,7 +71,8 @@ def run_matchday(conn: sqlite3.Connection, phase: str,
     ``quota_left``、``degraded``、``sent``（None = 本次未推送）、``am_run_id``
     （仅 pm 有对照对象）。``phase`` 非法上抛 :class:`ValueError`。
     额度告急收窄 region（``quota_before < QUOTA_MERGE_FLOOR``）时 ``runs.summary``
-    另记 ``region_merged=True`` 与理由串——只进 summary，不入本返回 dict（契约不变）。
+    另记 ``region_merged=True`` 与理由串；返回 dict 另带 ``region_merged`` /
+    ``snapshot_reused`` 两个布尔（降级三态的本窗事实，CLI 选文案用，均为加键不破契约）。
     """
     if phase not in PHASES:
         raise ValueError(f"phase 须为 am/pm，收到 {phase!r}")
@@ -131,7 +132,7 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
     if window_count == 0 and not leagues:
         # 无联赛可探：探测一次都没发（probe="none" 以别于「探测证实无赛事」的 events）
         return _finish_skipped(conn, run_id, phase, leagues, quota_before,
-                               probe="none", probe_quota=None, degraded=False)
+                               probe="none", probe_quota=None, reasons=[])
     if window_count == 0:
         found, probe_quota, probe_failed = _probe_events(leagues, now)
         if probe_failed:
@@ -148,7 +149,7 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
                 set_meta(conn, QUOTA_META_KEY, str(probe_quota))
             return _finish_skipped(conn, run_id, phase, leagues, quota_left,
                                    probe="events", probe_quota=probe_quota,
-                                   degraded=bool(reasons))
+                                   reasons=reasons)
         else:
             probe = "found"
             if probe_quota is not None:
@@ -157,11 +158,15 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
                 set_meta(conn, QUOTA_META_KEY, str(probe_quota))
 
     sync = None
+    reused = False                                   # 本窗没有实时盘可依
     if not (phase == "pm" and low):                  # pm 降级才跳过拉盘
         try:
             sync = sync_fixtures(conn, leagues, regions=regions)
         except OddsApiError as exc:
             reasons.append(f"Odds API 拉盘失败：{exc}；复用最近快照（非实时盘）")
+            reused = True
+    else:
+        reused = True                                # 跳拉盘＝本窗非实时盘
     quota_left = (sync["quota_left"] if sync else
                   (probe_quota if probe == "found" else quota_before))
 
@@ -187,9 +192,12 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
     }
     if probe:
         summary["probe"] = probe        # found / unavailable / none；缺省＝库内已有赛事
+    # 降级三态的机器可读键（渲染层据此选文案，不解析 degraded_reasons 中文）：
+    # 复用快照（本窗没拉盘）与合并 region（本窗有实时盘但缺 uk）是两回事，渲染层
+    # 优先看 snapshot_reused——两者并存时（合并档拉盘失败）真话是「没有实时盘」。
+    if reused:
+        summary["snapshot_reused"] = True
     if merge:
-        # 机器可读档位标记（与 degraded_reasons 文案并存）：E2E / 报告层据此区分
-        # 「缩范围拉盘」与「跳拉盘复用快照」两种降频，不必解析中文理由串
         summary["region_merged"] = True
     if probe_quota is not None:
         summary["probe_quota"] = probe_quota   # /events 额度头存档（meta 会被 sync 覆盖）
@@ -209,31 +217,45 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
                    fixtures=summary["fixtures"], aligned=summary["aligned"],
                    unknown=summary["unknown"], recs=len(rec_ids), bets=placed,
                    quota_left=quota_left, degraded=bool(reasons), sent=sent,
-                   am_run_id=am_run_id)
+                   am_run_id=am_run_id, region_merged=merge,
+                   snapshot_reused=reused)
 
 
 def _result(status: str, run_id: int, phase: str, *, fixtures: int = 0,
             aligned: int = 0, unknown: list[str] | None = None, recs: int = 0,
             bets: int = 0, quota_left: int | None = None,
             degraded: bool = False, sent: bool | None = None,
-            am_run_id: int | None = None) -> dict:
-    """统一的返回形状：CLI / 测试只认这一份契约。"""
+            am_run_id: int | None = None, region_merged: bool = False,
+            snapshot_reused: bool = False) -> dict:
+    """统一的返回形状：CLI / 测试只认这一份契约。
+
+    ``region_merged`` / ``snapshot_reused`` 是降级三态的**本窗**事实（与 runs.summary
+    同源）：CLI 据此选降级文案——只给 ``degraded`` 布尔，文案就得猜「是缩了范围还是
+    没拉盘」，而猜错一句就是向用户谎报价格新鲜度。``degraded`` 仍只表示「有降级」。
+    """
     return {"status": status, "run_id": run_id, "phase": phase,
             "fixtures": fixtures, "aligned": aligned,
             "unknown": list(unknown or []), "recs": recs, "bets": bets,
             "quota_left": quota_left, "degraded": degraded, "sent": sent,
-            "am_run_id": am_run_id}
+            "am_run_id": am_run_id, "region_merged": region_merged,
+            "snapshot_reused": snapshot_reused}
 
 
 def _finish_skipped(conn: sqlite3.Connection, run_id: int, phase: str,
                     leagues: list[str], quota_left: int | None, *, probe: str,
-                    probe_quota: int | None, degraded: bool) -> dict:
-    """空跑收尾：runs 记 ``skipped`` + 原因，返回统一摘要（不渲染不推送）。"""
+                    probe_quota: int | None, reasons: list[str]) -> dict:
+    """空跑收尾：runs 记 ``skipped`` + 原因，返回统一摘要（不渲染不推送）。
+
+    ``degraded`` 一律由 ``reasons`` 推导并**连同理由串**落 summary——空跑也可能带
+    降级（pm 低水位跳拉盘），只落布尔不落因，事后无法解释这行为何标降。
+    """
+    degraded = bool(reasons)
     finish_run(conn, run_id, STATUS_SKIPPED, {
         "phase": phase, "leagues": leagues,
         "fixtures": 0, "quota_left": quota_left,
         "probe": probe, "probe_quota": probe_quota,
         "degraded": degraded,           # 空跑也可能带降级（pm 低水位跳过拉盘）
+        "degraded_reasons": list(reasons),
         # events=探测证实无赛事；none=未指定联赛（探测一次都没发）
         "skip_reason": ("52h 窗口内无当日赛事（/events 探测证实）——未拉盘、未推荐、"
                         "未落注、未推送" if probe == "events" else

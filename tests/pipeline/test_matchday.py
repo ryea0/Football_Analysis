@@ -521,8 +521,10 @@ def test_am_quota_below_merge_floor_scans_eu_only(env):
     assert env.regions == [matchday.MERGE_REGIONS]
     summary = summary_of(c, out["run_id"])
     assert summary["region_merged"] is True
+    assert "snapshot_reused" not in summary          # 本窗确实拉了实时盘
     assert any("合并 region" in r for r in summary["degraded_reasons"])
     assert out["status"] == "degraded_ok" and out["degraded"] is True
+    assert out["region_merged"] is True and out["snapshot_reused"] is False
     assert env.render[0]["degraded"] is True
     assert run_row(c, out["run_id"])["credits_before"] == 150
 
@@ -568,8 +570,10 @@ def test_below_quota_floor_pm_skips_entirely_and_never_merges(env):
     assert env.fetch == [] and env.regions == []     # 第三档：一次盘都不拉
     summary = summary_of(c, out["run_id"])
     assert "region_merged" not in summary
+    assert summary["snapshot_reused"] is True        # 本窗确实没有实时盘
     assert any("快照" in r for r in summary["degraded_reasons"])
     assert out["status"] == "degraded_ok"
+    assert out["snapshot_reused"] is True and out["region_merged"] is False
 
 
 def test_am_below_quota_floor_stacks_both_lever_rungs(env):
@@ -594,7 +598,41 @@ def test_no_quota_watermark_defaults_to_dual_region(env):
 
     assert env.regions == [fixtures_mod.DEFAULT_REGIONS]
     assert "region_merged" not in summary_of(c, out["run_id"])
+    assert "snapshot_reused" not in summary_of(c, out["run_id"])
     assert out["status"] == "ok"
+    assert out["region_merged"] is False and out["snapshot_reused"] is False
+
+
+def test_skipped_run_carries_degraded_reasons_not_just_flag(env):
+    """空跑也可能带降级（pm 低水位 + 无赛事）：summary 必须连理由一起落。
+
+    只落 ``degraded=True`` 不落因，事后无法解释这行为何标降。
+    """
+    c = env.conn
+    env.replay["kickoff"] = KO_FAR                   # 库内 fixture 全在窗外
+    env.replay["events"] = []                        # 探测也证实无赛事
+    set_meta(c, "odds_quota_remaining", str(QUOTA_FLOOR - 1))
+    c.commit()
+
+    out = matchday.run_matchday(c, "pm", [LEAGUE])
+
+    assert out["status"] == "skipped" and out["degraded"] is True
+    summary = summary_of(c, out["run_id"])
+    assert summary["degraded"] is True and summary["degraded_reasons"]
+    assert any("跳过拉盘" in r for r in summary["degraded_reasons"])
+    assert "snapshot_reused" not in summary          # 空跑是「未拉盘」，不是「复用」
+
+
+def test_clean_skip_records_empty_degraded_reasons(env):
+    """真·零额度空跑（无降级）：``degraded_reasons`` 仍在（空列表），键形稳定。"""
+    c = env.conn
+    env.replay["kickoff"] = KO_FAR
+    env.replay["events"] = []
+
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert out["status"] == "skipped" and out["degraded"] is False
+    assert summary_of(c, out["run_id"])["degraded_reasons"] == []
 
 
 # ---------------------------------------------------------------- pm 两窗
@@ -634,6 +672,7 @@ def test_pm_full_chain_diffs_against_am_and_places_new_market(env):
     assert am["status"] == "ok"
     env.replay["totals"] = True                      # pm 才出现的市场
     env.fetch.clear()
+    env.regions.clear()
     env.pushed.clear()
     env.render.clear()
     env.update.clear()
@@ -641,7 +680,9 @@ def test_pm_full_chain_diffs_against_am_and_places_new_market(env):
     out = matchday.run_matchday(c, "pm", [LEAGUE])
 
     assert env.fetch == [LEAGUE]
+    assert env.regions == [fixtures_mod.DEFAULT_REGIONS]   # 正常档 pm＝双区全扫
     assert out["status"] == "ok" and out["degraded"] is False
+    assert out["region_merged"] is False and out["snapshot_reused"] is False
     assert out["am_run_id"] == am["run_id"]
     assert out["bets"] == 1                          # 只落新增市场
     assert {b["market"] for b in bets_of(c)} == {"H", "O2.5"}
@@ -712,6 +753,7 @@ def test_sync_failure_degrades_to_existing_snapshots(env):
     assert out["status"] == "degraded_ok"
     assert out["degraded"] is True and out["fixtures"] == 0
     assert out["recs"] == 1                          # 旧快照照常出推荐
+    assert out["snapshot_reused"] is True            # 拉盘失败＝本窗无实时盘
     assert any("Odds API" in r
                for r in summary_of(c, out["run_id"])["degraded_reasons"])
 
@@ -960,5 +1002,57 @@ def test_cli_matchday_reports_counts_and_push(tmp_path, monkeypatch):
         assert "am" in result.output and "ok" in result.output
         assert "推荐 1 条" in result.output and "落注 1 注" in result.output
         assert "推送" in result.output
+    finally:
+        c.close()
+
+
+def test_cli_degraded_wording_matches_actual_fetch_state(tmp_path, monkeypatch):
+    """CLI 降级文案三态真实化：合并档拉的是实时盘，不得说「复用最近快照」。
+
+    quota=150 的 am：实时盘照拉（单 eu）——旧文案「非实时盘（复用最近快照）」
+    会向用户谎报价格新鲜度；渲染层同款三态已由 test_render 钉住。
+    """
+    from typer.testing import CliRunner
+    from fa.cli import app
+
+    db = tmp_path / "t.db"
+    monkeypatch.setenv("FA_DB", str(db))
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setattr(matchday, "_now", lambda: _NOW)
+    monkeypatch.setattr(value, "_now", lambda: _NOW)
+    monkeypatch.setattr(runs, "_now", lambda: _NOW)
+    monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    init_db(db)
+    c = connect(db)
+    try:
+        _seed_history(c)
+        set_meta(c, "odds_quota_remaining",
+                 str(matchday.QUOTA_MERGE_FLOOR - 50))     # 150：合并档
+        c.commit()
+        prices = _prices(c)
+
+        def fake_fetch(league, *a, **k):
+            assert k.get("regions") == matchday.MERGE_REGIONS   # 确实只拉 eu
+            h2h = prices[0]
+            return [_snap("h2h", {"home": h2h["H"], "draw": h2h["D"],
+                                  "away": h2h["A"]})], 150
+
+        monkeypatch.setattr(fixtures_mod, "fetch_odds", fake_fetch)
+        monkeypatch.setattr(matchday, "list_events",
+                            lambda league, *a, **k: ([{"id": "ev-probe",
+                                                       "commence_time": KO}],
+                                                     150))
+        monkeypatch.setattr(matchday, "send", lambda text: True)
+        monkeypatch.setattr(
+            matchday, "render_matchday_report",
+            lambda conn, run_id, phase, summary, ql, dg: f"报告 run={run_id}")
+
+        result = CliRunner().invoke(
+            app, ["run", "matchday", "--phase", "am", "--leagues", LEAGUE])
+
+        assert result.exit_code == 0, result.output
+        assert "degraded_ok" in result.output
+        assert "复用最近快照" not in result.output        # 旧文案不得再现
+        assert "收窄到单 eu" in result.output             # 新文案：实时盘，只是缩范围
     finally:
         c.close()

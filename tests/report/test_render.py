@@ -7,6 +7,8 @@ CLV 预览方向与 spec §7.3 一致：odds_taken / 收盘价 − 1。pm 视角
 咬住的 odds_taken、pm 价是更接近收盘的新价，故价「缩水」（2.10→1.90）给正
 CLV，价「走低」（2.10→2.30）给负 CLV。
 """
+import json
+
 import pytest
 
 from fa.db import connect, init_db
@@ -184,6 +186,71 @@ def test_am_report_quota_unknown(conn):
     out = render_matchday_report(conn, rid, "am", SUMMARY, None, False)
     assert "None" not in out
     assert "额度" in out and "未知" in out
+
+
+# ------------------------------------------------- 降级三态（额度节流 §3.4）
+
+
+def test_degraded_wording_live_dual_region_says_no(conn):
+    """live-dual：无降级 → 「否」。"""
+    rid = _am_with_two(conn)
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "- 降级：否" in out
+
+
+def test_degraded_wording_snapshot_reuse_keeps_stale_warning(conn):
+    """snapshot-reuse：本窗没拉盘 → 价格确实滞后，保留「复用既有快照」文案。"""
+    rid = _am_with_two(conn)
+    out = render_matchday_report(
+        conn, rid, "am", {**SUMMARY, "snapshot_reused": True}, 80, True)
+    assert "- 降级：是——本窗复用既有快照，价格类字段可能滞后" in out
+
+
+def test_degraded_wording_region_merge_does_not_claim_stale(conn):
+    """live-single-eu：拉了实时盘只是收窄范围 → **不得**谎称「复用既有快照」。
+
+    quota=150 的 run 走的就是这态：价格是新的，缺的只是 uk 侧最优价。
+    """
+    rid = _am_with_two(conn)
+    out = render_matchday_report(
+        conn, rid, "am", {**SUMMARY, "region_merged": True}, 150, True)
+    assert "- 降级：是——本窗为实时盘，但已按额度收窄到单 eu" in out
+    assert "复用既有快照" not in out
+    assert "uk 侧最优价缺失" in out
+
+
+def test_degraded_wording_unknown_reason_points_at_summary(conn):
+    """有降级但 summary 没带状态键 → 不猜原因，指向落库的理由串。"""
+    rid = _am_with_two(conn)
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, True)
+    assert "- 降级：是（原因见 runs.summary 的 degraded_reasons）" in out
+
+
+def test_pm_update_degraded_state_reads_pm_summary_not_am(conn):
+    """pm_update 的降级三态取**本窗（pm）**的 summary：am 的降级不污染 pm 行。
+
+    样本量/半衰期仍沿用 am（pm 不重拟合）——两份 summary 各取所需。
+    """
+    am = _am_with_two(conn)
+    pm = _run(conn, "pm")
+    _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", 2.10)
+    conn.execute("UPDATE runs SET summary=? WHERE id=?",
+                 (json.dumps({"region_merged": True, "train_n": 7}), pm))
+    conn.commit()
+
+    out = render_pm_update(conn, am, pm, quota_left=150, degraded=True)
+
+    assert "- 降级：是——本窗为实时盘，但已按额度收窄到单 eu" in out
+    assert "复用既有快照" not in out
+    # 对照：am 才带 region_merged、pm 无 summary → am 的状态**不泄漏**进 pm 行，
+    # 但 degraded=True 仍在 → 落到「不猜原因」的中性句（而非照搬 am 的合并文案）
+    conn.execute("UPDATE runs SET summary=NULL WHERE id=?", (pm,))
+    conn.execute("UPDATE runs SET summary=? WHERE id=?",
+                 (json.dumps({"region_merged": True}), am))
+    conn.commit()
+    out = render_pm_update(conn, am, pm, quota_left=150, degraded=True)
+    assert "- 降级：是（原因见 runs.summary 的 degraded_reasons）" in out
+    assert "收窄到单 eu" not in out and "复用既有快照" not in out
 
 
 # --------------------------------------------------------------- pm 更新版
