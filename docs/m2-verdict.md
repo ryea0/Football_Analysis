@@ -133,6 +133,25 @@ uv run python -c "from fa.db import connect; from fa.backtest.metrics import fet
 
 > 归档自检：收尾那次默认重跑生成的 `docs/m2-report.md` 与提交版**逐字节一致**（sha256 `42e956cc793f9251cc8a84c689c0c3fe17b5da3797d47bb50e8bc8f7ec38d11f`，`git diff --stat docs/m2-report.md` 为空），扫描未在仓库留下任何报告产物。
 
+## 补充：大小球通道诊断（只读，未重跑回测）
+
+主判决与 σ 扫描均在 **1X2（胜平负）通道**上评估。补一节大小球 2.5 通道的对照（数据已在 `backtest_predictions` 表内：`p_over25` / `mkt_over25` / `total_goals`，纯只读计算，不重跑回测）：
+
+| 通道 | n | 模型 ll | 市场 ll | 劣化% | 概率形态 |
+|---|---|---|---|---|---|
+| 1X2（主判决） | 11,605 | 0.99790 | 0.96867 | **+3.02%** | 模型偏平（sd 0.148 vs 市场 0.186） |
+| 大小球 2.5 | 11,533 | 0.68348 | 0.66843 | **+2.25%** | 模型偏锐（sd 0.1051 vs 市场 0.0976） |
+
+（Brier：O/U 模型 0.24505 / 市场 0.23792；实际大球率 0.5301，模型/市场均值概率 0.5252/0.5234——均值校准良好，差距在离散度形态。）
+
+**解读**：进球总量通道比胜平负通道更接近市场（+2.25% vs +3.02%），且偏差形态相反（O/U 上模型比市场**更锐**而非更平）——模型对两队进攻/防守强度的估计相对更能支撑总进球预测，而把这些强度**分配**成主胜/平/客胜的具体概率（含低比分相关性 ρ）是更弱的一环。**不构成重启理由**：+2.25% 仍远超 ≤1% 关卡，两通道方向一致；且 O/U 收盘市场本身更薄、覆盖不全（72 行缺 `mkt_over25`），基准线弱于 1X2 的 Pinnacle 主盘，差距缩小有部分可能来自基准差异而非模型优势。留档供未来若更换建模思路时参考（先修概率分配，而非再调参）。
+
+复现（只读）：
+
+```bash
+uv run python -c "import math; from fa.db import connect; rows=[dict(r) for r in connect().execute('SELECT p_over25, mkt_over25, total_goals FROM backtest_predictions WHERE mkt_over25 IS NOT NULL')]; eps=1e-12; f=lambda k: -sum(math.log(min(max(r[k],eps),1-eps)) if r['total_goals']>=3 else math.log(1-min(max(r[k],eps),1-eps)) for r in rows)/len(rows); m,k=f('p_over25'),f('mkt_over25'); print(len(rows), round(m,5), round(k,5), f'{(m/k-1)*100:+.2f}%')"
+```
+
 ## 数据说明
 
 - `psc_*`（Pinnacle 收盘）实际自 **2012** 赛季起即有覆盖，早于 brief 预估的 2019；`--from 2019` 按计划保留（spec §8.1 walk-forward ≥5 赛季）。
