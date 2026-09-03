@@ -12,15 +12,20 @@ RECENT_N = 10
 
 
 def _matches_between(conn: sqlite3.Connection, date: str, t1: int,
-                     t2: int, limit: int) -> list[dict]:
+                     t2: int, limit: int, both: bool = False) -> list[dict]:
+    # both=False：涉及任一队（近期近况）；both=True：严格双方交锋（spec §5
+    # H2H）——「任一队」谓词在 h2h 上会把两队各自对第三方的周赛填满 LIMIT
+    # 槽位，真数据上几乎不含真交锋（审查 Important 修正）。
+    pair = ("((m.home_team_id=? AND m.away_team_id=?)"
+            " OR (m.home_team_id=? AND m.away_team_id=?))" if both else
+            "(m.home_team_id IN (?, ?) OR m.away_team_id IN (?, ?))")
     rows = conn.execute(
         "SELECT m.date, th.name home, ta.name away, m.fthg, m.ftag,"
         " m.shots_home, m.shots_away, m.shots_target_home,"
         " m.shots_target_away, m.corners_home, m.corners_away"
         " FROM matches m JOIN teams th ON th.id=m.home_team_id"
         " JOIN teams ta ON ta.id=m.away_team_id"
-        " WHERE m.date < ? AND (m.home_team_id IN (?, ?)"
-        " OR m.away_team_id IN (?, ?))"
+        f" WHERE m.date < ? AND {pair}"
         " ORDER BY m.date DESC LIMIT ?", (date, t1, t2, t1, t2, limit))
     return [dict(r) for r in rows]
 
@@ -74,7 +79,8 @@ def build_pack(conn: sqlite3.Connection, cand: dict) -> dict:
                                         RECENT_N),
         "recent_away": _matches_between(conn, m["date"], away_id, away_id,
                                         RECENT_N),
-        "h2h": _matches_between(conn, m["date"], home_id, away_id, 10),
+        "h2h": _matches_between(conn, m["date"], home_id, away_id, 10,
+                                both=True),
         "standings": _standings(conn, m["league"], m["season"], m["date"],
                                 (home_id, away_id)),
         "odds": {"ps_home": m["ps_home"], "ps_draw": m["ps_draw"],

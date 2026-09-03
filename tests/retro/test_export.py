@@ -27,6 +27,16 @@ def _seed(conn):
             " away_team_id, fthg, ftag, raw_line)"
             " VALUES (?, 'E0', 2023, ?, ?, ?, ?, ?, '{}')",
             (mid, d, h, a, hg, ag))
+    # 审查 Important 补种：第三方场（West Ham vs Chelsea，04-03）+ 真交锋
+    # （Arsenal vs West Ham，04-10）——h2h 只能含后者，不得被前者填槽
+    conn.execute(
+        "INSERT INTO matches (id, league, season, date, home_team_id,"
+        " away_team_id, fthg, ftag, raw_line)"
+        " VALUES (17, 'E0', 2023, '2024-04-03', 2, 3, 1, 2, '{}')")
+    conn.execute(
+        "INSERT INTO matches (id, league, season, date, home_team_id,"
+        " away_team_id, fthg, ftag, raw_line)"
+        " VALUES (18, 'E0', 2023, '2024-04-10', 1, 2, 2, 1, '{}')")
     # 泄漏探针：M1（id=1, 2024-04-20）之后才踢的 Arsenal 场（05-01）
     conn.execute(
         "INSERT INTO matches (id, league, season, date, home_team_id,"
@@ -94,12 +104,30 @@ def test_recent_capped_at_n(cand, conn):
     assert len(pack["recent_home"]) <= RECENT_N == 10
 
 
+def test_h2h_strict_both_teams(cand, conn):
+    """h2h 只含两队真交锋（spec §5 H2H），不含各自对第三方的场。
+
+    旧的「任一队」谓词（home IN (t1,t2) OR away IN (t1,t2)）会把 Arsenal vs
+    Chelsea / Chelsea vs Arsenal / West Ham vs Chelsea 一并填进 LIMIT 10
+    槽位——真数据上每季仅 ~2 次真交锋，h2h 会被错标证据占满。
+    """
+    pack = build_pack(conn, cand)
+    dates = [m["date"] for m in pack["h2h"]]
+    assert "2024-04-10" in dates             # 真交锋：Arsenal vs West Ham
+    for third in ("2024-03-23",              # Chelsea vs Arsenal（第三方）
+                  "2024-04-13",              # Arsenal vs Chelsea（第三方）
+                  "2024-04-03"):             # West Ham vs Chelsea（第三方）
+        assert third not in dates
+    assert all(d < "2024-04-20" for d in dates)
+
+
 def test_standings_before_date(cand, conn):
     pack = build_pack(conn, cand)
     st = pack["standings"]            # {team_name: {pos, pts, played}}
     assert set(st) == {"Arsenal", "West Ham"}
-    # 手算：截 2024-04-20 前，Arsenal 的已赛场 = hist 中含队 1 的 7 场
-    assert st["Arsenal"]["played"] == 7
+    # 手算：截 2024-04-20 前，Arsenal 已赛场 = hist 含队 1 的 7 场 + 真交锋
+    # id=18（04-10 Arsenal vs West Ham），第三方场不含队 1 不计
+    assert st["Arsenal"]["played"] == 8
 
 
 def test_write_packs_roundtrip(cand, conn, tmp_path):
