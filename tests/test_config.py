@@ -4,7 +4,9 @@ from pathlib import Path
 import pytest
 
 import fa.config as config
-from fa.config import LEAGUES, ODDS_SPORT_KEYS, load_env, odds_api_key, project_root
+from fa.config import (LEAGUES, ODDS_SPORT_KEYS, PERSONA_FILES, PERSONA_TIMEOUT_S,
+                       hermes_bin, load_env, odds_api_key, persona_path,
+                       persona_timeout, project_root)
 
 # 本机 shell 常已导出 ODDS_API_KEY，测试须与真实环境隔离，断言才可复现
 PROBE_KEYS = ("FA_ENV_PROBE", "FA_ENV_OTHER", "FA_ENV_ODDS")
@@ -197,3 +199,31 @@ def test_sport_keys_mapping():
 
 def test_project_root_holds_src_fa():
     assert project_root() == Path(__file__).resolve().parents[1]
+
+
+def test_persona_files_cover_five_leagues():
+    assert set(PERSONA_FILES) == {"E0", "SP1", "D1", "I1", "F1"}
+
+
+def test_persona_path_maps_and_rejects(tmp_path, monkeypatch):
+    monkeypatch.setattr("fa.config.project_root", lambda: tmp_path)
+    assert (persona_path("D1") ==
+            tmp_path / "personas" / "bundesliga.md")
+    with pytest.raises(ValueError):
+        persona_path("XX")
+
+
+def test_hermes_bin_env_override(monkeypatch):
+    monkeypatch.setenv("HERMES_BIN", "/tmp/fake-hermes")
+    assert hermes_bin() == "/tmp/fake-hermes"
+    monkeypatch.delenv("HERMES_BIN")
+    assert hermes_bin() == "hermes"
+
+
+def test_persona_timeout_default_and_override(monkeypatch):
+    monkeypatch.delenv("FA_PERSONA_TIMEOUT", raising=False)
+    assert persona_timeout() == PERSONA_TIMEOUT_S == 120.0
+    monkeypatch.setenv("FA_PERSONA_TIMEOUT", "5")
+    assert persona_timeout() == 5.0
+    monkeypatch.setenv("FA_PERSONA_TIMEOUT", "not-a-number")
+    assert persona_timeout() == 120.0        # 非法值回退默认，不炸
