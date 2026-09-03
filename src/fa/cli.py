@@ -518,6 +518,128 @@ def bet_settle(
         typer.echo("注意：paper 注手工结算不改动 bankroll（余额只由 fa run daily"
                    " 的自动结算记账），且该注已脱离自动结算路径。")
 
+# ---- A 线复盘归因子线（retro，spec docs/superpowers/specs/2026-09-04-retro-attribution-design.md）----
+
+retro_app = typer.Typer(help="复盘归因（A 线子线：分歧报告/归因批跑/证据审计）")
+app.add_typer(retro_app, name="retro")
+
+
+def _parse_int_list(text: str) -> list[int]:
+    return [int(s) for s in text.split(",") if s.strip()]
+
+
+@retro_app.command("report")
+def retro_report(
+    top: int = typer.Option(20, "--top", help="分歧 top-N（S0 纯 SQL，零 LLM）"),
+    date_from: str = typer.Option("", "--from", help="起始日期 YYYY-MM-DD（含）"),
+    date_to: str = typer.Option("", "--to", help="结束日期 YYYY-MM-DD（含）"),
+    leagues: str = typer.Option("", "--leagues", help="逗号分隔联赛码，空=全部"),
+) -> None:
+    """分歧报告：模型 vs 市场单场 log-loss 差排序（Stage 0 交付物）"""
+    from fa.retro.analyze import render_divergence_report
+    from fa.retro.select import divergence_rows
+    conn = connect()
+    try:
+        rows = divergence_rows(
+            conn, date_from=date_from or None, date_to=date_to or None,
+            leagues=[s for s in leagues.split(",") if s] or None)[:top]
+    finally:
+        conn.close()
+    typer.echo(render_divergence_report(rows))
+
+
+@retro_app.command("run")
+def retro_run(
+    selector: str = typer.Option("divergence", "--selector",
+                                 help="divergence|manual（paper_t1/agentline_aligned 属 S2/S3）"),
+    matches: str = typer.Option("", "--matches", help="manual：逗号分隔 match_id"),
+    league: str = typer.Option("", "--league"),
+    season: int = typer.Option(None, "--season"),
+    date_from: str = typer.Option("", "--from"),
+    date_to: str = typer.Option("", "--to"),
+    top: int = typer.Option(20, "--top"),
+    control: int = typer.Option(10, "--control", help="对照场数（divergence 用）"),
+    seed: int = typer.Option(42, "--seed"),
+    limit: int = typer.Option(None, "--limit", help="截取前 N 场（控制 LLM 成本）"),
+    out_root: str = typer.Option("", "--out-root",
+                                 help="信息集留档根目录，空=data/retro/inputs"),
+) -> None:
+    """归因批跑：选场→导出→hermes→契约→落库（单场失败不中断）"""
+    from pathlib import Path
+
+    from fa.config import project_root
+    from fa.retro.pipeline import run_retro_batch
+    from fa.retro.select import select_divergence, select_manual
+    conn = connect()
+    try:
+        if selector == "divergence":
+            cands = select_divergence(
+                conn, date_from=date_from or None, date_to=date_to or None,
+                leagues=[s for s in league.split(",") if s] or None,
+                top_k=top, control_k=control, seed=seed)
+            params = {"top": top, "control": control, "seed": seed,
+                      "league": league, "from": date_from, "to": date_to}
+        elif selector == "manual":
+            if not (matches.strip() or league.strip() or season is not None):
+                typer.echo("--selector manual 须至少给 --matches / --league /"
+                           " --season 之一（零过滤=全库 59k 场逐场调 LLM）")
+                raise typer.Exit(code=1)
+            cands = select_manual(conn, match_ids=_parse_int_list(matches),
+                                  league=league or None, season=season)
+            params = {"matches": matches, "league": league, "season": season}
+        else:
+            typer.echo(f"--selector 须为 divergence|manual（S2/S3 再扩），"
+                       f"收到 {selector!r}")
+            raise typer.Exit(code=1)
+        if limit is not None:
+            cands = cands[:limit]
+        if not cands:
+            typer.echo("选场为空——检查过滤条件（或先跑 fa backtest run）")
+            raise typer.Exit(code=1)
+        root = Path(out_root) if out_root else project_root() / "data" / "retro" / "inputs"
+        out = run_retro_batch(conn, cands, selector, params, root)
+    finally:
+        conn.close()
+    typer.echo(f"批 #{out['batch_id']}（{selector}）：选 {out['n_selected']} 场，"
+               f"ok={out['n_ok']} parse_fail={out['n_parse_fail']} "
+               f"timeout={out['n_timeout']} error={out['n_error']}，"
+               f"耗时 {out['duration_s']:.1f}s")
+
+
+@retro_app.command("audit")
+def retro_audit(
+    batch_id: int = typer.Option(None, "--batch-id", help="空=全部 ok 行"),
+) -> None:
+    """证据日期审计：赛前成因标签的证据须早于比赛日（关卡 1）"""
+    from fa.retro.analyze import audit_batch
+    conn = connect()
+    try:
+        out = audit_batch(conn, batch_id)
+    finally:
+        conn.close()
+    typer.echo(f"证据审计：检查 {out['n_checked']} 行，违规 {out['n_violation']}"
+               f"（率 {out['rate']:.0%}）")
+    for attr_id, match_id, reason in out["violations"]:
+        typer.echo(f"  [违规] attribution={attr_id} match={match_id} {reason}")
+
+
+@retro_app.command("runs")
+def retro_runs(limit: int = typer.Option(10, "--limit")) -> None:
+    """批台账列表"""
+    conn = connect()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM retro_runs ORDER BY id DESC LIMIT ?",
+            (limit,)).fetchall()
+    finally:
+        conn.close()
+    typer.echo(f"retro 批台账（最近 {len(rows)} 条）：")
+    for r in rows:
+        typer.echo(f"  #{r['id']} {r['selector']} 选 {r['n_selected']}"
+                   f" ok={r['n_ok']} parse_fail={r['n_parse_fail']}"
+                   f" timeout={r['n_timeout']} error={r['n_error']}"
+                   f" {r['duration_s']:.1f}s {r['created_at']}")
+
 # ---- B 线 run 命令（T9/T10）----
 
 run_app = typer.Typer(help="运营 run（比赛日 / 结算日课，spec §9.6 调度）")
