@@ -1,0 +1,4 @@
+#!/bin/sh
+# hermes_nonzero——非 0 退出（stderr 可溯源）
+echo "boom: no credits" >&2
+exit 3

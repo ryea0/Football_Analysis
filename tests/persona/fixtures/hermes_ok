@@ -1,0 +1,3 @@
+#!/bin/sh
+# hermes_ok——合法 JSON 输出（C1：mock 与实跑同一 subprocess 代码路径）
+echo '{"verdict":"agree","confidence_delta":-0.05,"key_factors":["主队中场停赛"],"report_md":"### 点评\n主队轮换风险。"}'
