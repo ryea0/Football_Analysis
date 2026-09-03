@@ -82,10 +82,10 @@ def test_meta_roundtrip(conn):
     assert get_meta(conn, "k") == "v2"
 
 
-def test_fresh_db_is_v4(tmp_path):
+def test_fresh_db_is_v5(tmp_path):
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 5
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
@@ -126,8 +126,8 @@ def _assert_legacy_rows_intact(c, bp_count: int = 1) -> None:
                 bp["total_goals"]) == ('E0', 2025, 'H', 3)
 
 
-def test_v2_upgrades_to_v4(tmp_path):
-    """v2→v4：纯加法。B 线五表与 retro 两表新出现且为空，既有表与数据一字不动。"""
+def test_v2_upgrades_to_v5(tmp_path):
+    """v2→v5：纯加法。B 线五表与 retro 两表新出现且为空，既有表与数据一字不动。"""
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
     _seed_legacy_rows(c)
@@ -136,15 +136,15 @@ def test_v2_upgrades_to_v4(tmp_path):
     init_db(tmp_path / "t.db")                               # 不抛异常即升级成功
 
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 5
     for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions"):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c)
     c.close()
 
 
-def test_v1_upgrades_to_v4(tmp_path):
-    """v1→v4 跨级升级：backtest_predictions、B 线五表与 retro 两表一并补齐。"""
+def test_v1_upgrades_to_v5(tmp_path):
+    """v1→v5 跨级升级：backtest_predictions、B 线五表与 retro 两表一并补齐。"""
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
     _seed_legacy_rows(c)
@@ -154,7 +154,7 @@ def test_v1_upgrades_to_v4(tmp_path):
     init_db(tmp_path / "t.db")
 
     c = connect(tmp_path / "t.db")
-    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 4
+    assert c.execute("SELECT version FROM schema_version").fetchone()["version"] == 5
     assert c.execute(
         "SELECT COUNT(*) c FROM backtest_predictions").fetchone()["c"] == 0
     for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions"):
@@ -292,7 +292,7 @@ def test_bline_vocab_accepts_all_legal_values(conn, bline_ids):
 
 
 def test_migrate_up_v1_adds_everything(tmp_path):
-    """_migrate_up 单独跑就能把 v1 库补齐到 v4（不依赖 _SCHEMA 兜底）。"""
+    """_migrate_up 单独跑就能把 v1 库补齐到 v5（不依赖 _SCHEMA 兜底）。"""
     p = tmp_path / "v1.db"
     _legacy_db(p, version=1, with_bp=False)
     c = connect(p)
@@ -301,7 +301,7 @@ def test_migrate_up_v1_adds_everything(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
     assert c.execute(
-        "SELECT version FROM schema_version").fetchone()["version"] == 4
+        "SELECT version FROM schema_version").fetchone()["version"] == 5
     c.close()
 
 
@@ -321,7 +321,7 @@ def test_migrate_up_v2_adds_bline_and_retro(tmp_path):
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='backtest_predictions'").fetchone()["sql"] == bp_before
     assert c.execute(
-        "SELECT version FROM schema_version").fetchone()["version"] == 4
+        "SELECT version FROM schema_version").fetchone()["version"] == 5
     c.close()
 
 
@@ -371,7 +371,7 @@ def bline_ids(conn):
 
 
 def test_backtest_predictions_schema_unchanged(conn):
-    """B 线边界烟测：A 线独占表的列集/约束在 schema v4 下不得有任何变动。"""
+    """B 线边界烟测：A 线独占表的列集/约束在 schema v5 下不得有任何变动。"""
     cols = _table_cols(conn, "backtest_predictions")
     assert list(cols) == ["id", "league", "season", "week_index", "match_id",
                           "date", "p_home", "p_draw", "p_away", "p_over25",
@@ -556,9 +556,9 @@ def test_v4_creates_retro_tables(tmp_path):
 def test_is_control_column_pinned(tmp_path):
     """is_control 后补列（2026-09-04 终审）：病例=0/对照=1。钉死三件事——
     建表即含列、NOT NULL DEFAULT 0（直插不给值不炸且落 0）、SCHEMA_VERSION
-    保持 4（纯加列不走迁移）。"""
+    为 5（v4 时代纯加列未走迁移，v5 起由建表 DDL 钉死）。"""
     from fa.db import SCHEMA_VERSION, connect, init_db
-    assert SCHEMA_VERSION == 4
+    assert SCHEMA_VERSION == 5
     db = tmp_path / "ic.db"
     init_db(db)
     conn = connect(db)
@@ -604,8 +604,8 @@ def test_is_control_column_pinned(tmp_path):
         conn.close()
 
 
-def test_v3_migrates_to_v4(tmp_path):
-    """老库（v3）经 init_db 升级到 v4，retro 表出现且 schema_version=4。"""
+def test_v3_migrates_to_v5(tmp_path):
+    """老库（v3）经 init_db 升级到 v5，retro 表出现且 schema_version=5。"""
     from fa.db import SCHEMA_VERSION, connect, init_db
     db = tmp_path / "old.db"
     init_db(db)
@@ -615,12 +615,12 @@ def test_v3_migrates_to_v4(tmp_path):
     conn.execute("DROP TABLE retro_attributions")
     conn.commit()
     conn.close()
-    init_db(db)                      # 触发 _migrate_up(3 -> 4)
+    init_db(db)                      # 触发 _migrate_up(3 -> 5)
     conn = connect(db)
     try:
         assert conn.execute(
-            "SELECT version FROM schema_version").fetchone()["version"] == 4
-        assert SCHEMA_VERSION == 4
+            "SELECT version FROM schema_version").fetchone()["version"] == 5
+        assert SCHEMA_VERSION == 5
         names = {r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
         assert {"retro_runs", "retro_attributions"} <= names
@@ -641,5 +641,88 @@ def test_migrate_up_v3_adds_retro(tmp_path):
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"retro_runs", "retro_attributions"} <= names
     assert c.execute(
-        "SELECT version FROM schema_version").fetchone()["version"] == 4
+        "SELECT version FROM schema_version").fetchone()["version"] == 5
     c.close()
+
+
+# ---------------------------------------------------------------------------
+# schema v5：ensemble 成员归因（retro_attributions.attributor 列）
+# ---------------------------------------------------------------------------
+
+def test_v5_attributor_column_defaults_and_values(tmp_path):
+    """v5：attributor 列存在、DEFAULT 1、显式 0（聚合行）可写。"""
+    from fa.db import connect, init_db
+    db = tmp_path / "v5.db"
+    init_db(db)
+    conn = connect(db)
+    try:
+        info = conn.execute("PRAGMA table_info(retro_attributions)").fetchall()
+        col = [c for c in info if c["name"] == "attributor"]
+        assert col and col[0]["notnull"] == 1 and col[0]["dflt_value"] == "1"
+        conn.execute(
+            "INSERT INTO retro_runs (selector, params_json, n_selected, n_ok,"
+            " n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+            " VALUES ('manual', '{}', 1, 1, 0, 0, 0, 0.1, '2026-09-04T00:00:00Z')")
+        rid = conn.execute("SELECT id FROM retro_runs").fetchone()["id"]
+        # FK 开启（connect 内 PRAGMA foreign_keys=ON）：先备好父行，matches
+        # 的 home/away_team_id 引用才合法（落库后恰为 id 1、2）
+        conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+        conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Chelsea')")
+        conn.execute("INSERT INTO matches (id, league, season, date,"
+            " home_team_id, away_team_id, raw_line)"
+            " VALUES (1, 'E0', 2023, '2024-04-20', 1, 2, '{}')")
+        for v in (0, 1, 3):                      # 聚合 0 / 成员 1 / 成员 3
+            conn.execute(
+                "INSERT INTO retro_attributions (batch_id, match_id, league,"
+                " season, date, selector, status, harness, input_pack_path,"
+                " tag_set_version, created_at, attributor)"
+                " VALUES (?, 1, 'E0', 2023, '2024-04-20', 'manual', 'ok',"
+                " 'hermes', 'p.json', 'v1', '2026-09-04T00:00:00Z', ?)",
+                (rid, v))
+        conn.commit()
+        vals = sorted(r["attributor"] for r in conn.execute(
+            "SELECT attributor FROM retro_attributions"))
+        assert vals == [0, 1, 3]
+    finally:
+        conn.close()
+
+
+def test_v4_migrates_to_v5(tmp_path):
+    """v4 库（无 attributor 列）经 init_db ALTER 升 v5，存量行回填 1。"""
+    from fa.db import connect, init_db
+    db = tmp_path / "v4.db"
+    init_db(db)                                   # v5 新建
+    conn = connect(db)
+    conn.execute("ALTER TABLE retro_attributions DROP COLUMN attributor")
+    conn.execute("UPDATE schema_version SET version=4")
+    conn.execute(
+        "INSERT INTO retro_runs (selector, params_json, n_selected, n_ok,"
+        " n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+        " VALUES ('manual', '{}', 0, 0, 0, 0, 0, 0.0, '2026-09-04T00:00:00Z')")
+    # 放一条存量归因行（列已 DROP，只能按 v4 形状插）——验证 ALTER 的
+    # DEFAULT 1 真把它回填成单成员语义
+    conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+    conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Chelsea')")
+    conn.execute("INSERT INTO matches (id, league, season, date,"
+        " home_team_id, away_team_id, raw_line)"
+        " VALUES (1, 'E0', 2023, '2024-04-20', 1, 2, '{}')")
+    conn.execute(
+        "INSERT INTO retro_attributions (batch_id, match_id, league,"
+        " season, date, selector, status, harness, input_pack_path,"
+        " tag_set_version, created_at)"
+        " VALUES (1, 1, 'E0', 2023, '2024-04-20', 'manual', 'ok',"
+        " 'hermes', 'p.json', 'v1', '2026-09-04T00:00:00Z')")
+    conn.commit()
+    conn.close()
+    init_db(db)                                   # v4 -> v5
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT version FROM schema_version"
+                            ).fetchone()["version"] == 5
+        cols = {c["name"] for c in conn.execute(
+            "PRAGMA table_info(retro_attributions)")}
+        assert "attributor" in cols
+        assert conn.execute("SELECT attributor FROM retro_attributions"
+                            ).fetchone()["attributor"] == 1
+    finally:
+        conn.close()
