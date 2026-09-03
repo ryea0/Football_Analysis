@@ -131,6 +131,45 @@ def test_cli_env_does_not_override_exported_key(clean_env, tmp_path, monkeypatch
     assert odds_api_key() == "from-shell"
 
 
+def test_cli_dotenv_write_is_visible_to_the_process(tmp_path, monkeypatch):
+    """canary 前半（顺序配对，紧跟下一例）：CliRunner 经 typer 回调 load_env 直写
+    os.environ——这正是真机 .env 的真 key 会跨用例泄漏的写入点。
+
+    **故意不用 clean_env**：test_cli.py 的 CliRunner 用例也没有——泄漏正是从那类
+    用例发生的；clean_env 自己的快照还原会把本 canary 掩盖成永绿。
+    monkeypatch.delenv 只为在宿主机已导出真 key 时（``ODDS_API_KEY=real`` 跑全套）
+    让 .env 的 canary 仍能写进进程环境，undo 后真 key 原样回来。
+    """
+    from typer.testing import CliRunner
+
+    from fa.cli import app
+
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    monkeypatch.setattr(config, "project_root", lambda: tmp_path)
+    _write_env(tmp_path, "ODDS_API_KEY=canary-dotenv-7f3a\n")
+
+    result = CliRunner().invoke(app, ["version"])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["ODDS_API_KEY"] == "canary-dotenv-7f3a"
+
+
+def test_cli_dotenv_key_does_not_leak_into_later_tests(env_baseline):
+    """canary 后半（顺序配对，紧跟上一例，其间不得插入别的用例）。
+
+    上一例的 CliRunner 用例把 .env 的 key 直写进 os.environ，monkeypatch.undo()
+    撤不掉（实证见上 test_load_env_write_escapes_monkeypatch_undo）；真机上那个
+    就是真 key，会泄漏给后续所有用例，把「无 key」分支测成「有 key」。终审
+    Important #1 后由 conftest 的 autouse ``seal_environ`` 在上一例 teardown 快照
+    还原——若失守，这里读到的就是 canary 值。真机导出的键属基线（不算泄漏），
+    只断言基线之外的增量。
+    """
+    assert os.environ.get("ODDS_API_KEY") != "canary-dotenv-7f3a"
+    leaked = {k for k in set(os.environ) - set(env_baseline)
+              if k.startswith("FA_") or k == "ODDS_API_KEY"}
+    assert not leaked, f"环境键跨用例泄漏: {sorted(leaked)}"
+
+
 def test_odds_api_key_from_env(clean_env):
     clean_env.setenv("ODDS_API_KEY", "k-123")
     assert odds_api_key() == "k-123"

@@ -27,5 +27,5 @@
 
 ## 环境
 
-- Hermes 已配好：`hermes send --to telegram` 直接可用；`hermes -z` headless 一次性运行；默认模型 ark-code-latest（火山方舟，跑现有额度）
+- Hermes **TG 平台未配置**（2026-09-03 E2E 实测：`~/.hermes/.env` 全注释、无任何 token，`hermes send --to telegram` 报 `Platform 'telegram' is not configured`）；配好后 `fa` 的推送自动恢复，代码侧降级路径已验证（`runs.summary` 记推送失败、不中断 run）；`hermes -z` headless 一次性运行；默认模型 ark-code-latest（火山方舟，跑现有额度）
 - `ODDS_API_KEY` 走环境变量（`.env`，gitignore）

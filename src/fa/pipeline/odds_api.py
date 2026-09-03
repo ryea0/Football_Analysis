@@ -37,9 +37,26 @@ _TOTALS_SIDES = {"Over": "over", "Under": "under"}
 # 失败的调用不写（读到空 dict 即「最近一次拉取未完成」）。
 LAST_FETCH_STATS: dict[str, int] = {"events": 0, "snapshots": 0, "dropped_totals_outcomes": 0}
 
+# 最近一次「部分成功」的额度快照（终审 Important #2）：region 循环已观测到额度头
+# 之后才失败时，把已见最小值记在此（镜像 LAST_FETCH_STATS 的旁路观测口；主出口是
+# 异常对象上的 ``OddsApiError.quota_remaining``）。fetch_odds 开头清空、命中部分
+# 失败才写——读到空 dict 即「最近一次失败前没见过任何额度头」。
+LAST_PARTIAL_QUOTA: dict[str, int] = {}
+
 
 class OddsApiError(RuntimeError):
-    """Odds API 取数失败：无 key / 未知联赛 / HTTP 4xx 5xx（含 429 限流）/ 网络异常 / 非 JSON。"""
+    """Odds API 取数失败：无 key / 未知联赛 / HTTP 4xx 5xx（含 429 限流）/ 网络异常 / 非 JSON。
+
+    ``quota_remaining``：失败前已观测到的最小剩余额度（``None``＝没见过任何额度头，
+    如无 key / 未知联赛 / 首个 region 就失败）。由 :func:`fetch_odds` 在部分失败
+    路径挂上，调用方的 except 路径据此把水位落 meta，不让已消耗的额度观测蒸发。
+    """
+
+    quota_remaining: int | None = None
+
+    def __init__(self, message: str, quota_remaining: int | None = None) -> None:
+        super().__init__(message)
+        self.quota_remaining = quota_remaining
 
 
 @dataclass(frozen=True)
@@ -80,35 +97,43 @@ def fetch_odds(
     `odds_snapshots.region` 的 `eu` / `uk` 口径一致），并留出按 region 降频
     （spec §3.4）的抓手；计费按 region × market，拆分与合并**等价**。
     额度只在 ``refresh_quota=True`` 时读各次响应头并取**最小值**（保守真值）
-    随返回值交调用方落库；本函数自身不写 DB。任一 region 失败则整次上抛。
+    随返回值交调用方落库；本函数自身不写 DB。任一 region 失败则整次上抛——但
+    前面 region 已观测到的最小额度不丢：挂在所抛 :class:`OddsApiError` 的
+    ``quota_remaining`` 上（并记入 :data:`LAST_PARTIAL_QUOTA`），调用方在 except
+    路径落 meta，否则库内水位停留在旧值、降频判据（spec §3.4）被虚高污染。
 
     429 / 其他 HTTP 错误 / 网络异常上抛 :class:`OddsApiError`。
     """
     LAST_FETCH_STATS.clear()                        # 任何失败（无 key / 未知联赛 / 网络）都留 {}
+    LAST_PARTIAL_QUOTA.clear()                      # 同上，且清掉上次调用残留的部分成功额度
     api_key, sport_key = _resolve_sport_key(league)
 
     stats = {"events": 0, "snapshots": 0, "dropped_totals_outcomes": 0}
     quotas: list[int] = []
     snaps: list[OddsSnapshot] = []
-    for region in regions:
-        payload, headers = _http_get(
-            f"{API_BASE}/{sport_key}/odds",
-            {
-                "apiKey": api_key,
-                "regions": region,
-                "markets": ",".join(markets),
-                "oddsFormat": "decimal",
-            },
-        )
-        if not isinstance(payload, list):
-            raise OddsApiError("Odds API 响应结构异常（应为事件数组）")
-        events, region_snaps, dropped = _parse_events(payload, league, region)
-        stats["events"] += events
-        stats["dropped_totals_outcomes"] += dropped
-        snaps.extend(region_snaps)
-        quota = _quota_remaining(headers)
-        if quota is not None:
-            quotas.append(quota)
+    try:
+        for region in regions:
+            payload, headers = _http_get(
+                f"{API_BASE}/{sport_key}/odds",
+                {
+                    "apiKey": api_key,
+                    "regions": region,
+                    "markets": ",".join(markets),
+                    "oddsFormat": "decimal",
+                },
+            )
+            if not isinstance(payload, list):
+                raise OddsApiError("Odds API 响应结构异常（应为事件数组）")
+            events, region_snaps, dropped = _parse_events(payload, league, region)
+            stats["events"] += events
+            stats["dropped_totals_outcomes"] += dropped
+            snaps.extend(region_snaps)
+            quota = _quota_remaining(headers)
+            if quota is not None:
+                quotas.append(quota)
+    except OddsApiError as err:
+        _stash_partial_quota(quotas, refresh_quota, err)
+        raise
 
     stats["snapshots"] = len(snaps)
     LAST_FETCH_STATS.update(stats)
@@ -178,6 +203,23 @@ def best_prices(snaps: list[OddsSnapshot], market: str) -> dict[str, tuple[float
 
 
 # ---------------------------------------------------------------- 内部实现
+
+
+def _stash_partial_quota(quotas: list[int], refresh_quota: bool, err: OddsApiError) -> None:
+    """region 循环部分失败时，把已观测的最小额度挂在异常上并留旁路记录。
+
+    前面 region 的请求已经真实发生（额度已被消耗），其响应头是库内水位的唯一
+    依据；整次上抛若不带出，调用方只能沿用旧水位——虚高的 ``meta
+    ['odds_quota_remaining']`` 会让「额度 < 阈值即降频/跳过拉盘」（spec §3.4）
+    在最需要的时候做出相反判断。``refresh_quota=False`` 的调用方已声明不要额度
+    记账，照旧不产生观测。
+    """
+    if not refresh_quota or not quotas:
+        return
+    partial = min(quotas)
+    if err.quota_remaining is None:                 # 已带值的异常（理论不可达）不回写降级
+        err.quota_remaining = partial
+    LAST_PARTIAL_QUOTA["quota_remaining"] = partial
 
 
 def _resolve_sport_key(league: str) -> tuple[str, str]:

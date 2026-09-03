@@ -348,6 +348,97 @@ def test_stats_empty_after_config_errors(replay, monkeypatch):
     assert LAST_FETCH_STATS == {}
 
 
+def test_partial_failure_keeps_observed_quota_header(replay, monkeypatch):
+    """部分失败不得丢额度头（终审 Important #2）：region eu 回 483、region uk 才 429。
+
+    eu 那次请求已真实发生（额度已被消耗），它的响应头是本次调用唯一的水位证据；
+    整次上抛若不带出，调用方只能沿用旧值 → ``meta['odds_quota_remaining']`` 虚高 →
+    「额度 < 阈值即降频/跳过拉盘」（spec §3.4）在最需要时反着判。主出口是异常
+    属性（调用方 except 路径直接消费），旁路是 LAST_PARTIAL_QUOTA。
+    """
+    from fa.pipeline.odds_api import LAST_PARTIAL_QUOTA
+
+    calls = []
+
+    def fake_http_get(url, params):
+        calls.append(dict(params))
+        if len(calls) == 1:
+            return _fixture_events(), {"X-Requests-Remaining": "483"}
+        raise OddsApiError("Odds API 请求失败: HTTP 429（额度耗尽或限流）")
+
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get", fake_http_get)
+
+    with pytest.raises(OddsApiError) as err:
+        fetch_odds("E0")
+
+    assert [p["regions"] for p in calls] == ["eu", "uk"]   # 失败在第二个 region → 已部分成功
+    assert err.value.quota_remaining == 483
+    assert LAST_PARTIAL_QUOTA == {"quota_remaining": 483}
+
+
+def test_partial_quota_stash_cleared_by_next_call(replay, monkeypatch):
+    """旁路口镜像 LAST_FETCH_STATS 语义：下一次调用开头清空，不残留旧观测。"""
+    from fa.pipeline import odds_api
+    from fa.pipeline.odds_api import LAST_PARTIAL_QUOTA
+
+    n = {"count": 0}
+
+    def flaky(url, params):
+        n["count"] += 1
+        if n["count"] == 2:                            # 第一次调用的 uk 请求
+            raise OddsApiError("Odds API 请求失败: HTTP 429")
+        return _fixture_events(), {"X-Requests-Remaining": "483"}
+
+    monkeypatch.setattr(odds_api, "_http_get", flaky)
+    with pytest.raises(OddsApiError) as err:
+        fetch_odds("E0")
+    assert err.value.quota_remaining == 483
+    assert LAST_PARTIAL_QUOTA == {"quota_remaining": 483}
+
+    fetch_odds("E0")                                   # 本次两次请求都成功（n=3、4）
+    assert n["count"] == 4
+    assert LAST_PARTIAL_QUOTA == {}
+
+
+def test_error_without_observed_quota_carries_none(monkeypatch):
+    """没有观测就没有可保的真值：首个 region 就失败 → 属性为 None、旁路口留空。"""
+    from fa.pipeline.odds_api import LAST_PARTIAL_QUOTA
+
+    def boom(url, params):
+        raise OddsApiError("Odds API 请求失败: HTTP 429（额度耗尽或限流）")
+
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get", boom)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+
+    with pytest.raises(OddsApiError) as err:
+        fetch_odds("E0")
+
+    assert err.value.quota_remaining is None
+    assert LAST_PARTIAL_QUOTA == {}
+
+
+def test_refresh_quota_false_yields_no_partial_quota(monkeypatch):
+    """refresh_quota=False 的调用方已声明不要额度记账 → 部分失败同样不产生观测。"""
+    from fa.pipeline.odds_api import LAST_PARTIAL_QUOTA
+
+    calls = []
+
+    def fake_http_get(url, params):
+        calls.append(dict(params))
+        if len(calls) == 1:
+            return _fixture_events(), {"X-Requests-Remaining": "483"}
+        raise OddsApiError("Odds API 请求失败: HTTP 429")
+
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get", fake_http_get)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+
+    with pytest.raises(OddsApiError) as err:
+        fetch_odds("E0", refresh_quota=False)
+
+    assert err.value.quota_remaining is None
+    assert LAST_PARTIAL_QUOTA == {}
+
+
 def test_fetch_odds_propagates_provider_error(monkeypatch):
     """429 等网络错误由 _http_get 包成 OddsApiError 后原样上抛。"""
 

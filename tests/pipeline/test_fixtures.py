@@ -329,6 +329,54 @@ def test_empty_league_yield_writes_nothing(conn, replay, monkeypatch):
 # ---------------------------------------------------------------- 边界 / 表纪律
 
 
+def test_quota_watermark_written_before_a_later_league_fails(conn, replay, monkeypatch):
+    """逐联赛即写水位（终审 Important #2）：下一联赛再抛，已观测的最小值不随异常蒸发。
+
+    攒到全部联赛完成才 set_meta 的话，E0 的额度已真实消耗、其响应头是唯一证据，
+    异常一路抛到调用方时 meta 仍停在进入 run 前的旧值——水位虚高会让「额度 <
+    阈值即降频/跳过拉盘」（spec §3.4）在额度最紧的时候做出相反判断。
+    """
+    calls = []
+
+    def flaky(league, **kwargs):
+        calls.append(league)
+        if league == "D1":
+            raise OddsApiError("Odds API 请求失败: HTTP 429")
+        snaps, quota = _replay()[league]
+        return list(snaps), quota
+
+    monkeypatch.setattr("fa.pipeline.fixtures.fetch_odds", flaky)
+
+    with pytest.raises(OddsApiError):
+        sync_fixtures(conn, ["E0", "D1"])
+
+    assert calls == ["E0", "D1"]                      # E0 已成功返回后才轮到 D1 炸
+    assert get_meta(conn, "odds_quota_remaining") == "100"
+
+
+def test_league_partial_quota_from_error_is_folded_into_meta(conn, replay, monkeypatch):
+    """联赛内 region 部分成功（eu 见 483、uk 才 429）→ 异常携带的额度并入水位。
+
+    fetch_odds 把已见最小额度挂在 ``OddsApiError.quota_remaining``（本文件上方
+    odds_api 侧同主题测试），sync 的 except 路径消费它——否则该联赛的消耗完全
+    不进账。取 min(490, 483) = 483：既证并入、也证仍是「多源取最小」。
+    """
+
+    def flaky(league, markets=("h2h", "totals"), regions=("eu", "uk"),
+              refresh_quota=True):
+        if league == "E0":
+            return [_snap("E0", "ev1", "h2h", "pinnacle",
+                          {"home": 2.10, "draw": 3.50, "away": 3.60})], 490
+        raise OddsApiError("Odds API 请求失败: HTTP 429（额度耗尽或限流）", 483)
+
+    monkeypatch.setattr("fa.pipeline.fixtures.fetch_odds", flaky)
+
+    with pytest.raises(OddsApiError):
+        sync_fixtures(conn, ["E0", "D1"])
+
+    assert get_meta(conn, "odds_quota_remaining") == "483"
+
+
 def test_provider_error_propagates_without_partial_commit(conn, replay, monkeypatch):
     """任一联赛失败 → 上抛；单 commit 语义下不留半写状态。"""
 

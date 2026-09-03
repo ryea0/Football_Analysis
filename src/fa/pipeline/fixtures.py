@@ -11,12 +11,18 @@
   绝不因此跳过整场；队名进隔离表由 T4 负责，本模块只聚合回传。
 - **额度**（spec §3.4）：多联赛取各次响应头的最小值（保守真值）写
   ``meta['odds_quota_remaining']``；全部缺失（refresh_quota=False）则不动 meta。
+  **逐联赛即写**（不等全部完成）：下一联赛再抛 :class:`OddsApiError` 时，已观测
+  的最小值已在 meta 里，不会随异常蒸发；异常路径上再并入
+  ``OddsApiError.quota_remaining``（同一联赛内 region 部分成功的额度，终审
+  Important #2）。
 - **表边界**（spec §12.1）：只写 fixtures / odds_snapshots / meta（经
   ``align_fixture_teams`` 间接写 team_aliases / unknown_names），绝不写
   backtest_predictions / matches / recommendations / bets。
 
 事务：全程单 ``conn.commit()``（与 fa.data.teams / fa.pipeline.align「写入侧不
-commit」同一约定）——任一联赛上抛即整体无半写状态。
+commit」同一约定）——任一联赛上抛即整体无半写状态（含额度水印：本模块只写
+不提交，由调用方在吞掉异常后的收尾里提交——matchday 的降级路径经 ``finish_run``
+恰有这一次 commit，水印随之入库）。
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ from datetime import datetime, timezone
 
 from fa.db import set_meta
 from fa.pipeline.align import align_fixture_teams
-from fa.pipeline.odds_api import OddsSnapshot, fetch_odds
+from fa.pipeline.odds_api import OddsApiError, OddsSnapshot, fetch_odds
 
 QUOTA_META_KEY = "odds_quota_remaining"     # spec §3.4 钉死的 meta 键
 SOURCE = "oddsapi"                          # fixtures.source / 队名别名 source 同源
@@ -48,9 +54,20 @@ def sync_fixtures(conn: sqlite3.Connection, leagues: list[str]) -> dict:
     quotas: list[int] = []
 
     for league in leagues:
-        snaps, quota = fetch_odds(league)
+        try:
+            snaps, quota = fetch_odds(league)
+        except OddsApiError as err:
+            # 该联赛内部已部分成功（前一 region 拿到额度头、后一 region 才炸）：
+            # 并入已见最小值并即写 meta，再上抛——观测到的额度头一张都不丢。
+            if err.quota_remaining is not None:
+                quotas.append(int(err.quota_remaining))
+                set_meta(conn, QUOTA_META_KEY, str(min(quotas)))
+            raise
         if quota is not None:
             quotas.append(int(quota))
+            # 即写而非攒到最后：下一联赛的 fetch_odds 仍可能抛，届时这个已观测的
+            # 保守真值已在 meta 里（spec §3.4 的水位是降频判据，宁低勿高）。
+            set_meta(conn, QUOTA_META_KEY, str(min(quotas)))
         by_event: dict[str, list[OddsSnapshot]] = {}
         for snap in snaps:
             by_event.setdefault(snap.event_key, []).append(snap)

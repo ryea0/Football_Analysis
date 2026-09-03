@@ -596,6 +596,29 @@ def test_sync_failure_degrades_to_existing_snapshots(env):
                for r in summary_of(c, out["run_id"])["degraded_reasons"])
 
 
+def test_partial_failure_quota_header_reaches_meta(env, monkeypatch):
+    """部分失败的额度头不丢（终审 Important #2）：sync 即写 meta，降级 run 提交入库。
+
+    league 内 eu 已见 483、uk 才 429 → fetch_odds 把已见最小值挂在
+    ``OddsApiError.quota_remaining``，sync 的 except 路径并入并即写 meta；
+    matchday 吞掉 OddsApiError 走降级，``finish_run`` 的恰好一次 commit 让水印
+    落库。若丢失，meta 停在上一 run 的 480，下一 run 的降频判据（QUOTA_FLOOR）
+    就读着虚高水位做决定（spec §3.4）。
+    """
+    c = env.conn
+    assert matchday.run_matchday(c, "am", [LEAGUE])["status"] == "ok"
+    assert get_meta(c, "odds_quota_remaining") == str(QUOTA)
+
+    def flaky(league, *args, **kwargs):
+        raise OddsApiError("Odds API 请求失败: HTTP 429（额度耗尽或限流）", 483)
+
+    monkeypatch.setattr(fixtures_mod, "fetch_odds", flaky)
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert out["status"] == "degraded_ok"            # 复用快照路径不中断
+    assert get_meta(c, "odds_quota_remaining") == "483"   # min(480, 已见 483) 已入库
+
+
 def test_exception_mid_run_records_failed_and_reraises(env, monkeypatch):
     """管线中途上抛：run 记 status='failed'（含原因）后原样外抛，不吞错。"""
     c = env.conn
