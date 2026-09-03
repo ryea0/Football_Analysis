@@ -1721,3 +1721,11 @@ git commit -m "chore(dashboard): E2E 验收——真实库 7 页冒烟 + 双模�
 **真实库数据演进备注**：验收时点 B 线已累积 50 推荐/36 paper 注（run3 14 + run5 22，全 pending）——较计划编写时的 28/14 为 M3 后正常自动落注演进。
 
 **递延项**（12 组 deferred minors 已交整分支终审 triage，结论见终审报告）。
+
+## 终审结论（2026-09-04，整分支 opus 评审 + 修复波复审）
+
+- 判定路径：**With fixes → 修复波 `afc3112` → 复审全 ADDRESSED、零新破坏 → 达到合并标准**
+- 终审 Important（唯一）：冒烟缓存串台——`st.cache_data` 键不含库路径而 FA_DB 在 env，同进程跨 AppTest 取旧缓存（全空库碰巧掩盖）→ 修复波落 autouse `st.cache_data.clear()`；捎带修冒烟元素级断言（`len(at.header) == 1`）与页5 表 `drop(columns=["cal_home"])`
+- 架构结论（评审逐文件实证）：只读保障结构性成立（唯一连接工厂 mode=ro + 写必抛测试）；口径单一事实源执行到位（前缀复调为「最优雅一笔」）；双线分账在代码层结构性成立（A 线查询零 JOIN、无混排）；五处执行期偏离全部有裁定账、无未裁定漂移；双模式 437 实测复跑通过
+- Backlog triage：12 组递延**全部 leave**（各组理由：无消费者/理论不可达/cosmetics/真实库已实证/增速数年不构成问题等，全文见 workspace 终审报告）
+- **登记后续**（不阻塞，按优先序）：① docs sweep——README 测试计数（98/90→437）与结构块补 dashboard/、spec §7.4 补「第三观察出口」从句、设计文档目录树补 loaders.py、CLAUDE.md 版本同步；② settled-bets 汇总三处同式（paper.py/b_summary/b_ab_tracks）提炼共享纯函数——本分支唯一结构性漂移风险；③ use_container_width ×17 与页4 pandas FutureWarning 随 streamlit/pandas 升级机械处理；④ FA_DB_REAL opt-in 真实库用例（T12 计划缺陷的测试化）
