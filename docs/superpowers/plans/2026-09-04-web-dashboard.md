@@ -1703,3 +1703,21 @@ git commit -m "chore(dashboard): E2E 验收——真实库 7 页冒烟 + 双模�
 - Task 9 冒烟测试漏写模块级 `assert PAGES`，空目录会静默 0 收集通过——已补（条款 3）
 - Task 2/3 的测试 import 指令有歧义（重复 import / 无用 import）——改为精确的整行替换与「无需新 import」（条款 5）
 - Task 11 README 4a/4c 原引用行不完整、插入位置含糊——补全原文行与锚点（条款 5）
+
+---
+
+## 执行验收记录（2026-09-04，T12 实测——本附录为在库证据留存）
+
+执行期另修的计划缺陷（均已裁定入 `.superpowers/sdd/2026-09-04-web-dashboard/progress.md`，评审独立核实）：T2/T4 void 注零损益（查询侧 `status IN ('won','lost')`，与管线 `paper.py` 既有方言一致）；T4 断言算式笔误 `(25-10)/20`→`(25-20)/20`；T5 SQLite 引号转义与 pandas object dtype；T7 分赔率区间判定改半开；T9 页3 空态守卫 + 页1/4 空态 caption；T9 冒烟 `import streamlit.testing.v1`（1.63 惰性加载）。
+
+**四步验收**（全部 PASS，零代码改动）：
+1. 裸依赖模式：`uv sync && uv run pytest -q` → **430 passed + 1 skipped**（冒烟整文件 skip，依赖隔离成立）
+2. dashboard 组：`uv sync --group dashboard && uv run --group dashboard pytest -q` → **437 passed**，零警告
+3. 真实库：计划原命令被测试内 `monkeypatch.setenv("FA_DB", tmp)` 覆盖（计划缺陷，测不到真实库）；补做直连探针（FA_DB 指主 checkout 真库、mode=ro）：**7 页全部渲染零异常**，最慢页 3.6s（≪60s 超时）；11,605 预测 → 9,679 候选 → 1,154 曲线点；页1/页4 关键数字逐项对库核实一致；主 checkout 零写入（fa.db 与 -wal/-shm 的 mtime+size 不变量验证）
+4. headless 启动：`streamlit run --server.headless true --server.port 8599` → `curl /_stcore/health` = `ok HEALTH_OK`，kill 后进程干净退出（ps -p exit 1）
+
+**分账人检**（grep 机械化 + 三层验证 loader→queries→SQL）：页1–4 只 import B 线 loader（summary/recommendations/paper_bets/ab_tracks/runs/unknown），页5–7 只 import A 线 loader（overview/calibration/paper_sim）；A 线三个查询全部只经 `fetch_predictions`（`SELECT * FROM backtest_predictions`），无跨线混排。
+
+**真实库数据演进备注**：验收时点 B 线已累积 50 推荐/36 paper 注（run3 14 + run5 22，全 pending）——较计划编写时的 28/14 为 M3 后正常自动落注演进。
+
+**递延项**（12 组 deferred minors 已交整分支终审 triage，结论见终审报告）。
