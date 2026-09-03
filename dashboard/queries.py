@@ -22,3 +22,31 @@ def connect_ro(path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(f"{p.resolve().as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     return conn
+
+
+def b_summary(conn: sqlite3.Connection) -> dict:
+    """页1 总览：meta 两键 + paper 注汇总 + 额度序列。
+
+    pnl/staked 只计已结算注（pending 不进任何一侧）；meta 键缺失返回
+    None（页面显示「未记录」而非 0，设计 §6）。
+    """
+    def meta_float(key: str) -> float | None:
+        row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
+        return None if row is None else float(row["value"])
+
+    agg = conn.execute("""
+        SELECT COUNT(*) AS n,
+               COALESCE(SUM(status = 'pending'), 0) AS n_pending,
+               COALESCE(SUM(CASE WHEN status != 'pending'
+                                 THEN COALESCE(return_amt, 0) - stake ELSE 0 END), 0.0) AS pnl,
+               COALESCE(SUM(CASE WHEN status != 'pending'
+                                 THEN stake ELSE 0 END), 0.0) AS staked
+        FROM bets WHERE mode = 'paper'""").fetchone()
+    quota = conn.execute("""
+        SELECT id, type, phase, status, started_at, credits_before, credits_after
+        FROM runs ORDER BY id""").fetchall()
+    return {"bankroll": meta_float("paper_bankroll"),
+            "quota_remaining": meta_float("odds_quota_remaining"),
+            "n_bets": agg["n"], "n_pending": agg["n_pending"],
+            "pnl": agg["pnl"], "staked": agg["staked"],
+            "quota_series": [dict(r) for r in quota]}
