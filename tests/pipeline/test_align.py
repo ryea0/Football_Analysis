@@ -5,7 +5,7 @@
 - 命中侧 ``Bayern München`` → 归一化 ``bayernmunchen``(13) vs ``bayernmunich``(12)：
   匹配块 ``bayernmun``(9) + ``ch``(2) → M=11 → 2*11/(13+12) = 22/25 = **0.88 ≥ 0.87**
 - 隔离侧 ``Real Sociedad`` → ``realsociedad``(12) vs 最接近的 ``realmadrid``(10)：
-  匹配块 ``real``(4) + ``id``(2) → M=6 → 2*6/(12+10) = 12/22 ≈ **0.5455 < 0.87**
+  匹配块 ``real``(4) + ``ad``(2) → M=6 → 2*6/(12+10) = 12/22 ≈ **0.5455 < 0.87**
 
 真实语料的边界（M1 库实测）：D1 里 ``M'Gladbach`` 与 ``M'gladbach`` 仅大小写之差、
 归一化同形 ``mgladbach`` 但 team_id 不同 → 归一化命中**歧义**，不得自动猜。
@@ -128,7 +128,8 @@ def test_suggest_below_threshold_quarantines(conn):
     """2*6/22 ≈ 0.5455 < 0.87 → 不写别名、入隔离表、返回 None（绝不静默丢弃）。"""
     probe = "Real Sociedad"
     best = rank_candidates(conn, probe, league="SP1")[0]
-    assert best.ratio == pytest.approx(0.545455, abs=1e-5)  # 手工验算：12/22
+    # 手工验算：块 real(4)+ad(2) → 2*6/22 = 12/22
+    assert best.ratio == pytest.approx(0.545455, abs=1e-5)
     assert best.ratio < AUTO_ACCEPT_RATIO
     assert suggest_alias(conn, "SP1", probe) is None
     assert alias_rows(conn) == []
@@ -156,6 +157,32 @@ def test_suggest_ambiguous_normalized_hit_never_guesses(conn):
     # 歧义的两个 canonical 名本身仍走精确命中（不误伤）
     assert suggest_alias(conn, "D1", "M'Gladbach") == a
     assert suggest_alias(conn, "D1", "M'gladbach") == b
+
+
+def test_suggest_normalized_ambiguity_never_falls_through_to_fuzzy(conn):
+    """归一化命中 >1 个 team_id 时**立即隔离**，不得穿透到模糊路径。
+
+    复现审查场景：canonical ``M'Gladbach``=t1 + 人工确认别名 ``Mgladbach``→t2，
+    两者归一化同形 ``mgladbach``。探测名 ``M. Gladbach``（空格+缩写点）同样归一化
+    为 ``mgladbach`` → 命中 {t1, t2} 歧义。修复前会穿透到模糊路径、以 ratio 1.0
+    独占最高分自动写 ``M. Gladbach``→t1 ——结果两个 club 各持一条归一化同形的
+    别名（t1: M. Gladbach / t2: Mgladbach），且隔离表**零痕迹**。
+    """
+    t1 = get_or_create_team(conn, "D1", "M'Gladbach")
+    t2 = get_or_create_team(conn, "D1", "Dortmund")
+    conn.execute(
+        "INSERT INTO team_aliases (team_id, source, alias) VALUES (?, 'oddsapi', ?)",
+        (t2, "Mgladbach"))
+    conn.commit()
+    assert t1 != t2
+    assert normalize_name("M. Gladbach") == normalize_name("M'Gladbach") == "mgladbach"
+
+    assert suggest_alias(conn, "D1", "M. Gladbach") is None      # 不猜，立即隔离
+    assert [(r["team_id"], r["alias"]) for r in alias_rows(conn)] == \
+        [(t2, "Mgladbach")]                                      # 未新写任何别名
+    assert unknown_rows(conn) == ["M. Gladbach"]                 # 隔离表留痕
+    # 歧义两侧既有绑定不受影响，且人工确认路径仍可消化
+    assert resolve_team(conn, "D1", "M. Gladbach", "oddsapi") is None
 
 
 def test_suggest_never_raises_on_garbage(conn):
@@ -221,6 +248,28 @@ def test_rank_candidates_includes_existing_alias(conn):
     conn.commit()
     names = [c.name for c in rank_candidates(conn, "FC Hollywod", league="D1", top=3)]
     assert "FC Hollywood" in names
+
+
+def test_rank_candidates_dedups_same_team_same_normalized(conn):
+    """候选池按 (team_id, 归一化名) 去重——canonical 与同形别名只留先出现者。
+
+    复现审查场景：canonical ``M'Gladbach``=t1、``M'gladbach``=t2，另有确认别名
+    ``Mgladbach``→t2；探测 ``M'gladbach`` 三者 ratio 全 1.0，不去重则 top-3 出现
+    两条 (t2, mgladbach)。
+    """
+    t1 = get_or_create_team(conn, "D1", "M'Gladbach")
+    t2 = get_or_create_team(conn, "D1", "M'gladbach")
+    conn.execute(
+        "INSERT INTO team_aliases (team_id, source, alias) VALUES (?, 'oddsapi', ?)",
+        (t2, "Mgladbach"))
+    conn.commit()
+    rows = rank_candidates(conn, "M'gladbach", league="D1", top=3)
+    keys = [(c.team_id, normalize_name(c.name)) for c in rows]
+    assert len(keys) == len(set(keys))                    # 无重复 (team_id, 归一化名)
+    assert [(c.team_id, c.name) for c in rows[:2]] == \
+        [(t1, "M'Gladbach"), (t2, "M'gladbach")]          # canonical 文本优先保留
+    assert rows[0].ratio == rows[1].ratio == 1.0
+    assert rows[2].team_id not in (t1, t2)                # 第三席让给其余候选（非重复）
 
 
 def test_rank_candidates_empty_pool(conn):

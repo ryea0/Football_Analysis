@@ -52,6 +52,10 @@ def normalize_name(s: str) -> str:
 
     ``Bayern München`` → ``bayernmunchen``；``Schalke 04`` → ``schalke04``；
     空/纯符号串归一化为 ``""``（调用方须把空串视为不可对齐）。
+
+    注意：本函数是**删除**而非转写——无 NFKD 分解的字母（``ø`` / ``ł`` / ``ß`` /
+    ``æ`` 等）会被整字删掉，``Tønsberg``→``tnsberg``、``ß`` 直接消失。此类名字
+    只能靠模糊路径兜底，``ß`` 类甚至可能落隔离（T8 隔离审查时预期可见，非缺陷）。
     """
     decomposed = unicodedata.normalize("NFKD", s)
     stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
@@ -82,7 +86,13 @@ def suggest_alias(conn: sqlite3.Connection, league: str, name: str,
     hits = by_norm.get(target)
     if hits is not None and len(hits) == 1:
         return _bind_alias(conn, next(iter(hits)), source, name)
-    # hits 为空或歧义 → 落到模糊；歧义时模糊同样并列，仍归隔离
+    if hits is not None:
+        # 归一化命中指向**多个** team_id（canonical 与人工确认别名同形、或语料
+        # 仅大小写之差）→ 立即隔离，**绝不穿透到模糊路径**：模糊比较的是归一化
+        # 串，同形候选里可能恰有一个以 ratio 1.0「独占」最高分而自动写别名，
+        # 结果两个 club 各持一条归一化同形的别名、隔离表零痕迹（审查复现案例）。
+        record_unknown(conn, source, name)
+        return None
 
     best = _rank(_canonical_rows(conn, league), target)
     if best and best[0].ratio >= AUTO_ACCEPT_RATIO and _unambiguous(best):
@@ -156,10 +166,14 @@ def _rank(rows: list[tuple[int, str, str]], target: str) -> list[Candidate]:
     if not target:
         return []
     out: list[Candidate] = []
+    seen: set[tuple[int, str]] = set()          # (team_id, 归一化名) 去重
     for team_id, lg, cand in rows:
         cand_norm = normalize_name(cand)
         if not cand_norm:
             continue                        # 归一化为空的候选（纯符号/非拉丁名）不可比
+        if (team_id, cand_norm) in seen:    # 同队同形（canonical 与确认别名重复入池）
+            continue
+        seen.add((team_id, cand_norm))
         out.append(Candidate(
             team_id, lg, cand,
             difflib.SequenceMatcher(None, target, cand_norm).ratio()))
