@@ -1,0 +1,234 @@
+"""比赛日 run 编排（T9，spec §3.4 / §7.1 / §9.5 / §9.6）：``fa run matchday``。
+
+一次 run = 记录（runs）→ 同步（T5）→ 推荐（T6）→ 落注（T7）→ 渲染 → 推送 → 收尾。
+编排层只做**流程与降级判断**，业务语义都在被调方（sync / value / paper / report）：
+
+- **am**（11:00 全量）：key 缺失 → ``no_key`` 早退（不触网）；照常拉盘；无当日赛事
+  → ``skipped`` 空跑（不渲染不推送）；额度低于 :data:`QUOTA_FLOOR` 只**标注**降级
+  ——比赛日本就是拉盘窗，§3.4 要降频的是「非比赛日拉取」，这里没有可跳的步骤。
+- **pm**（17:00 更新版）：额度低于水位 → **跳过拉盘**、复用 am 已落库快照（§9.5
+  「额度耗尽 → 跳过拉盘、用最近快照并标注」）；报告走 ``render_pm_update`` 对照
+  当日最近一次成功的 am run；当日没有 am run 就回退全量报告（phase='pm'）。
+- **拉盘失败**（:class:`OddsApiError`，§9.5「数据源失败 → 用最近缓存 + 告警」）：
+  不中断 run，复用既有快照并标注降级。
+- **推送失败**：只把原因（:func:`fa.pipeline.reporting.last_error`）写进
+  ``runs.summary``——推荐 / 落注已各自落库，状态不加罪（§9.5 降级不中断）。
+
+**run_id 归因语义（T5/T6 ledger 钉死）**：同 ``(fixture, market, strategy, phase)``
+的 UNIQUE 刷新会改 ``recommendations.run_id``，归因属**最后刷新者**。所以 am 的
+完整报告必须在 am 流程内**即时**渲染推送（本模块即「单相即渲染」），绝不先跑两相
+再统一渲染；bets 归因同理（落注去重在 ``(fixture, market, strategy, mode)`` 级）。
+
+表边界（§12.1）：经 T5/T6/T7 写 fixtures / odds_snapshots / recommendations / bets
+/ meta，另写 runs（审计）；不写 matches / backtest_predictions。
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import date, datetime, timedelta, timezone
+
+from fa.config import odds_api_key
+from fa.db import get_meta
+from fa.model.fit import FitConfig, training_rows
+from fa.pipeline.fixtures import QUOTA_META_KEY, sync_fixtures
+from fa.pipeline.odds_api import OddsApiError
+from fa.pipeline.paper import place_paper_bets
+from fa.pipeline.reporting import (last_error, render_matchday_report,
+                                   render_pm_update, send)
+from fa.pipeline.runs import (RUN_MATCHDAY, STATUS_DEGRADED, STATUS_FAILED,
+                              STATUS_NO_KEY, STATUS_OK, STATUS_SKIPPED,
+                              begin_run, finish_run)
+from fa.pipeline.value import (MIN_TRAIN_ROWS, WINDOW_HOURS,
+                               _parse_kickoff, generate_recommendations)
+
+QUOTA_FLOOR = 100        # spec §3.4「低于阈值（如 100）」
+PHASES = ("am", "pm")
+
+
+def run_matchday(conn: sqlite3.Connection, phase: str,
+                 leagues: list[str]) -> dict:
+    """跑一个比赛日相位，返回摘要 dict（CLI 直接消费的行数 / 判决 / 推送结果）。
+
+    返回键：``status``（ok / degraded_ok / skipped / no_key）、``run_id``、
+    ``phase``、``fixtures`` / ``aligned`` / ``unknown``、``recs`` / ``bets``、
+    ``quota_left``、``degraded``、``sent``（None = 本次未推送）、``am_run_id``
+    （仅 pm 有对照对象）。``phase`` 非法上抛 :class:`ValueError`。
+    """
+    if phase not in PHASES:
+        raise ValueError(f"phase 须为 am/pm，收到 {phase!r}")
+    run_id = begin_run(conn, RUN_MATCHDAY, phase)
+    try:
+        return _run(conn, phase, list(leagues), run_id)
+    except Exception as exc:
+        finish_run(conn, run_id, STATUS_FAILED,
+                   {"error": f"{type(exc).__name__}: {exc}"})
+        raise
+
+
+# ---------------------------------------------------------------- 流程
+
+
+def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
+         run_id: int) -> dict:
+    now = _now()
+    quota_before = _quota_left(conn)
+    if odds_api_key() is None:
+        # 无 key：一行不拉、一场不落，runs 记 no_key（CLI exit 0，§12 冒烟口径）
+        finish_run(conn, run_id, STATUS_NO_KEY,
+                   {"reason": "ODDS_API_KEY 未配置——未拉盘、未推荐、未推送",
+                    "telegram": None})
+        return _result(STATUS_NO_KEY, run_id, phase, quota_left=quota_before)
+
+    low = quota_before is not None and quota_before < QUOTA_FLOOR
+    reasons: list[str] = []
+    if low:
+        reasons.append(
+            f"额度 {quota_before} < {QUOTA_FLOOR}："
+            + ("跳过拉盘，复用最近快照（非实时盘）" if phase == "pm"
+               else "比赛日照常拉盘，仅标注水位"))
+
+    sync = None
+    if not (phase == "pm" and low):                  # pm 降级才跳过拉盘
+        try:
+            sync = sync_fixtures(conn, leagues)
+        except OddsApiError as exc:
+            reasons.append(f"Odds API 拉盘失败：{exc}；复用最近快照（非实时盘）")
+    quota_left = sync["quota_left"] if sync else quota_before
+    # pm 的报告对照「当日最近一次成功的 am run」；当日没有 am run 就回退全量报告
+    am_run_id = _latest_am_run(conn, _today()) if phase == "pm" else None
+    report = "pm_update" if am_run_id is not None else "matchday"
+
+    if _window_fixture_count(conn, leagues, now) == 0:
+        finish_run(conn, run_id, STATUS_SKIPPED, {
+            "phase": phase, "leagues": leagues,
+            "fixtures": sync["fixtures"] if sync else 0,
+            "quota_left": quota_left,
+            "skip_reason": "52h 窗口内无当日赛事——未推荐、未落注、未推送",
+            "telegram": None,
+        }, credits_after=quota_left)
+        return _result(STATUS_SKIPPED, run_id, phase,
+                       fixtures=sync["fixtures"] if sync else 0,
+                       unknown=sync["unknown"] if sync else [],
+                       quota_left=quota_left, degraded=bool(reasons))
+
+    rec_ids = generate_recommendations(conn, leagues, phase, run_id)
+    placed = place_paper_bets(conn, run_id)
+    summary = {
+        "phase": phase,
+        "leagues": leagues,
+        "fixtures": sync["fixtures"] if sync else 0,
+        "aligned": sync["aligned"] if sync else 0,
+        "unknown": sync["unknown"] if sync else [],
+        "recs": len(rec_ids),
+        "bets": placed,
+        "quota_before": quota_before,
+        "quota_left": quota_left,
+        "degraded": bool(reasons),
+        "degraded_reasons": reasons,
+        "train_n": _train_n(conn, leagues),
+        "half_life": FitConfig().half_life_days,
+        "window_hours": WINDOW_HOURS,
+        "am_run_id": am_run_id,
+        "report": report,
+    }
+    # 报告必须在**本相位内**即时渲染推送（run_id 归因=最后刷新者，见模块 docstring）
+    if report == "pm_update":
+        text = render_pm_update(conn, am_run_id, run_id, quota_left, bool(reasons))
+    else:
+        text = render_matchday_report(conn, run_id, phase, summary, quota_left,
+                                      bool(reasons))
+    sent = send(text)
+    summary["telegram"] = ({"sent": True, "error": None} if sent else
+                           {"sent": False,
+                            "error": last_error() or "推送失败（未记录原因）"})
+    finish_run(conn, run_id, STATUS_DEGRADED if reasons else STATUS_OK, summary,
+               credits_after=quota_left)
+    return _result(STATUS_DEGRADED if reasons else STATUS_OK, run_id, phase,
+                   fixtures=summary["fixtures"], aligned=summary["aligned"],
+                   unknown=summary["unknown"], recs=len(rec_ids), bets=placed,
+                   quota_left=quota_left, degraded=bool(reasons), sent=sent,
+                   am_run_id=am_run_id)
+
+
+def _result(status: str, run_id: int, phase: str, *, fixtures: int = 0,
+            aligned: int = 0, unknown: list[str] | None = None, recs: int = 0,
+            bets: int = 0, quota_left: int | None = None,
+            degraded: bool = False, sent: bool | None = None,
+            am_run_id: int | None = None) -> dict:
+    """统一的返回形状：CLI / 测试只认这一份契约。"""
+    return {"status": status, "run_id": run_id, "phase": phase,
+            "fixtures": fixtures, "aligned": aligned,
+            "unknown": list(unknown or []), "recs": recs, "bets": bets,
+            "quota_left": quota_left, "degraded": degraded, "sent": sent,
+            "am_run_id": am_run_id}
+
+
+# ---------------------------------------------------------------- 查询辅助
+
+
+def _quota_left(conn: sqlite3.Connection) -> int | None:
+    """meta 里的额度水位（None = 从未拉到额度头）。"""
+    raw = get_meta(conn, QUOTA_META_KEY)
+    return None if raw is None else int(float(raw))
+
+
+def _window_fixture_count(conn: sqlite3.Connection, leagues: list[str],
+                          now: datetime) -> int:
+    """52h 窗口内的 fixture 数（**不看对齐**：有赛事就该出报告，未对齐也要暴露）。
+
+    窗口判定与 value 层同源（复用 ``WINDOW_HOURS`` / ``_parse_kickoff``），避免两套
+    「当日赛事」口径漂移——空跑判据是「真的没有比赛」，不是「没有可下注的推荐」。
+    """
+    if not leagues:
+        return 0
+    end = now + timedelta(hours=WINDOW_HOURS)
+    placeholders = ",".join("?" * len(leagues))
+    n = 0
+    for row in conn.execute(
+            f"SELECT kickoff_utc FROM fixtures WHERE league IN ({placeholders})",
+            list(leagues)):
+        kickoff = _parse_kickoff(row["kickoff_utc"])
+        if kickoff is not None and now <= kickoff <= end:
+            n += 1
+    return n
+
+
+def _latest_am_run(conn: sqlite3.Connection, day: date) -> int | None:
+    """当日最近一次成功的 am matchday run（终态 ok / degraded_ok）；无则 None。
+
+    空跑 / 无 key 的 am run 不作对照基准——它们没有可 diff 的推荐。
+    """
+    row = conn.execute(
+        "SELECT id FROM runs WHERE type=? AND phase='am' AND status IN (?, ?)"
+        " AND substr(started_at, 1, 10)=? ORDER BY id DESC LIMIT 1",
+        (RUN_MATCHDAY, STATUS_OK, STATUS_DEGRADED, day.isoformat())).fetchone()
+    return None if row is None else int(row["id"])
+
+
+def _train_n(conn: sqlite3.Connection, leagues: list[str]) -> int:
+    """报告「样本量」风险项（§7.1-3）：与 value 层同一条训练切片口径，但只计达到
+    ``MIN_TRAIN_ROWS`` 的联赛——不足者根本不进拟合，计入反而虚高样本量。"""
+    cfg = FitConfig()
+    asof = _today().isoformat()
+    total = 0
+    for league in leagues:
+        rows = training_rows(conn, league, asof, cfg.window_days)
+        if len(rows) >= MIN_TRAIN_ROWS:
+            total += len(rows)
+    return total
+
+
+# ---------------------------------------------------------------- 时间缝
+
+
+def _now() -> datetime:
+    """时间注入缝：本模块的「当日赛事」判定从这里取。推荐窗口与拟合 ``asof``
+    归 value 层的同款缝——生产中两者是同一时钟，测试里成对 monkeypatch。"""
+    return datetime.now(timezone.utc)
+
+
+def _today() -> date:
+    """UTC 日历日。11:00 / 17:00 北京时间 = 03:00 / 09:00 UTC，两个 cron 窗都落在
+    同一 UTC 日内，故与「北京日期」口径等价（spec §9.6 Asia/Shanghai）。"""
+    return _now().astimezone(timezone.utc).date()

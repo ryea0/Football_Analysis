@@ -214,3 +214,66 @@ def backtest_run(
     ev = render_report(rows, _P(project_root() / "docs" / "m2-report.md"))
     typer.echo(f"判决：{ev['verdict']}（劣化 {ev['degradation_pct']:+.2f}%，"
                f"判据 ≤ +1.00%）——报告见 docs/m2-report.md")
+
+
+# ---- B 线 run 命令（T9/T10）----
+
+run_app = typer.Typer(help="运营 run（比赛日 / 结算日课，spec §9.6 调度）")
+app.add_typer(run_app, name="run")
+
+# runs.status 的中文判决位（词表单源在 fa.pipeline.runs）
+_STATUS_CN = {
+    "ok": "ok（正常）",
+    "degraded_ok": "degraded_ok（降级完成）",
+    "skipped": "skipped（空跑）",
+    "no_key": "no_key（无密钥）",
+    "failed": "failed（失败）",
+}
+
+
+@run_app.command("matchday")
+def run_matchday_cmd(
+    phase: str = typer.Option("am", "--phase",
+                              help="am=11:00 全量报告 / pm=17:00 更新版"),
+    leagues: str = typer.Option("", "--leagues", help="逗号分隔联赛码，空=全部"),
+) -> None:
+    """比赛日 run：拉盘 → 推荐 → 落注 → TG 报告（无当日赛事则空跑退出）"""
+    from fa.config import LEAGUES
+    from fa.pipeline.matchday import run_matchday
+    from fa.pipeline.reporting import last_error
+
+    if phase not in ("am", "pm"):
+        typer.echo(f"参数错误：--phase 须为 am/pm，收到 {phase!r}")
+        raise typer.Exit(code=1)
+    lgs = [s.strip() for s in leagues.split(",") if s.strip()] or list(LEAGUES)
+
+    conn = connect()
+    try:
+        out = run_matchday(conn, phase, lgs)
+    finally:
+        conn.close()
+
+    typer.echo(f"比赛日 run（{out['phase']}）判决：{_STATUS_CN[out['status']]}")
+    if out["status"] == "no_key":
+        typer.echo("原因：ODDS_API_KEY 未配置（.env 或环境变量）——未拉盘、未推荐")
+    typer.echo(
+        f"  行数：fixture 同步 {out['fixtures']} 场（双侧对齐 {out['aligned']}，"
+        f"未对齐 {len(out['unknown'])}），推荐 {out['recs']} 条，"
+        f"落注 {out['bets']} 注")
+    if out["quota_left"] is not None:
+        typer.echo(f"  额度：剩余 {out['quota_left']} credits（Odds API）")
+    if out["degraded"]:
+        typer.echo("  降级：非实时盘（复用最近快照）——价格类字段可能滞后")
+    if out["sent"] is None:
+        typer.echo("  推送：未推送（空跑 / 无密钥）")
+    elif out["sent"]:
+        typer.echo("  推送：已发 Telegram")
+    else:
+        typer.echo(f"  推送：失败（{last_error()}）——推荐与落注已落库")
+
+
+@run_app.command("daily")
+def run_daily_cmd() -> None:
+    """结算日课：完赛同步 → 结算 → 有结算才发一行简报（spec §3.4 / §7.3）"""
+    from fa.pipeline.daily import run_daily  # noqa: F401  (T10 提交接入)
+
