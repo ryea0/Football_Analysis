@@ -285,12 +285,14 @@ def _a_line_summary(conn) -> str:
             f"（判据：劣化 ≤ +1.00%）")
 
 
-_TRACK = {"model_only": "纯模型", "model_persona": "模型+persona"}
-
-
 def _b_line_summary(conn) -> list[str]:
     """B 线各行：paper 双轨台账汇总（D2，每轨一行）+ 额度水位 + 最近 runs
-    + 隔离队名计数。（两轨各占一行是 T12 的最小适配；版式精修归 T14。）"""
+    + 隔离队名计数。
+
+    双轨行用方括号裸 strategy 键（``[model_only]`` / ``[model_persona]``）——
+    与报告 bankroll 块、meta 键名同字面，A/B 两本账一眼可分、不互相冒充
+    （§12.3 预注册判据按轨分账）。
+    """
     from fa.db import get_meta
     from fa.pipeline.fixtures import QUOTA_META_KEY
     from fa.pipeline.paper import INITIAL_BANKROLL, bankroll_key, paper_summary
@@ -300,7 +302,7 @@ def _b_line_summary(conn) -> list[str]:
         bankroll = ("未初始化（首次落注时按 "
                     f"{INITIAL_BANKROLL:.0f} 写 meta {bankroll_key(strategy)}）"
                     if s["bankroll"] is None else _money(s["bankroll"]))
-        lines.append(f"{_TRACK.get(strategy, strategy)}："
+        lines.append(f"[{strategy}] "
                      f"注数={s['n']}（pending {s['pending']}）  "
                      f"已结算注金={_money(s['staked'])}  回报={_money(s['returned'])}"
                      f"  ROI={_pct(s['roi'])}  bankroll={bankroll}"

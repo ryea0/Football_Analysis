@@ -166,7 +166,7 @@ def test_data_sync_history_refresh_flag(tmp_path, monkeypatch):
 
 # ---- 双线 status 与 bet 台账（T11）----------------------------------------
 
-from fa.pipeline.paper import BANKROLL_KEY, place_paper_bets  # noqa: E402
+from fa.pipeline.paper import bankroll_key, place_paper_bets  # noqa: E402
 
 
 def _seed_prediction(conn, league="E0", season=2025, market=True):
@@ -258,7 +258,10 @@ def test_status_empty_db_renders_both_sections(tmp_path, monkeypatch):
     from fa.db import get_meta
     conn = connect(db)
     try:
-        assert get_meta(conn, BANKROLL_KEY) is None        # status 只读，不落 meta
+        # status 只读：三把 bankroll 键（legacy + 两轨）一个都不写
+        assert get_meta(conn, "paper_bankroll") is None
+        assert get_meta(conn, bankroll_key("model_only")) is None
+        assert get_meta(conn, bankroll_key("model_persona")) is None
     finally:
         conn.close()
 
@@ -302,6 +305,31 @@ def test_status_b_line_shows_ledger_quota_runs_unknown(tmp_path, monkeypatch):
     assert "matchday" in result.output and "daily" in result.output
     assert "88" in result.output                           # run 行回显剩余额度
     assert "未对齐队名（隔离表）：1 条" in result.output
+
+
+def test_status_b_line_two_track_lines(tmp_path, monkeypatch):
+    """T14 正式版式：B 线台账双轨各一行 `[model_only]` / `[model_persona]`。
+
+    只 model_only 轨有注 → 该轨 bankroll 已惰性初始化、另一轨保持「未初始化」，
+    两行绝不互相冒充（D2 分账）。
+    """
+    db = _use_tmp_db(tmp_path, monkeypatch)
+    conn = connect(db)
+    fx = _seed_fixture_row(conn)
+    run = _seed_run_row(conn)
+    _seed_rec_row(conn, run, fx, "H", kelly=0.02, best_odds=2.0)
+    conn.commit()
+    assert place_paper_bets(conn, run) == 1
+    conn.close()
+
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    tracks = [l for l in result.output.splitlines() if l.startswith("[model_")]
+    assert len(tracks) == 2, result.output
+    assert tracks[0].startswith("[model_only]")
+    assert tracks[1].startswith("[model_persona]")
+    assert "注数=1" in tracks[0] and "bankroll=1000.00" in tracks[0]
+    assert "注数=0" in tracks[1] and "bankroll=未初始化" in tracks[1]
 
 
 def test_status_limits_runs_to_three(tmp_path, monkeypatch):
@@ -494,7 +522,9 @@ def test_bet_settle_won_default_return_and_bankroll_untouched(tmp_path, monkeypa
     from fa.db import get_meta
     conn = connect(db)
     try:
-        assert get_meta(conn, BANKROLL_KEY) is None        # 手工结算不记账（T7 自动路径才动）
+        # 手工结算不记账（T7 自动路径才动）；两轨键一个都不写
+        assert get_meta(conn, bankroll_key("model_only")) is None
+        assert get_meta(conn, bankroll_key("model_persona")) is None
     finally:
         conn.close()
 

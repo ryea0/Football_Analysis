@@ -19,7 +19,7 @@ import pytest
 from fa.db import connect, get_meta, init_db, set_meta
 from fa.persona.apply import apply_verdict
 from fa.pipeline import paper
-from fa.pipeline.paper import (BANKROLL_KEY, INITIAL_BANKROLL, LEGACY_BANKROLL_KEY,
+from fa.pipeline.paper import (INITIAL_BANKROLL, LEGACY_BANKROLL_KEY,
                                bankroll_key, ensure_bankroll_migrated,
                                paper_summary, place_paper_bets, settle_paper_bets)
 
@@ -120,10 +120,12 @@ def fixture_status(c):
 
 
 def test_bankroll_key_is_the_canonical_constant():
-    """控制器裁定：分轨键单源 ``bankroll_key()``；旧单键保留为 legacy 别名
-    （render 分轨改造在 T14，届时一并移除），迁移读 :data:`LEGACY_BANKROLL_KEY`。"""
-    assert paper.BANKROLL_KEY == "paper_bankroll" == BANKROLL_KEY
+    """控制器裁定（T14 收尾）：分轨键单源 ``bankroll_key()``——旧单键别名
+    ``BANKROLL_KEY`` 已随 render 分轨改造删除，``paper_bankroll`` 只剩迁移读
+    这一个合法读点（:data:`LEGACY_BANKROLL_KEY`），不再有任何别名。"""
+    assert not hasattr(paper, "BANKROLL_KEY")            # 别名已删，无双源
     assert paper.LEGACY_BANKROLL_KEY == LEGACY_BANKROLL_KEY == "paper_bankroll"
+    assert bankroll_key("model_only") != LEGACY_BANKROLL_KEY   # 分轨键 ≠ legacy
     assert INITIAL_BANKROLL == 1000.0
 
 

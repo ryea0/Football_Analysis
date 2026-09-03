@@ -41,9 +41,8 @@ from datetime import date, datetime, timezone
 from fa.db import get_meta, set_meta
 from fa.pipeline.value import STRATEGIES
 
-LEGACY_BANKROLL_KEY = "paper_bankroll"  # M3 单键，仅迁移读（D2 分轨）
-# legacy 别名：fa.report.render 仍 import 此名，其分轨改造在 T14，届时一并移除
-BANKROLL_KEY = LEGACY_BANKROLL_KEY
+LEGACY_BANKROLL_KEY = "paper_bankroll"  # M3 单键，仅迁移读（T14 起 render 亦走
+                                        # bankroll_key，此常量是全仓唯一读点）
 INITIAL_BANKROLL = 1000.0           # 首次落注时惰性初始化（brief 钉死）
 MODE = "paper"                      # 本 Provider 的模式（§7.2 双模式的 paper 侧）
 STATUS_PENDING = "pending"
@@ -242,8 +241,8 @@ def paper_summary(conn: sqlite3.Connection) -> dict[str, dict]:
     CLV 中位数（缺收盘者不计）。
     """
     ensure_bankroll_migrated(conn)
-    if conn.in_transaction:     # 仅迁移真写了 meta 才补提交（meta 单行写，安全）；
-        conn.commit()           # 常态（旧键缺席）保持纯读路径，不产生多余 commit
+    if conn.in_transaction:     # 迁移写后自持提交（meta 单行写，安全）；若未来
+        conn.commit()           # 管线内调用需改显式信号，别靠读路径顺手 commit
     out: dict[str, dict] = {}
     for strategy in STRATEGIES:
         row = conn.execute(_SUMMARY_SQL,
