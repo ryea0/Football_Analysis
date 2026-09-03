@@ -37,7 +37,7 @@ ALTER TABLE retro_attributions ADD COLUMN attributor INTEGER NOT NULL DEFAULT 1;
 | k=0 | 聚合行 status = `'error'`（统一值，杜绝失败态并列歧义；成员失败分布见成员行）；契约字段全 NULL |
 | primary_tag | 成员 primary_tag 多数票；**无多数（三票各异）→ NULL**，digest 注明「成员无多数」 |
 | miss_tags | **primary 一致成员（无多数时取全部可用成员）中**出现次数 ≥2 的标签集合（可为空集 → NULL）——计数域钉死为多数联盟，避免「联盟外成员的标签」混入聚合（勘误 2026-09-04 实施：原「出现≥2 次」未钉计数域，实施期裁定并回填本表） |
-| model_vs_market | **与 primary 同进退**：primary 有多数时取成员多数票（平票取 NULL），primary 无多数 → NULL——聚合表达的是多数联盟的判断，无联盟即无 mvm（勘误同上） |
+| model_vs_market | **与 primary 同进退**：primary 有多数时取成员多数票——**计票域=全部可用成员**（表达全场共识方向，与 miss_tags 的联盟域不同；平票取 NULL），primary 无多数 → NULL——聚合表达的是多数联盟的判断，无联盟即无 mvm（勘误同上；计票域钉定 2026-09-04 E-T2 审查） |
 | tags_confidence | 成员值中位数 |
 | evidence | primary_tag 与聚合 primary 一致的成员（无多数时取全部成员）证据按 URL 去重并集 |
 | digest | primary_tag 与聚合一致且 attributor 序最小的成员的 digest；无多数 → 固定文案「成员无多数（<各成员 primary>），见成员行」 |
