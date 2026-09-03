@@ -26,7 +26,7 @@ uv run fa init && uv run fa data sync-history          # 建库并拉五大联�
 uv run fa backtest run --from 2019 --to 2025           # 全量 walk-forward 回测（~65 s，11,605 行）
 ```
 
-完整审计顺序（含 half-life 50/200/400、σ 0.5/0.8/1.5/3.0 扫描与只读取数一行）见 [docs/m2-verdict.md](./docs/m2-verdict.md) 的「复现命令」「σ 扫描复现命令」节。测试：`uv run pytest -q`（90 项，不触碰 `data/fa.db`）。
+完整审计顺序（含 half-life 50/200/400、σ 0.5/0.8/1.5/3.0 扫描、大小球通道与 §4.5 形式协变量消融、只读取数一行）见 [docs/m2-verdict.md](./docs/m2-verdict.md) 的「复现命令」「σ 扫描复现命令」等节。测试：`uv run pytest -q`（98 项，不触碰 `data/fa.db`）。
 
 ## 仓库结构
 
