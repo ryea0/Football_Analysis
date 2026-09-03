@@ -53,7 +53,8 @@ def test_backtest_run_sigma_passthrough(tmp_path, monkeypatch):
     _use_tmp_db(tmp_path, monkeypatch)
     seen = {}
 
-    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False, **kwargs):
+    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False,
+                          with_form=False):
         seen["cfg"] = cfg
         return 0                                   # 0 行预测 → CLI 退出码 1
 
@@ -71,9 +72,10 @@ def test_backtest_run_sigma_default_is_canonical(tmp_path, monkeypatch):
     _use_tmp_db(tmp_path, monkeypatch)
     seen = {}
 
-    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False, **kwargs):
+    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False,
+                          with_form=False):
         seen["cfg"] = cfg
-        seen["form"] = kwargs.get("with_form")
+        seen["form"] = with_form
         return 0
 
     monkeypatch.setattr("fa.backtest.run.run_backtest", fake_run_backtest)
@@ -90,8 +92,9 @@ def test_backtest_run_form_flag_passthrough(tmp_path, monkeypatch):
     _use_tmp_db(tmp_path, monkeypatch)
     seen = {}
 
-    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False, **kwargs):
-        seen["form"] = kwargs.get("with_form")
+    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False,
+                          with_form=False):
+        seen["form"] = with_form
         return 0
 
     monkeypatch.setattr("fa.backtest.run.run_backtest", fake_run_backtest)

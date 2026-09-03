@@ -163,7 +163,7 @@ spec §4.5 留作可选的最后一项消融：把各队**近 6 场场均净胜�
 
 （市场 log-loss 恒为 0.96867；两路径写入行数完全相等 = 11,605，无一场被丢弃。Brier：off 0.29776 / on 0.29845；`p_home` 标准差 off 0.148 → on 0.157，市场 0.186。）
 
-**β 抽样 5 周**（跑完后对 5 个抽样 league-week 重拟合并读 `beta_form`；与驱动器同一路径，只读）：
+**β 抽样 5 周**（跑完后对 5 个抽样 league-week 重拟合并读 `beta_form`，与驱动器同一路径、只读；复现脚本 `scripts/form_beta_probe.py`）：
 
 | 抽样周（asof） | 训练行数 | β | 窗内 form p10/p50/p90 |
 |---|---|---|---|
@@ -187,7 +187,7 @@ uv run fa backtest run --from 2019 --to 2025 --form
 # 表内只读取数（n / 模型 ll / 市场 ll / 劣化 / 判决 / 平注 ROI）
 uv run python -c "from fa.db import connect; from fa.backtest.metrics import fetch_predictions, evaluate; from fa.backtest.simulate import candidates, simulate_flat; rows=fetch_predictions(connect(), leagues=['E0','SP1','D1','I1','F1'], seasons=list(range(2019,2026))); ev=evaluate(rows); f=simulate_flat(candidates(rows)); print(ev['n'], round(ev['model_ll'],5), round(ev['market_ll'],5), round(ev['degradation_pct'],2), ev['verdict'], f['n'], round(f['roi']*100,2))"
 # β 抽样：对 5 个抽样 league-week 重拟合并读 beta_form（与驱动器同一路径，只读）
-#   （一次性探针脚本，未入库：E0 2019 wk10 / SP1 2021 wk20 / D1 2023 wk15 / I1 2024 wk25 / F1 2025 wk12）
+uv run python scripts/form_beta_probe.py
 # 收尾：默认重跑恢复正典
 uv run fa backtest run --from 2019 --to 2025
 ```
