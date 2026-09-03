@@ -96,6 +96,42 @@ uv run fa backtest run --from 2019 --to 2025 --leagues E0,SP1,D1,I1,F1
 
 > 复核记录（2026-09-03，fit_rho 平坦似然修复后）：上列前 7 条命令按序原样重跑（13.99 s + 13.63 s + 10.86 s + 13.78 s + 10.96 s + 67.09 s + 0.9 s），重生成的 `docs/m2-report.md` 与修复前 **逐字节一致**（sha256 `42e956cc793f9251cc8a84c689c0c3fe17b5da3797d47bb50e8bc8f7ec38d11f`，`git diff --stat docs/m2-report.md` 为空）——1,195 个 league-week 训练窗中 0 个出现平坦 ρ 似然，该修复在本数据集上未改变任何预测。
 
+## 补充：σ 先验扫描（终审后补全）
+
+主判决落档后补做的第二根超参轴：队级先验宽度 `sigma_att = sigma_dfn`（`--sigma`，CLI 于终审后补透传；`sigma_mu`/`sigma_ha` 保持默认 0.25——联赛级收缩不是诊断出的瓶颈）。窗口、数据与评估口径与主判决完全一致（2019–2025，11,605 场，市场 log-loss 恒为 0.96867）。σ 越大 = 先验越宽 = 队级收缩越弱。
+
+| σ（sigma_att=sigma_dfn） | 模型 log-loss | 劣化% | 平注 ROI（注数） | 判决 |
+|---|---|---|---|---|
+| **0.35（默认，主判决，已归档）** | **0.99790** | **+3.02%** | **−5.55%（9,679）** | **NO-GO** |
+| 0.5 | 0.99606 | +2.83% | −5.32%（9,600） | NO-GO |
+| 0.8 | 0.99768 | +3.00% | −5.67%（9,708） | NO-GO |
+| 1.5 | 1.00079 | +3.32% | −5.27%（9,779） | NO-GO |
+| 3.0 | 1.00322 | +3.57% | −5.56%（9,838） | NO-GO |
+
+**解读：σ 轴是平的，且机理上揭示了「过度收缩」只是症状而非病因。** 全轴都在 +2.8%～+3.6% 之间：最优点 σ=0.5 也只把劣化从 +3.02% 降到 +2.83%（−0.19pp），离 ≤1% 门槛还差 1.8pp；曲线在默认值附近呈浅谷、之后随 σ 单调变差（0.8 → 3.0 一路上升），与 half-life 轴的 +2.17% 平台互相印证——**两根超参轴都到不了关卡**。更关键的是反向证据：σ=3.0 时模型 p_home 标准差升至 **0.199**（默认 0.148，市场 0.186），即判决书指出的「概率离散度不足」**是可以被弥合的**，弥合后 log-loss 反而更差（+3.57%）。说明额外的锐度来自队级参数在 ~1,000 场加权样本上的噪声放大（过拟合），并非信息增量；把预测「拉宽到市场形状」不等于「比市场更准」。平注 ROI 在所有 σ 下均停在 −5.3%～−5.7%，无一转正。M2 的 NO-GO 结论与机理诊断在 σ 轴上同样成立。
+
+> 诚实声明：默认 σ=0.35 的那一次运行即**预注册的主判决**；在同一评估窗口（2019–2025）上扫描 σ 得到的任何更优取值，都属于**样本内超参选择（in-sample hyperparameter selection）**，其本身**不重开关卡**。若某个 σ 在本窗口越过 ≤1% 门槛，仍需**样本外确认**（如留出的 2025-26 部分赛季，或一次全新的预注册运行）才具备重评资格，且是否重启由项目负责人决定。本次扫描未出现任何越线取值（最低 +2.83%），故仅作稳健性留档，不改变判决。
+
+### σ 扫描复现命令（审计记录，按执行顺序）
+
+```bash
+# σ 稳健性扫描（每次整表覆盖 backtest_predictions，~67–78 s/次）
+uv run fa backtest run --from 2019 --to 2025 --sigma 0.5
+uv run fa backtest run --from 2019 --to 2025 --sigma 0.8
+uv run fa backtest run --from 2019 --to 2025 --sigma 1.5
+uv run fa backtest run --from 2019 --to 2025 --sigma 3.0
+# 收尾：以默认参数（half-life=100, σ=0.35）重跑，恢复主判决口径
+uv run fa backtest run --from 2019 --to 2025
+```
+
+每次运行后用只读一行（复用表内预测，不重跑回测）取本节表内数字：
+
+```bash
+uv run python -c "from fa.db import connect; from fa.backtest.metrics import fetch_predictions, evaluate; from fa.backtest.simulate import candidates, simulate_flat; rows=fetch_predictions(connect(), leagues=['E0','SP1','D1','I1','F1'], seasons=list(range(2019,2026))); ev=evaluate(rows); f=simulate_flat(candidates(rows)); print(ev['n'], round(ev['model_ll'],5), round(ev['market_ll'],5), round(ev['degradation_pct'],2), ev['verdict'], f['n'], round(f['roi']*100,2))"
+```
+
+> 归档自检：收尾那次默认重跑生成的 `docs/m2-report.md` 与提交版**逐字节一致**（sha256 `42e956cc793f9251cc8a84c689c0c3fe17b5da3797d47bb50e8bc8f7ec38d11f`，`git diff --stat docs/m2-report.md` 为空），扫描未在仓库留下任何报告产物。
+
 ## 数据说明
 
 - `psc_*`（Pinnacle 收盘）实际自 **2012** 赛季起即有覆盖，早于 brief 预估的 2019；`--from 2019` 按计划保留（spec §8.1 walk-forward ≥5 赛季）。
