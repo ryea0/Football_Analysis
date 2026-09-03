@@ -208,6 +208,7 @@ def _finish_skipped(conn: sqlite3.Connection, run_id: int, phase: str,
         "phase": phase, "leagues": leagues,
         "fixtures": 0, "quota_left": quota_left,
         "probe": probe, "probe_quota": probe_quota,
+        "degraded": degraded,           # 空跑也可能带降级（pm 低水位跳过拉盘）
         # events=探测证实无赛事；none=未指定联赛（探测一次都没发）
         "skip_reason": ("52h 窗口内无当日赛事（/events 探测证实）——未拉盘、未推荐、"
                         "未落注、未推送" if probe == "events" else

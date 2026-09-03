@@ -711,6 +711,13 @@ def test_cli_skipped_and_degraded_prints_empty_run_reason(tmp_path, monkeypatch)
     monkeypatch.setenv("FA_DB", str(db))
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
     init_db(db)
+    # 低于水位：pm 才会走「跳过拉盘」→ 空跑且 degraded=True，命中新增文案分支
+    c = connect(db)
+    try:
+        set_meta(c, "odds_quota_remaining", str(QUOTA_FLOOR - 1))
+        c.commit()
+    finally:
+        c.close()
     monkeypatch.setattr(fixtures_mod, "fetch_odds",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("触网")))
     monkeypatch.setattr(matchday, "list_events", lambda *a, **k: ([], None))
@@ -718,8 +725,19 @@ def test_cli_skipped_and_degraded_prints_empty_run_reason(tmp_path, monkeypatch)
         app, ["run", "matchday", "--phase", "pm", "--leagues", LEAGUE])
 
     assert result.exit_code == 0, result.output
-    assert "空跑" in result.output
-    assert "复用最近快照" not in result.output
+    assert "skipped（空跑）" in result.output         # 前置：确实走的是空跑
+    assert "本次空跑未拉盘" in result.output          # 新分支的文案
+    assert "复用最近快照" not in result.output        # 旧措辞不得出现
+    conn = connect(db)
+    try:
+        row = conn.execute(
+            "SELECT status, summary FROM runs ORDER BY id DESC LIMIT 1").fetchone()
+        assert row["status"] == "skipped"
+        summary = json.loads(row["summary"])
+        assert summary["degraded"] is True            # 确实进了降级分支
+        assert summary["probe"] == "events"
+    finally:
+        conn.close()
 
 
 def test_cli_matchday_no_key_exits_zero(tmp_path, monkeypatch):
