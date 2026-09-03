@@ -847,3 +847,41 @@ def run_daily_cmd() -> None:
         typer.echo("  推送：已发 Telegram（结算简报）")
     else:
         typer.echo(f"  推送：失败（{last_error()}）——结算已落库")
+
+
+ops_app = typer.Typer(help="运维告警（跑批失败/漏跑的 TG 告警，spec 风险 #6）")
+app.add_typer(ops_app, name="ops")
+
+
+@ops_app.command("alert")
+def ops_alert_cmd(text: str = typer.Argument(..., help="告警正文")):
+    """推一条告警到 Telegram（cron wrapper 的失败路径调用）"""
+    from fa.pipeline.ops import send_alert
+    from fa.pipeline.reporting import last_error
+
+    if send_alert(text):
+        typer.echo("告警已发 Telegram")
+        return
+    typer.echo(f"告警推送失败（{last_error()}）")
+    raise typer.Exit(code=1)
+
+
+@ops_app.command("watchdog")
+def ops_watchdog_cmd() -> None:
+    """daily 健诊：成功间隔超阈值（漏跑/连续失败）即告警（daily wrapper 收尾调用）"""
+    from fa.pipeline.ops import run_watchdog
+    from fa.pipeline.reporting import last_error
+
+    conn = connect()
+    try:
+        out = run_watchdog(conn)
+    finally:
+        conn.close()
+
+    if out["alert"] is None:
+        typer.echo("watchdog：无异常（daily 成功间隔在阈值内）")
+        return
+    typer.echo(out["alert"])
+    if not out["sent"]:
+        typer.echo(f"告警推送失败（{last_error()}）")
+        raise typer.Exit(code=1)

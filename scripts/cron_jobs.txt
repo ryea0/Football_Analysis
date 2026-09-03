@@ -1,0 +1,6 @@
+# fa 定时 job 事实单（双载体安装器同读的唯一事实源，spec §9.6）
+# 格式：job<TAB>schedule（cron 五字段，机时区 Asia/Shanghai=北京时间）<TAB>wrapper 参数
+# 机器时区实测 Asia/Shanghai（CST +0800），crontab/hermes 均按本地时刻触发，无需换算
+daily	30 6 * * *	daily
+am	0 11 * * *	am
+pm	0 17 * * *	pm
