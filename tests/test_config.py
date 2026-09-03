@@ -6,15 +6,21 @@ import pytest
 import fa.config as config
 from fa.config import LEAGUES, ODDS_SPORT_KEYS, load_env, odds_api_key, project_root
 
-# 本机 shell 常已导出 ODDS_API_KEY，探针键须先清干净，setdefault 语义才可断言
+# 本机 shell 常已导出 ODDS_API_KEY，测试须与真实环境隔离，断言才可复现
 PROBE_KEYS = ("FA_ENV_PROBE", "FA_ENV_OTHER", "FA_ENV_ODDS")
 
 
 @pytest.fixture
 def clean_env(monkeypatch):
-    for key in (*PROBE_KEYS, "ODDS_API_KEY"):
-        monkeypatch.delenv(key, raising=False)
-    return monkeypatch
+    """快照式恢复整个 os.environ。
+
+    load_env 直写 os.environ，绕过 monkeypatch 追踪（undo() 撤不掉探针键），
+    故 setup 存快照、teardown 整体还原；monkeypatch 仍负责 setenv/setattr。
+    """
+    saved = dict(os.environ)
+    yield monkeypatch
+    os.environ.clear()
+    os.environ.update(saved)
 
 
 def _write_env(tmp_path: Path, text: str) -> Path:
@@ -82,3 +88,12 @@ def test_sport_keys_mapping():
 
 def test_project_root_holds_src_fa():
     assert project_root() == Path(__file__).resolve().parents[1]
+
+
+def test_probe_keys_do_not_leak_between_tests():
+    """load_env 直写 os.environ，逃逸 monkeypatch 追踪——只能靠夹具快照恢复。
+
+    pytest 按定义顺序执行本文件：前几例已把探针键写进 os.environ，
+    此处断言它们已被 clean_env 的 teardown 还原。
+    """
+    assert not (set(PROBE_KEYS) & set(os.environ))

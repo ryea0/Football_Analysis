@@ -46,6 +46,7 @@ def load_env(path: Path | None = None) -> dict[str, str]:
     """读 .env 的 KEY=VALUE 进 os.environ（setdefault 语义：已有 env 优先）。
 
     返回实际加载进 os.environ 的键值；忽略空行与 `#` 注释行；
+    不处理行内注释与引号（`KEY=abc  # x` 会把注释并入值）；
     文件缺失返回 {}（.env 是可选项，spec §9.4）。
     """
     env_file = path or project_root() / ".env"
