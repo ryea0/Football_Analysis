@@ -13,11 +13,16 @@
 盘口按 ``o_i = 1/(q_i·S)`` 反推（δ 沿用 test_value 已验算的那组：H 与 O2.5 过门槛、
 D 被 edge 剔除、A 落带外）——测试内用**与实现同一条拟合链**反推价格，门槛可达性
 不靠运气（反推价先断言在赔率带内，否则后续断言失真）。
+
+persona（T13）：``HERMES_BIN`` 默认指向 tests/persona/fixtures 的脚本（真子进程，
+C1 同一代码路径），人格文件用仓库真件（``personas/epl.md``，config 同一映射）——
+若不钉，matchday 一旦接入 persona 阶段就会在既有用例里真调 PATH 上的 hermes。
 """
 import json
 import types
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -33,6 +38,7 @@ from fa.pipeline.odds_api import OddsApiError, OddsSnapshot
 
 LEAGUE = "E0"
 HOME, AWAY = "T1", "T6"
+PERSONA_FIXTURES = Path(__file__).parents[1] / "persona" / "fixtures"
 _NOW = datetime(2026, 9, 3, 9, 0, 0, tzinfo=timezone.utc)
 ASOF = _NOW.date().isoformat()
 KO = "2026-09-04T05:00:00Z"          # = _NOW + 20h → 52h 窗口内
@@ -112,8 +118,13 @@ def bets_of(c):
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):
-    """离线环境：时间钉死 + 三个缝换记录器 + fetch_odds 回放（box.conn 是库连接）。"""
+    """离线环境：时间钉死 + 三个缝换记录器 + fetch_odds 回放（box.conn 是库连接）。
+
+    persona 阶段默认给合法输出的 fixture 脚本（真子进程）——各用例可覆盖成
+    炸弹 / 超时脚本做降级场景。
+    """
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setenv("HERMES_BIN", str(PERSONA_FIXTURES / "hermes_ok"))
     monkeypatch.setattr(matchday, "_now", lambda: _NOW)
     monkeypatch.setattr(value, "_now", lambda: _NOW)
     monkeypatch.setattr(runs, "_now", lambda: _NOW)   # started_at/finished_at 同源
@@ -229,8 +240,9 @@ def test_am_full_chain(env):
     out = matchday.run_matchday(c, "am", [LEAGUE])
 
     assert out["status"] == "ok" and out["phase"] == "am"
-    # A1 双落：1 个过门槛 market × 2 轨 = 2 条推荐；落注双轨各一注（D2 分轨，
-    # persona 轨 verdict 未判 → final 为中性 kelly，照落；T13 接入判决后 veto 即跳过）
+    # A1 双落：1 个过门槛 market × 2 轨 = 2 条推荐；落注双轨各一注（D2 分轨；
+    # persona 轨判决 = fixture 脚本的 agree，final = kelly×(1+δ) 仍 >0 → 照落，
+    # veto 则该轨不落——见 test_am_veto_drops_persona_track_bet）
     assert out["fixtures"] == 1 and out["recs"] == 2 and out["bets"] == 2
     assert out["quota_left"] == QUOTA
     assert out["degraded"] is False and out["sent"] is True
@@ -582,6 +594,121 @@ def test_same_phase_rerun_refreshes_run_id_attribution(env):
     assert {b["recommendation_id"] for b in bets} == {r["id"] for r in rows}
 
 
+# ---------------------------------------------------------------- persona 阶段（T13）
+
+_PHASE_STUB = {"called": 0, "ok": 0, "veto": 0, "degraded": [], "attempted": []}
+
+
+def _persona_recs(c, run_id=None):
+    sql = ("SELECT run_id, fixture_id, market, verdict, final_stake_frac"
+           " FROM recommendations WHERE strategy='model_persona'")
+    args: tuple = ()
+    if run_id is not None:
+        sql += " AND run_id=?"
+        args = (run_id,)
+    return [dict(r) for r in c.execute(sql + " ORDER BY market", args)]
+
+
+def test_am_runs_persona_and_records_summary(env):
+    """am 全链含 persona 阶段：hermes 真子进程一调用 → 判决落库 → runs.summary 存档
+    （pm 沿用判决的数据源）；attempted 只进 summary，不进 CLI 返回。"""
+    c = env.conn
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert out["status"] == "ok"
+    assert out["persona"]["called"] >= 1
+    assert out["persona"]["ok"] == out["persona"]["called"]
+    assert out["persona"]["veto"] == 0 and out["persona"]["degraded"] == []
+    assert set(out["persona"]) == {"called", "ok", "veto", "degraded"}
+    summary = summary_of(c, out["run_id"])
+    assert summary["persona"]["called"] == out["persona"]["called"]
+    assert summary["persona"]["attempted"]          # 当日名单落库（§6.2 pm 读它）
+    row = c.execute("SELECT verdict FROM recommendations"
+                    " WHERE strategy='model_persona' AND market='H'").fetchone()
+    assert row["verdict"] == "agree"                # 判决已落库（渲染可读，T14）
+
+
+def test_pm_reuses_am_verdicts_and_sends_attempted(env, monkeypatch):
+    """pm 沿用 am 判决：第四位置参传 am 的 attempted 名单（当日过滤后的 am run）。"""
+    c = env.conn
+    am = matchday.run_matchday(c, "am", [LEAGUE])
+    calls = []
+    monkeypatch.setattr(matchday, "run_persona_phase",
+                        lambda *a, **k: calls.append(a) or dict(_PHASE_STUB))
+    out = matchday.run_matchday(c, "pm", [LEAGUE])
+
+    assert out["status"] == "ok"
+    attempted = calls[0][3]                         # 第四位置参
+    assert attempted                                # 非空：am 的 attempted 传入
+    assert set(attempted) == {r["fixture_id"] for r in c.execute(
+        "SELECT DISTINCT fixture_id FROM recommendations WHERE run_id=?"
+        " AND strategy='model_persona'", (am["run_id"],))}
+    assert calls[0][:3] == (c, out["run_id"], [LEAGUE])
+    assert summary_of(c, out["run_id"])["persona"] == _PHASE_STUB
+
+
+def test_pm_propagates_am_verdict_with_zero_calls(env):
+    """pm 端到端沿用（§6.2）：am 已判场 hermes 零调用，判决传播到本窗新行，
+    final 按 pm 行 kelly 重算；已下过的 H 不重下（paper 去重）。"""
+    c = env.conn
+    am = matchday.run_matchday(c, "am", [LEAGUE])
+    am_final = {r["market"]: r["final_stake_frac"] for r in _persona_recs(
+        c, am["run_id"])}
+    env.fetch.clear()
+    env.pushed.clear()
+    env.render.clear()
+    env.update.clear()
+
+    pm = matchday.run_matchday(c, "pm", [LEAGUE])
+
+    persona = summary_of(c, pm["run_id"])["persona"]
+    assert persona["called"] == 0 and persona["ok"] == 0    # 零调用
+    rows = {r["market"]: r for r in _persona_recs(c, pm["run_id"])}
+    assert rows and all(r["verdict"] == "agree" for r in rows.values())
+    # am 的行 kelly 与 pm 相同 → final 一致（传播按各行 kelly 重算的旁证）
+    assert {m: r["final_stake_frac"] for m, r in rows.items()} == am_final
+    assert len(bets_of(c)) == 2                             # am 的注不重下
+
+
+def test_persona_degradation_never_fails_run(env, monkeypatch):
+    """§6.5 降级不中断：hermes 超时只降该场——run 照常走完、中性 kelly 照落注、
+    原因进 summary.persona（数据层 degraded 不加罪：persona 有专属通道）。"""
+    c = env.conn
+    monkeypatch.setenv("HERMES_BIN", str(PERSONA_FIXTURES / "hermes_timeout"))
+    monkeypatch.setenv("FA_PERSONA_TIMEOUT", "0.5")
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert out["status"] == "ok"
+    assert out["degraded"] is False
+    assert out["persona"]["called"] > 0
+    assert out["persona"]["ok"] == 0
+    assert out["persona"]["degraded"][0]["reason"] == "timeout"
+    assert summary_of(c, out["run_id"])["persona"]["attempted"]
+    assert all(r["verdict"] is None for r in _persona_recs(c))   # 回退纯模型
+    assert out["bets"] == 2                                      # 中性 kelly 照落
+
+
+def test_am_veto_drops_persona_track_bet(env, tmp_path, monkeypatch):
+    """顺序裁定（value → persona → paper）：veto 判决先落，paper 后落——persona 轨
+    不产生注。若顺序倒置，注已按中性 kelly 落下、UNIQUE 只挡重下不撤旧注。"""
+    c = env.conn
+    script = tmp_path / "hermes_veto"
+    script.write_text('#!/bin/sh\n'
+                      'echo \'{"verdict":"veto","confidence_delta":0.0,'
+                      '"key_factors":["k"],"report_md":"r"}\'\n', encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("HERMES_BIN", str(script))
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert out["status"] == "ok"
+    assert out["persona"]["veto"] == 1 and out["persona"]["ok"] == 1
+    rows = {r["verdict"]: r for r in _persona_recs(c)}
+    assert rows["veto"]["final_stake_frac"] == 0.0
+    bets = bets_of(c)
+    assert len(bets) == 1                                        # 只剩 model_only 轨
+    assert {b["market"] for b in bets} == {"H"}
+
+
 # ---------------------------------------------------------------- 降级与失败
 
 
@@ -811,6 +938,7 @@ def test_cli_matchday_reports_counts_and_push(tmp_path, monkeypatch):
     db = tmp_path / "t.db"
     monkeypatch.setenv("FA_DB", str(db))
     monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    monkeypatch.setenv("HERMES_BIN", str(PERSONA_FIXTURES / "hermes_ok"))
     monkeypatch.setattr(matchday, "_now", lambda: _NOW)
     monkeypatch.setattr(value, "_now", lambda: _NOW)
     monkeypatch.setattr(runs, "_now", lambda: _NOW)   # started_at/finished_at 同源
