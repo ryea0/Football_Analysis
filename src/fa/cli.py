@@ -3,6 +3,7 @@ import typer
 from fa.data.audit import audit_sample
 from fa.data.sync import sync_history
 from fa.db import connect, init_db
+from fa.pipeline.align import rank_candidates
 
 app = typer.Typer(help="fa — 足球量化分析与投注推荐（设计见 spec.md）")
 
@@ -85,6 +86,85 @@ def audit_cmd(sample: int = typer.Option(50, "--sample"),
                    f"db={x.db_value} csv={x.csv_value}")
     typer.echo(f"共 {len(mismatches)} 处不一致（抽样 {sample} 场）")
     raise typer.Exit(code=1)
+
+
+@data_app.command("aliases")
+def aliases_cmd(
+    confirm: str = typer.Option("", "--confirm",
+                                help='确认别名并移出隔离表：--confirm "TEAM_ID=别名"'),
+    source: str = typer.Option("oddsapi", "--source", help="别名 / 隔离表的 source 维度"),
+    league: str = typer.Option("", "--league", help="建议只在该联赛内找（空=全部联赛）"),
+    top: int = typer.Option(3, "--top", help="每条未知队名给出的建议条数"),
+) -> None:
+    """未对齐队名清单与建议（spec §3.3），--confirm 人工确认后写入 team_aliases。
+
+    不带 --confirm：列出隔离表（unknown_names）逐条给出 top-N 候选（canonical /
+    既有别名 + 相似度），供人工判断；隔离表为空时明说（spec：新增 _unknown_ 条目
+    每日可见）。带 --confirm：把 `TEAM_ID=别名` 写入 team_aliases 并把该别名移出
+    隔离表（同 source）；别名已有绑定时人工确认覆盖旧绑定并回显。
+    """
+    conn = connect()
+    try:
+        if confirm:
+            _confirm_alias(conn, confirm, source)
+        else:
+            _list_unknown(conn, source, league or None, top)
+    finally:
+        conn.close()
+
+
+def _confirm_alias(conn, spec: str, source: str) -> None:
+    """解析并执行 `TEAM_ID=别名`：写 team_aliases + 移出隔离表（同 source）。"""
+    team_id_text, sep, alias = spec.partition("=")
+    team_id_text, alias = team_id_text.strip(), alias.strip()
+    if not sep or not team_id_text or not alias:
+        typer.echo(f'格式错误：应为 "TEAM_ID=别名"，收到 "{spec}"')
+        raise typer.Exit(code=1)
+    try:
+        team_id = int(team_id_text)
+    except ValueError:
+        typer.echo(f'格式错误：TEAM_ID 须为整数，收到 "{team_id_text}"')
+        raise typer.Exit(code=1)
+    team = conn.execute(
+        "SELECT id, league, name FROM teams WHERE id=?", (team_id,)).fetchone()
+    if team is None:
+        typer.echo(f"team_id={team_id} 不存在（teams 表无此行）")
+        raise typer.Exit(code=1)
+    previous = conn.execute(
+        "SELECT team_id FROM team_aliases WHERE source=? AND alias=?",
+        (source, alias)).fetchone()
+    conn.execute(
+        "INSERT INTO team_aliases (team_id, source, alias) VALUES (?, ?, ?) "
+        "ON CONFLICT(source, alias) DO UPDATE SET team_id=excluded.team_id",
+        (team_id, source, alias))
+    removed = conn.execute(
+        "DELETE FROM unknown_names WHERE source=? AND name=?", (source, alias)).rowcount
+    conn.commit()
+    note = f"（覆盖旧绑定 team_id={previous['team_id']}）" if previous else ""
+    typer.echo(
+        f"别名已写入：{alias!r} → team_id={team_id} {team['name']}（{team['league']}）{note}；"
+        f"移出隔离表 {removed} 条")
+
+
+def _list_unknown(conn, source: str, league: str | None, top: int) -> None:
+    """逐条列出隔离表条目与 top-N 建议；空隔离表明说（不静默）。"""
+    rows = conn.execute(
+        "SELECT name, first_seen FROM unknown_names WHERE source=? ORDER BY first_seen, name",
+        (source,)).fetchall()
+    typer.echo(f"未对齐队名（隔离表，source={source}）：{len(rows)} 条")
+    if not rows:
+        return
+    for r in rows:
+        typer.echo(f"  {r['name']!r}（首次出现 {r['first_seen']}）")
+        cands = rank_candidates(conn, r["name"], league=league, source=source, top=top)
+        if not cands:
+            typer.echo("      （无建议——联赛内无相近名，需人工建队或补别名）")
+            continue
+        for c in cands:
+            typer.echo(
+                f"      team_id={c.team_id} {c.name}（{c.league}）ratio={c.ratio:.4f}")
+    scope = f"league={league}" if league else "全部联赛"
+    typer.echo(f"确认方式：fa data aliases --confirm \"TEAM_ID=别名\"（建议范围：{scope}）")
 
 
 backtest_app = typer.Typer(help="回测")
