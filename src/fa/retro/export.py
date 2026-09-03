@@ -19,6 +19,10 @@ def _matches_between(conn: sqlite3.Connection, date: str, t1: int,
     pair = ("((m.home_team_id=? AND m.away_team_id=?)"
             " OR (m.home_team_id=? AND m.away_team_id=?))" if both else
             "(m.home_team_id IN (?, ?) OR m.away_team_id IN (?, ?))")
+    # both 臂第二方向必须绑 (t2, t1)——共享元组会让「双向」坍缩为两个相同的
+    # 单向臂，反向真交锋被静默丢弃（复审 R1），故参数元组按分支给出。
+    args = ((date, t1, t2, t2, t1, limit) if both else
+            (date, t1, t2, t1, t2, limit))
     rows = conn.execute(
         "SELECT m.date, th.name home, ta.name away, m.fthg, m.ftag,"
         " m.shots_home, m.shots_away, m.shots_target_home,"
@@ -26,7 +30,7 @@ def _matches_between(conn: sqlite3.Connection, date: str, t1: int,
         " FROM matches m JOIN teams th ON th.id=m.home_team_id"
         " JOIN teams ta ON ta.id=m.away_team_id"
         f" WHERE m.date < ? AND {pair}"
-        " ORDER BY m.date DESC LIMIT ?", (date, t1, t2, t1, t2, limit))
+        " ORDER BY m.date DESC LIMIT ?", args)
     return [dict(r) for r in rows]
 
 

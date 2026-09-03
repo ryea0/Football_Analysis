@@ -114,6 +114,10 @@ def test_h2h_strict_both_teams(cand, conn):
     pack = build_pack(conn, cand)
     dates = [m["date"] for m in pack["h2h"]]
     assert "2024-04-10" in dates             # 真交锋：Arsenal vs West Ham
+    # 反向真交锋必须双臂都在场：id=11（2 主 1 客）、id=15（2 主 1 客）——
+    # 参数绑定若第二臂误绑 (t1,t2) 而非 (t2,t1)，这两场会被静默丢弃（复审 R1）
+    assert "2024-04-06" in dates             # West Ham 2-2 Arsenal（反向）
+    assert "2024-03-09" in dates             # West Ham 1-1 Arsenal（反向）
     for third in ("2024-03-23",              # Chelsea vs Arsenal（第三方）
                   "2024-04-13",              # Arsenal vs Chelsea（第三方）
                   "2024-04-03"):             # West Ham vs Chelsea（第三方）
