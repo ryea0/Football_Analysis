@@ -421,3 +421,40 @@ def test_a_calibration(db):
     assert o06["emp"] == 1.0                                    # 3 球 ≥ 3 → over 命中
     assert [b for b in c["O2.5"] if b["lo"] == 0.3][0]["emp"] == 0.0
     assert a_calibration(db, leagues=["SP1"])["empty"] is True
+
+
+def test_a_paper_sim_hand_computed(db):
+    """手算钉死（含 ¼ Kelly 触顶路径——两注 f 都超 2% 上限被截断）。
+
+    candidates：行1 H（p .8/odds 2.0，edge .3，ev .6，hit）、行2 A（p .7/odds 4.0，
+    edge .3，ev 1.8，hit）——D/O2.5 与低 edge 市场全被门槛滤掉
+    flat：staked 2、returned 6.0、pnl 4.0、roi 2.0
+    kelly（bankroll 1000）：c1 f=.02 截断 → 投 20 赢 +20 → 1020；
+                            c2 f=.02 截断 → 投 20.4 赢 +61.2 → 1081.2
+    """
+    from queries import a_paper_sim
+
+    _seed_bp_rows(db)
+    s = a_paper_sim(db)
+    assert s["empty"] is False and s["n_candidates"] == 2
+    assert s["flat"]["pnl"] == pytest.approx(4.0)
+    assert s["flat"]["roi"] == pytest.approx(2.0)
+    assert s["kelly"]["final_bankroll"] == pytest.approx(1081.2)
+    assert s["kelly"]["max_drawdown_pct"] == pytest.approx(0.0)   # 两注全胜无回撤
+    assert [p["pnl"] for p in s["flat_curve"]] == [pytest.approx(1.0), pytest.approx(4.0)]
+    assert [p["bankroll"] for p in s["kelly_curve"]] == [pytest.approx(1020.0),
+                                                         pytest.approx(1081.2)]
+    assert set(s["by_market"]) == {"H", "A"}
+    assert s["by_market"]["H"]["pnl"] == pytest.approx(1.0)
+    assert s["by_market"]["A"]["pnl"] == pytest.approx(3.0)
+    assert s["by_band"]["[1.4,2.0)"]["n"] == 1                    # H odds 2.0
+    assert s["by_band"]["[3.0,6.0]"]["n"] == 1                    # A odds 4.0
+    assert s["by_band"]["[2.0,3.0)"]["n"] == 0
+
+
+def test_a_paper_sim_empty(db):
+    from queries import a_paper_sim
+
+    assert a_paper_sim(db)["empty"] is True                       # 空库
+    _seed_bp_rows(db)
+    assert a_paper_sim(db, leagues=["SP1"])["empty"] is True      # 过滤后无候选

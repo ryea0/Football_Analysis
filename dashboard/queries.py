@@ -11,6 +11,8 @@ from pathlib import Path
 import pandas as pd
 
 from fa.backtest.metrics import by_group, calibration, evaluate, fetch_predictions
+from fa.backtest.simulate import (ODDS_MAX, ODDS_MIN, candidates, simulate_flat,
+                                  simulate_kelly)
 from fa.config import db_path
 
 
@@ -179,3 +181,44 @@ def a_calibration(conn: sqlite3.Connection, leagues=None, seasons=None) -> dict:
             "A": cal([(r["p_away"], r["outcome"] == "A") for r in rows]),
             "O2.5": cal([(r["p_over25"], r["total_goals"] >= 3)
                          for r in over_rows]) if over_rows else []}
+
+
+def _odds_bands() -> list[tuple[float, float, str]]:
+    """赔率区间表：成员判定用常量（gates 单一事实源），标签文案按 spec
+    §5.2 钉定的 1.4/6.0 书写——gates 改值须先改 spec，届时同步改标签。"""
+    return [(ODDS_MIN, 2.0, "[1.4,2.0)"), (2.0, 3.0, "[2.0,3.0)"),
+            (3.0, ODDS_MAX, "[3.0,6.0]")]
+
+
+def a_paper_sim(conn: sqlite3.Connection, leagues=None, seasons=None,
+                bankroll: float = 1000.0) -> dict:
+    """页7：flat/¼Kelly 模拟（复用 simulate，成交价=收盘价，与 M2 报告同口径）。
+
+    累计曲线用「日期前缀复调」：每个时间点把截至该日的候选前缀喂给同一个
+    simulate 函数取汇总值——曲线与终值永远同源，不复制任何算式。
+    """
+    rows = fetch_predictions(conn, leagues, seasons)
+    cands = candidates(rows)
+    if not cands:
+        return {"empty": True}
+    ordered = sorted(cands, key=lambda c: c["date"])
+    dates = sorted({c["date"] for c in ordered})
+    flat_curve, kelly_curve = [], []
+    for d in dates:
+        prefix = [c for c in ordered if c["date"] <= d]
+        flat_curve.append({"date": d, "pnl": simulate_flat(prefix)["pnl"]})
+        kelly_curve.append({"date": d,
+                            "bankroll": simulate_kelly(prefix, bankroll=bankroll)["final_bankroll"]})
+
+    def band_label(o: float) -> str | None:
+        return next((lab for lo, hi, lab in _odds_bands() if lo <= o <= hi), None)
+
+    return {"empty": False, "n_candidates": len(cands),
+            "flat": simulate_flat(cands),
+            "kelly": simulate_kelly(cands, bankroll=bankroll),
+            "flat_curve": flat_curve, "kelly_curve": kelly_curve,
+            "by_market": {m: simulate_flat([c for c in cands if c["market"] == m])
+                          for m in sorted({c["market"] for c in cands})},
+            "by_band": {lab: simulate_flat([c for c in cands
+                                            if band_label(c["odds"]) == lab])
+                        for _, _, lab in _odds_bands()}}
