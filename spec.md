@@ -3,14 +3,15 @@
 | | |
 |---|---|
 | 项目名 | fa（Football Analysis） |
-| 版本 | v0.5（确认稿） |
-| 日期 | 2026-09-03 |
+| 版本 | v0.6（确认稿） |
+| 日期 | 2026-09-04 |
 | 状态 | M1 完成；M2 判决 NO-GO（+3.02%，docs/m2-verdict.md）；**项目负责人批准 §12 双线并存协议——B 线（M3-M5 paper 模式）在推翻顺序关卡的前提下启动**（2026-09-03） |
 
 > v0.1 → v0.2 变更：确认 M2 go/no-go 判据（log-loss 劣化 ≤1% 即 go）、persona 判决映射维持乘法调整（§6.4）、比赛日 17:00 定为更新版报告（§9.6）。
 > v0.2 → v0.3 变更：明确球员级建模与进球时间的一期边界——伤停盲区由 persona 补偿并经 A/B 量化（§4.5）；进球时间为滚球二期核心输入、对赛前市场一阶冗余（§9.8）；M2 增加可选「近 6 场状态协变量」消融实验。
 > v0.3 → v0.4 变更：Provider 体系成型——OddsProvider 家族（历史 CSV / Odds API / 二期滚球与交易所）+ 新增 ExecutionProvider（Paper 模拟盘为默认实现，真实平台二期以官方 API + 地区合规为前提）；`bets` 增 `mode` 字段，模拟盘自 M3 起每日自动落注结算，并成为 M5 实盘入场前提。
 > v0.4 → v0.5 变更：新增 **§12 双线并存协议**——A 线（研究评测，已建成）与 B 线（运营模拟 = M3-M5 paper 模式）在同一程序并存、结论分账；项目负责人显式推翻「M2 NO-GO → M3+ 不启动」的顺序约束（决策记录见 §12.4）；A 线判据不变。
+> v0.5 → v0.6 变更：新增本地只读看板（§7.4）——`dashboard/`（Streamlit + plotly，独立 dependency-group），B/A 线分区观察出口，只读连库、指标口径复用回测模块（设计：docs/superpowers/specs/2026-09-04-web-dashboard-design.md）。
 
 ---
 
@@ -290,6 +291,12 @@ hermes cron（调度）
 | 累计 P&L | 累计净额 | 绝对量 |
 | **CLV** | odds_taken / Pinnacle 收盘价 − 1，按注中位数 | **金标准**：持续买在收盘前且价格更好 = 长期正期望的信号，比短期盈亏更早暴露真相 |
 
+### 7.4 本地只读看板（v0.6）
+
+- `dashboard/`（Streamlit 多页应用）：B 线运营监控 4 页 + A 线研究可视化 3 页，页面按 §12 双线分区，表边界同 §12.1（A 线页只读 `backtest_predictions`/`matches`）
+- 只读连接（`mode=ro`）+ 独立依赖组（`uv run --group dashboard streamlit run dashboard/app.py`）；指标口径单一来源——复用 `backtest/metrics` 与 `backtest/simulate`，看板不另写公式
+- 看板是**视图不是证据源**：结论仍以 runs 落库记录与 m*/判决文档为准
+
 ---
 
 ## 8. 回测与验证（「研究验证」的立足点）
@@ -322,6 +329,7 @@ hermes cron（调度）
 
 - Python 3.11+（本机 miniconda 3.13 可用）、uv 管依赖
 - pandas + scipy、typer（CLI）、pytest、SQLite（stdlib sqlite3）
+- dashboard（可选）：streamlit + plotly（dependency-group `dashboard`，本地只读看板，§7.4）
 
 ### 9.2 目录结构
 
@@ -345,6 +353,7 @@ Football_Analysis/
 │   ├── report/          # 渲染 + hermes send
 │   ├── backtest/        # walk-forward、指标、模拟盘
 │   └── cli.py
+├── dashboard/            # 本地只读看板（§7.4）：app.py / loaders.py / queries.py / pages/
 ├── tests/
 └── data/                # SQLite 库与原始 CSV 缓存（gitignore）
 ```
