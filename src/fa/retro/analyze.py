@@ -60,3 +60,40 @@ def audit_batch(conn: sqlite3.Connection, batch_id=None) -> dict:
     return {"n_checked": checked, "n_violation": len(violations),
             "violations": violations,
             "rate": (len(violations) / checked) if checked else 0.0}
+
+
+def consistency_report(conn: sqlite3.Connection, batch_id=None) -> dict:
+    """关卡 2 正式形态：成员 primary 三档一致性 + 成员失败计数。
+
+    只统计成员行（attributor≥1）中 status='ok' 者；一场全失败不计入
+    三档（该场聚合 status='error' 已在台账），但失败成员计入 member_failures。
+    """
+    sql = ("SELECT batch_id, match_id, attributor, primary_tag, status"
+           " FROM retro_attributions WHERE attributor >= 1")
+    args: list = []
+    if batch_id is not None:
+        sql += " AND batch_id=?"
+        args.append(batch_id)
+    by_match: dict = {}
+    failures = 0
+    for r in conn.execute(sql, args):
+        g = by_match.setdefault((r["batch_id"], r["match_id"]), [])
+        if r["status"] == "ok":
+            g.append(r["primary_tag"])
+        else:
+            failures += 1
+    tiers = {"unanimous": 0, "majority": 0, "none": 0}
+    for votes in by_match.values():
+        if not votes:
+            continue                               # 全失败场不入三档
+        top = max(set(votes), key=votes.count)
+        if votes.count(top) == len(votes):
+            tiers["unanimous"] += 1
+        elif votes.count(top) * 2 > len(votes):
+            tiers["majority"] += 1
+        else:
+            tiers["none"] += 1
+    n = sum(tiers.values())
+    return {"n_matches": n, **tiers, "member_failures": failures,
+            "agreement_rate": (tiers["unanimous"] + tiers["majority"]) / n
+            if n else 0.0}

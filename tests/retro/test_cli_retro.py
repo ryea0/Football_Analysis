@@ -205,3 +205,91 @@ def test_runs_lists_ledger(db, tmp_path, monkeypatch):
     r = runner.invoke(app, ["retro", "runs"])
     assert r.exit_code == 0
     assert "manual" in r.output and "timeout=1" in r.output
+
+
+# ---- ensemble CLI（--attributors / fa retro consistency，计划 Task 4）----
+
+_E1 = json.dumps({
+    "miss_tags": ["injury", "motivation"], "primary_tag": "injury",
+    "tags_confidence": 0.8, "model_vs_market": "model_wrong",
+    "evidence": [{"title": "t", "date": "2024-04-01",
+                  "url": "https://e.com/1"}],
+    "digest": "伤停为主因。"}, ensure_ascii=False)
+_E2 = json.dumps({
+    "miss_tags": ["motivation"], "primary_tag": "motivation",
+    "tags_confidence": 0.6, "model_vs_market": "variance",
+    "evidence": [{"title": "u", "date": "2024-04-02",
+                  "url": "https://e.com/2"}],
+    "digest": "动机为主因。"}, ensure_ascii=False)
+_E3 = json.dumps({
+    "miss_tags": ["news"], "primary_tag": "news",
+    "tags_confidence": 0.4, "model_vs_market": "model_right",
+    "evidence": [{"title": "v", "date": "2024-04-03",
+                  "url": "https://e.com/3"}],
+    "digest": "消息面为主因。"}, ensure_ascii=False)
+
+
+def test_run_with_attributors_records_params(db, tmp_path, monkeypatch):
+    from fa.retro import pipeline
+    outs = iter([_E1, _E1, _E2])                  # 2 票 injury + 1 票 motivation
+    monkeypatch.setattr(pipeline, "run_headless",
+                        lambda p: {"ok": True, "output": next(outs),
+                                   "error": None, "duration_s": 0.1,
+                                   "timeout": False})
+    r = runner.invoke(app, ["retro", "run", "--selector", "manual",
+                            "--matches", "1", "--attributors", "3",
+                            "--out-root", str(tmp_path / "p")])
+    assert r.exit_code == 0, r.output
+    conn = connect(db)
+    params = json.loads(conn.execute(
+        "SELECT params_json FROM retro_runs").fetchone()["params_json"])
+    conn.close()
+    assert params["attributors"] == 3
+
+
+def test_consistency_three_tiers(db, tmp_path, monkeypatch):
+    """3 场各 3 成员：一场全同、一场 2:1、一场三票各异 + 1 场全失败。"""
+    from fa.retro import pipeline
+    seq = iter([_E1, _E1, _E1,        # match1 全同
+                _E1, _E1, _E2,        # match2 多数
+                _E1, _E2, _E3,        # match3 无多数
+               ])                      # match4 全 timeout 在下一个替身
+    monkeypatch.setattr(pipeline, "run_headless",
+                        lambda p: {"ok": True, "output": next(seq),
+                                   "error": None, "duration_s": 0.1,
+                                   "timeout": False})
+    r = runner.invoke(app, ["retro", "run", "--selector", "manual",
+                            "--matches", "1,2,3", "--attributors", "3",
+                            "--out-root", str(tmp_path / "p")])
+    assert r.exit_code == 0, r.output
+    monkeypatch.setattr(pipeline, "run_headless",
+                        lambda p: {"ok": False, "output": "",
+                                   "error": "hermes -z 超时（300s）",
+                                   "duration_s": 1.0, "timeout": True})
+    r = runner.invoke(app, ["retro", "run", "--selector", "manual",
+                            "--matches", "1", "--attributors", "3",
+                            "--out-root", str(tmp_path / "p2")])
+    assert r.exit_code == 0, r.output
+    c = runner.invoke(app, ["retro", "consistency"])
+    assert c.exit_code == 0, c.output
+    assert "全同" in c.output and "多数" in c.output and "无多数" in c.output
+    assert "成员失败" in c.output
+
+
+def test_consistency_report_values(db, tmp_path, monkeypatch):
+    from fa.retro import pipeline
+    from fa.retro.analyze import consistency_report
+    seq = iter([_E1, _E1, _E1, _E1, _E1, _E2])
+    monkeypatch.setattr(pipeline, "run_headless",
+                        lambda p: {"ok": True, "output": next(seq),
+                                   "error": None, "duration_s": 0.1,
+                                   "timeout": False})
+    runner.invoke(app, ["retro", "run", "--selector", "manual",
+                        "--matches", "1,2", "--attributors", "3",
+                        "--out-root", str(tmp_path / "p")])
+    conn = connect(db)
+    rep = consistency_report(conn)
+    conn.close()
+    assert rep["n_matches"] == 2
+    assert (rep["unanimous"], rep["majority"], rep["none"]) == (1, 1, 0)
+    assert rep["member_failures"] == 0
