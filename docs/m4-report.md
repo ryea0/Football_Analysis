@@ -68,7 +68,26 @@ build_command = ["hermes", "-z", <prompt>, "-t", "search"]     # 不带 --yolo
 
 ## 1. 验收表（spec §10 M4）
 
-（待 Task 16 填写；实跑数字已先行测得，见 §2.1 修复前基线 / §2.2 修复后单遍——两节标题口径：基线 = 禁工具条款合入前，修复后 = 合入后）
+spec §10 M4 行：**「5 personas、契约校验、降级、A/B 双轨｜mock + 实跑测试通过；A/B 数据落库」**。逐项实测：
+
+| spec §10 验收项 | 实测结果 | 证据 |
+| --- | --- | --- |
+| 5 personas | ✅ 5 文件入库（D1 老凯打样 `5bc634e` → E0 薇拉 / SP1 马诺罗 / I1 焦尔乔 / F1 克莱尔 `ed095e0`），纪律八条与知识域标题 `diff` 实证逐字同源 | `git ls-files personas/` 5 行；T9 冒烟 1/1、T10 四联冒烟 4/4（task-9/10-report） |
+| 契约校验 | ✅ 严格校验不修号（唯一例外 veto 置 0）；实跑① 36 次调用 0 例「理解契约但填错」，实跑② 24 场 0 例违规——生产路径 key_factors ≤5 条（最长 43 字 ≤50）、report_md ≤500 字（最长 335） | §2.1/§2.2/§3.6；`tests/persona/test_contract_output.py` 拒收矩阵 |
+| 降级 | ✅ 四类失败（timeout/exit/extract/contract）场次级降级、三列中性、`runs.summary.persona.degraded` 记因、报告 ⚪ 行；实跑② degraded=0/24（降级路径由单测覆盖：`tests/persona/test_apply.py` 16 项 + `tests/pipeline/test_matchday.py` 39 项，实跑未触发属正常） | task-8/task-13-report；`uv run pytest tests/persona/test_apply.py tests/pipeline/test_matchday.py` = 55 passed |
+| A/B 双轨 | ✅ value 同刻双落 32+32；paper 分轨 32 注 / 31 注（veto 场仅 persona 轨跳过）；bankroll 双键各就位；`fa status` 双行 | §3.3 / §3.4；`tests/pipeline/test_value.py`、`test_paper.py` |
+| mock + 实跑测试通过 | ✅ 全量 `uv run pytest -q` = **501 passed**（0 failed / 0 error，5.36s）；实跑① 27+9 次真调、实跑② 24 场真调 | §2、§3；T15 预注册跑法 |
+| A/B 数据落库 | ✅ run #7：双轨 64 行、双轨 paper 注 63 注（519.29 / 485.53）、分轨 bankroll 双键、结算通道分轨就绪（M5 daily 起按轨回写） | §3.3 / §3.4 |
+
+设计文档 §8 验收清单（五项）：
+
+| # | 清单项 | 状态 |
+| --- | --- | --- |
+| 1 | 全量测试绿 | ✅ 501 passed |
+| 2 | 实跑①（D4）：库内 9 场候选真调 hermes -z，产出真实不合规率/降级率 | ✅ §2.1（51.9%）/ §2.2（100%，9/9） |
+| 3 | 实跑②（D4）：比赛日完整 `fa run matchday --phase am`，双轨推荐/注落库、报告含 persona 段、分轨 bankroll、`fa status` 两行 | ✅ §3（run #7） |
+| 4 | spec 修订落库（§9）+ CLAUDE.md Hermes 声明修正 | ✅/⚠️ spec §6.5 场次级（`053a93f`）+ §7.3 分轨口径（同 commit）已落库；**CLAUDE.md 的 Hermes 行（TG 未配置）未在本任务改写**——主 checkout 该文件有并行会话修改，为避免合并冲突本任务只在「当前状态」节加 M4 行（行内带上最新事实），旧行修正留待合并时处理（详见 §5.2） |
+| 5 | personas 5 文件入库（德甲打样在前） | ✅ 顺序：bundesliga（`5bc634e`）→ 四联赛（`ed095e0`） |
 
 ## 2. 真跑数字
 
@@ -185,10 +204,198 @@ JSON 式（r2 / fixture 13 → 表面记 contract；r3 / fixture 99 同型）：
 - **样本量警示**：单遍 9 次调用，100% 是小样本点估计，**不与修复前 51.9% 做显著性比较**——修复前三遍本身就在 33.3%–66.7% 间波动，采样噪声与条款效应在本样本量下不可分。机械面结论（0 超时/0 exit/0 真契约违规两阶段一致）比合规率数字更稳。
 - 成本：ark 推理 9 次；Odds API 0 次。
 
-## 3. 人格产物质量
+## 3. 实跑②：比赛日完整 E2E（Task 16，2026-09-04，run #7）
 
-（待 Task 9 / 10 填写）
+**判决：ok。** 全链真实跑通：拉盘 → 对齐 → 双轨推荐 → persona 逐场真调 → 分轨落注 → 渲染 → TG 推送（失败按设计降级）。无重跑、无凑数；0 推荐的备选叙述未用上（窗内有真实候选）。
 
-## 4. 环境缺口与降级
+### 3.1 运行条件与 CLI 全输出
 
-（待 Task 8 / 13 填写）
+- 库：worktree 本地库（T15 自主库在线备份的快照 + `fa init` v4 迁移），**非主库**；跑前状态：额度 440、`paper_bankroll` 单键 940.95 待迁移、`model_only` 50 行、schema v4。
+- 环境：`.env` 有 `ODDS_API_KEY`；`FA_PERSONA_SEARCH` 未设（禁工具过渡条款默认生效路径，prompt 内实证含「本环境无网络搜索可用：不要调用任何工具」）；TG 推送带 Clash 代理（`https_proxy=http://127.0.0.1:7890`，进程内实测代理监听在、经代理 `curl api.telegram.org` = 302、直连超时）。
+- 比赛日有效性：2026-09-04（周五）23:22 UTC 启动，52h 窗内 28 场五大联赛（周六 09-05 为主力），`window_hours=52`。
+
+CLI 原文（唯一一次运行，未重跑）：
+
+```
+比赛日 run（am）判决：ok（正常）
+  行数：fixture 同步 100 场（双侧对齐 100，未对齐 0），推荐 64 条，落注 32 注
+  额度：剩余 420 credits（Odds API）
+  推送：失败（exit 1: hermes send: Telegram send failed: httpx.ConnectError:）——推荐与落注已落库
+```
+
+总耗时 283 s（23:22:45 → 23:27:28 UTC，`runs.started_at/finished_at`）。按轮询观测：同步 + 拟合 + 双轨推荐完成于启动后约 2 分钟，persona 24 场串行完成于约 4.5 分钟（0 超时，120 s 档无压力；库内不记单场耗时，单场量级参考实跑①均值 10.8 s）。
+
+### 3.2 拉盘与对齐
+
+- fixture 同步 100 场、双侧对齐 **100/100**、未对齐 0（隔离表空）——M3 遗留的 30 项 `≥0.60` 待确认别名未阻塞本次对齐。
+- 额度 440 → **420**，差分 **−20**，与 D4 批准的「am 全量约 −20」一致；`runs.summary.quota_before/credits_after` 双记。
+
+### 3.3 双轨推荐与落注（A/B 落库）
+
+三条验收 SQL 的实测结果（brief Step 2 原样）：
+
+```sql
+-- SQL1：两轨行数 / 已判
+model_only|32|0          -- A 轨 persona 盲视，verdict 恒 NULL ✔
+model_persona|32|32      -- B 轨 32 行全部已判 ✔ 两轨行数相等 ✔
+-- SQL2：分轨落注（全库 paper）
+model_only|37|589.07     -- 37 = M3 存量 5 + 本次 32
+model_persona|31|485.53  -- 31 = 32 − 1 veto ✔ veto 行无 bets ✔
+-- SQL3：分轨 bankroll
+paper_bankroll:model_only|940.95      -- 旧单键 940.95 已迁移到此 ✔ 旧键已删除 ✔
+paper_bankroll:model_persona|1000.0   -- 惰性初始化 ✔
+```
+
+本次 run 口径（run #7）：
+
+| 轨 | 推荐行 | paper 注 | 注金合计 | 说明 |
+| --- | --- | --- | --- | --- |
+| model_only | 32 | 32 | 519.29 | 对照轨，judgement 盲视 |
+| model_persona | 32 | 31 | 485.53 | veto 场（fixture 100 平局）0 注 |
+| **差** | 0 | **−1** | **−33.76（−6.5%）** | persona 层当日净效应 |
+
+`runs.summary.persona`：`called=24, ok=24, veto=1, degraded=0`（attempted 24 场）。**24 场 × 候选市场 = 32 行**（17 场 1 市场 / 6 场 2 市场 / 1 场 3 市场）——判决按场广播到该场全部 market 行，故「已判行数 = called − degraded」在市场数 >1 的场次按行数放大，场级恒等式 24 = 24 − 0 成立。
+
+### 3.4 persona 判决明细（24 场逐条，样本全量记录）
+
+| fixture | 联赛（人格） | 场次 | 市场 | verdict | delta | 关键判据（key_factors 摘） |
+| --- | --- | --- | --- | --- | --- | --- |
+| 3 | E0（薇拉） | Hull – Aston Villa | H | ⚠️ downweight | −0.06 | 主队近 5 场 3 负；维拉近 5 场 2 胜回升；模型 0.537 vs 市场 0.232 差距过大 |
+| 4 | E0（薇拉） | Brentford – Sunderland | D,A | ✅ agree | 0 | 平局属性 + 首回合 3-0 但样本久 |
+| 5 | E0（薇拉） | Brighton – Fulham | H,O2.5 | ✅ agree | 0 | 无可靠伤停来源，不凭空猜测 |
+| 8 | E0（薇拉） | Ipswich – Liverpool | D | ✅ agree | 0 | 利物浦近 5 场 4 平 1 负，平局方向一致 |
+| 10 | E0（薇拉） | Newcastle – Bournemouth | A | ✅ agree | 0 | 交手记录不愵（纽卡主场曾 1-4） |
+| 13 | E0（薇拉） | Fulham – Crystal Palace | H | ✅ agree | 0 | 双双低迷的保级六分战 |
+| 14 | E0（薇拉） | Nott'm Forest – Tottenham | H | ✅ agree | 0 | 热刺垫底但样本不足，不过度下修 |
+| 24 | SP1（马诺罗） | Betis – Real Madrid | D | ✅ agree | 0 | 信息边界声明 + 贝蒂斯主场对皇马 1 胜 1 平 |
+| 28 | SP1（马诺罗） | Ath Bilbao – Ath Madrid | H,O2.5 | ⚠️ downweight | −0.05 | 毕尔巴鄂近 5 场 1 胜 1 平 3 负；马竞第 3；H2H 下风 |
+| 39 | SP1（马诺罗） | Villarreal – La Coruna | O2.5 | ✅ agree | 0 | H2H 全在 2017-18，无参考价值 |
+| 43 | SP1（马诺罗） | Vallecano – Almeria | H | ✅ agree | 0 | 两连胜反弹但「赢下谁不知」诚实表述 |
+| 48 | D1（老凯） | Werder Bremen – RB Leipzig | H | ✅ agree | 0 | 不来梅 1 平 4负，但模型 28% vs 市场 22% 已定价低估 |
+| 49 | D1（老凯） | Paderborn – Freiburg | H | ⚠️ downweight | **−0.10** | 帕德博恩 1 平 4 负崩盘；弗赖堡第 2；H2H 三战全胜（**与实跑①同一判据复现**） |
+| 51 | D1（老凯） | M'gladbach – Elversberg | A | ✅ agree | 0 | 升班马样本仅 1 场不足判断 |
+| 61 | D1（老凯） | Hoffenheim – Dortmund | A | ✅ agree | 0 | 多特 4 胜 1 负状态占优 |
+| 63 | I1（焦尔乔） | Inter – Napoli | O2.5 | ⚠️ downweight | −0.08 | 强强对话先求不失球；近 3 次交锋 2 平、大球率 1/3 |
+| 65 | I1（焦尔乔） | Roma – Atalanta | A | ✅ agree | 0 | 罗马五连胜但亚特兰大硬实力在 |
+| 75 | I1（焦尔乔） | Genoa – Como | H,A | ✅ agree | 0 | 热那亚 1 平 4 负 vs 科莫 4 胜 1 平 |
+| 82 | I1（焦尔乔） | Fiorentina – Torino | A,O2.5 | ✅ agree | 0 | 近 3 次交手全平 |
+| 88 | F1（克莱尔） | Le Havre – Brest | H,O2.5 | ✅ agree | 0 | 实跑①三连灭场，本轮一次通过（禁工具条款下） |
+| 92 | F1（克莱尔） | Caen – Lorient | D | ✅ agree | 0 | H2H 距今近十年无参考价值 |
+| 99 | F1（克莱尔） | Lyon – Auxerre | D | ✅ agree | 0 | 青年军波动属常态；无抽调信息 |
+| 100 | F1（克莱尔） | Treviso – Monaco | D | ⛔ **veto** | 0（强制） | **主队 Treviso 非法甲队，判「输入数据错误」整场否决**（见 §3.5） |
+| 101 | F1（克莱尔） | Nice – Le Mans | D,A,O2.5 | ✅ agree | 0 | H2H 全在 2009-10，跨度 15 年 |
+
+- verdict 分布：**场级 19 ✅ / 4 ⚠️ / 1 ⛔（=24 场）；行级 26 ✅ / 5 ⚠️ / 1 ⛔（=32 行）**。agree 全部 delta=0（0 微调）。
+- 4 场 downweight 的 delta 全部为负（−0.05～−0.10），`final_stake_frac = kelly × (1+delta)` 乘法公式逐行核验通过（0.02×0.94=0.0188、0.02×0.90=0.018、0.01505×0.95=0.0143、0.02×0.92=0.0184）；veto 行 final=0。
+- **机械合规 24/24 = 100%**：degraded 列表为空，0 timeout / 0 exit / 0 extract / 0 contract；key_factors 1–5 条、单条最长 43 字（≤50），report_md 最长 335 字（≤500）。禁工具条款生效后累计 33/33（§2.2 的 9 + 本节 24），仍属小样本，不外推。
+- verdict 非中性率 5/24 = 20.8%（4 下调 + 1 否决）——显著高于实跑①的 1/9；同场 fixture 49 的判据与实跑①复现（帕德博恩崩盘/弗赖堡第 2/H2H 三战全胜），说明判决可溯源、非采样噪声。
+
+### 3.5 veto 首例：persona 抓到候选池数据错误（非比赛判断）
+
+fixture 100（F1 Treviso – Monaco，09-04 19:05 UTC，平局候选 EV +54.26%、仓位顶格 2.00%）：克莱尔（法甲人格）以「主队 Treviso 是意大利球队、法甲无此队 → 本场输入不可信」为由 **veto 整场**，key_factors 三条全部指向数据错误而非比赛判断。
+
+库内核实：`fixtures.league='F1'` 但 `home_team_id=187`，而 teams 表 id=187 的 Treviso 属 **I1**（意甲）——即 Odds API 事件的对阵名与联赛属性错位，属于候选池真实脏数据。该场若无人格层将以 **2% 顶格仓位、+54% EV 的表面最优候选** 落入 paper 账（对照轨 model_only 确实落了这注，id=47——这正是 A/B 设计要暴露的差异）。
+
+如实记两点：① veto 触发条件是「压倒性证据」，此处触发的是**数据完整性证据**而非伤停/状态类比赛证据，属设计未列举但语义正确的用法，值得在 M5 把「输入自洽性检查」固化到确定性管线（不该由每场一次的 LLM 调用来兜底数据质量）；② 人格同时给出「建议核查别名映射表」的行动建议，方向正确。
+
+### 3.6 报告验收（§7.1-2/3 逐项，离线复渲染）
+
+`render_matchday_report(conn, 7, 'am', summary, 420, False)` 从 runs.summary 只读复渲染，与 run 内渲染同库同参：
+
+| spec 条款 | 实测 |
+| --- | --- |
+| §7.1-1 候选场次表 | ✅ 64 行（双轨并列、市场/最优价/模型 p/市场 p/EV/仓位/博彩商全列） |
+| §7.1-2 persona 点评 + 判决标识 | ✅ 24 行（按场一行）：✅19 ⚠️4（含 delta）⛔1；每场 key_factors 缩进逐条 + `report_md` 引用行 |
+| §6.5 降级标注 | ✅ 0 场降级 → 0 个 ⚪ 行（渲染路径由 `tests/report/test_render.py` 覆盖） |
+| 200 字截断 | ✅ 24 段引用最长恰 200 字（`_REPORT_MD_CLIP=200`），短文不截 |
+| 段尾汇总行 | ✅ `persona 24 场：✅19 ⚠️4 ⛔1 · 未生效 0` |
+| §7.1-3 风险提示 | ✅ 样本量 5353 / 半衰期 100 天 / 降级：否 / 额度水位 420 |
+| §7.3 bankroll 快照 | ✅ 两行：`model_only：940.95（meta paper_bankroll:model_only）`、`model_persona：1000.00` + 未结注 64 |
+| 判决只标 B 轨 | ✅ 候选表 A/B 同价同行并列，无图标悬空（`_persona_note` 仅 pm 新增候选行使用） |
+
+### 3.7 `fa status` 双轨行（§12.3 判据表就位）
+
+```
+== B 线·运营模拟（paper） ==
+[model_only] 注数=37（pending 33）  已结算注金=59.05  回报=0.00  ROI=-1.00%  bankroll=940.95  CLV 中位数=—
+[model_persona] 注数=31（pending 31）  已结算注金=0.00  回报=0.00  ROI=—  bankroll=1000.00  CLV 中位数=—
+额度水位：余 420 次（meta odds_quota_remaining）
+```
+
+分轨账本、额度水位、最近 runs 一屏可读——M5 daily 结算起按轨回写 pnl 后即为 §12.3 预注册判据的直接读数表。
+
+### 3.8 TG 送达状态（失败降级 + 复盘）
+
+1. **run 内推送失败**：`exit 1: hermes send: Telegram send failed: httpx.ConnectError:`（错误详情为空串）。按设计降级：run 状态不受影响（判决 ok）、推荐与落注已落库、原因落 `runs.summary.telegram.error`。
+2. **诊断事实**：代理在监听（verge-mihomo 127.0.0.1:7890）、经代理 `curl https://api.telegram.org` = 302、直连超时无响应；代理变量经 `uv run` 确认透传到 fa 子进程链；hermes 独立发送路径的 `resolve_proxy_url`（`gateway/platforms/base.py:405`）检查顺序为 `TELEGRAM_PROXY` → `HTTPS_PROXY/HTTP_PROXY/ALL_PROXY`（含小写）→ macOS 系统代理，代理附加失败时**告警后回退直连**（`tools/send_message_tool.py:1208-1228`）。
+3. **复现与补投递**：同一渲染文本（14,944 字符）、同一代理环境变量，15 分钟后手动 `hermes send --to telegram` **成功送达** home channel（chat_id 8853969879，rc=0）。
+4. **结论（如实记，不下断言）**：传输链路可用；run 内失败为**单次瞬态连接错误**，根因未能定位（hermes `-z`/send 丢弃运行期 stderr，诊断信息不可回传，§0.4 已知限制）。不是 fa 代码缺陷——降级路径行为与设计完全一致。
+5. **M5 建议**：reporting 层对推送失败自动重试 1 次（成本仅数秒，可吸收瞬态类失败）；或在 fa 侧显式设置 `TELEGRAM_PROXY` 走第一优先级路径。
+
+## 4. 人格产物质量
+
+（本节综合 T9/T10 冒烟与实跑①② 的 69 次真实调用。）
+
+- **人格文件**：5 个（D1 老凯 / E0 薇拉 / SP1 马诺罗 / I1 焦尔乔 / F1 克莱尔），每人 6 条知识域（brief 要求 5–7）+ 八条判断纪律（八条逐字同源，`diff` 实证）。德甲打样在前（T9），四联赛铺开在后（T10），与设计文档「德甲打样在前」的顺序一致。
+- **冒烟**：T9 brief 原文人格 0/2（同型 web_search derail）→ 修改后 1/1；T10 四联赛首跑 4/4、零重试；四份原始 stdout 无一含 `seed:tool_call` 标记（T10 时点禁工具条款尚未上 prompt，靠纪律第 8 条自我拉回）。
+- **判决保守性**（§2.2 + §3.4，禁工具条款生效后 33 场合计）：27 agree / 5 downweight / 1 veto（实跑①修复后 9 场 8✅1⚠️，实跑② 24 场 19✅4⚠️1⛔）。agree 全部声明「无可靠增量信息」——人格遵守「模型为先、没有增量不动手」的纪律，没有为「显得有用」而制造调整。
+- **可溯源性**：抽读 24 场 key_factors 与 report_md，引用均落在输入 JSON 可得字段（form/h2h_recent/排名）或明确的「无法查证」声明上，未发现幻觉伤停、幻觉比分。
+- **发现的瑕疵（如实记 1 例）**：fixture 24（贝蒂斯–皇马）report_md 出现「塞维利亚德比氛围」的语境误植（该对阵并非塞维利亚德比），但该 persona 明确写「无量化依据，不纳入概率」、判决未受影响——修辞层面的知识域串线，非数字污染。
+- **veto 质量**：首例 veto（§3.5）否决的是**数据完整性**而非比赛判断，把「不发明数字、证据不足不动手」的纪律用在了正确的方向上；同时也暴露该检查更适合确定性代码做（见 §5.4）。
+
+## 5. 环境缺口与降级
+
+### 5.1 搜索后端 key 缺失（§0.4/§0.6 遗留，未解）
+
+本机仍无任何搜索后端 key，`-t search` 的 web_search 只能发起、不能执行。处置即 §2.2 的禁工具过渡条款（`FA_PERSONA_SEARCH` 默认 off）：derail 面从 48.1% 压到 0（33/33），代价是人格只能凭输入判断、§6.1「伤停/新闻查证」用例持续不可用。**M5 实跑前建议配置 Tavily/Firecrawl key**：配好后置 `FA_PERSONA_SEARCH=1`，条款自动退出 prompt、检索重新合法——届时本报告 §2.2/§3.4 的 100% 合规口径失效，需在真检索环境重测。
+
+### 5.2 CLAUDE.md 的 Hermes 声明已过时（本任务未改，留待合并）
+
+CLAUDE.md 环境节仍写「Hermes **TG 平台未配置**（2026-09-03 实测：`~/.hermes/.env` 全注释、无任何 token）」。两处事实已变：① m4-report §0.2 实测 `~/.hermes/.env` 有 18 行非注释 KEY=VALUE；② **Telegram 平台现已配置**（`hermes status` 显示 `Telegram ✓ configured (home: 8853969879)`，且本次 §3.8 手动重发实送成功）。按 T16 约束本任务只往「当前状态」节加 M4 一行、不动其他行（主 checkout 同文件有并行会话修改，避免合并冲突），**旧行的改写留到合并时处理**；本节即为该项验收（设计文档 §8 第 4 条后半）的如实交账。
+
+### 5.3 Odds API 额度与 TG 代理
+
+额度 440 → 420（−20，实测与批准口径一致），按 500/月档与「M5 首务=额度节流」（单 region/pm 限比赛日）的既有结论不变。TG 必须带代理（直连不通），run 内 1 次瞬态失败 + 手动重发成功，见 §3.8。
+
+### 5.4 数据质量缺口（实跑② 新发现）
+
+`fa data aliases` 待确认清单之外新暴露一类：**跨联赛同名/错挂**（fixture 100 的 F1 事件挂到 I1 的 team_id）。本次被人格 veto 兜住，但兜底不应长期由 LLM 承担——建议 M5 在确定性管线加输入自洽性检查（fixture.league 与两端 team.league 一致性校验，不一致即隔离该场），成本一行 SQL 量级。
+
+### 5.5 pm 相位未实跑
+
+实跑②按 brief 只跑 am 全量。pm 的插层/沿用判决/新增候选图标路径由 39 项 `tests/pipeline/test_matchday.py` + 渲染单测覆盖（全绿），但**无真实 pm E2E 数字**——如实记为 M4 的已知边界，建议 M5 首个比赛日顺带实测 pm。
+
+## 6. 提交记录（M4 全量，branch `worktree-m4-persona-design`）
+
+| commit | 内容 |
+| --- | --- |
+| `1a0d480` | docs: M4 persona 实现设计（D1 场次级降级 / D2 分轨 bankroll / A1B1C1 工程选型） |
+| `ffaedb2` | docs: M4 实施计划（16 任务 TDD） |
+| `053a93f` | docs(spec): §6.5 降级粒度改场次级、§7.3 补 bankroll 分轨口径 |
+| `780f022` / `4369fd9` | docs: m4-report 骨架 + 探针结论与措辞修正 |
+| `05b9a2f` | feat(config): hermes/persona 配置（HERMES_BIN、超时、persona 文件映射） |
+| `b3c5d0d` | feat(db): schema v4（key_factors / report_md 两列） |
+| `a1dcf3d` | feat(persona): hermes -z caller |
+| `4268341` | feat(persona): 输入组装（candidates/form/h2h/排名全自库内） |
+| `6e25468` | feat(persona): 输出提取与 §6.3 严格校验 |
+| `b920fea` | feat(persona): §6.4 判决广播（veto 置零）与阶段编排 |
+| `5bc634e` | feat(personas): 德甲「老凯」打样 |
+| `ed095e0` | feat(personas): E0/SP1/I1/F1 四联赛人格 |
+| `f48c491` | docs: m4-report §0.6 勘误（`-t search` 非空集） |
+| `a76f393` | feat(value): 同刻双落 model_only / model_persona |
+| `2d03987` | feat(paper): bankroll 按 strategy 分轨（迁移/双轨落注/veto 跳过/分轨结算） |
+| `e9fb457` | feat(matchday): value→persona→bet 插层，pm 沿用 am 判决 |
+| `b71f1b7` / `4e0972f` | feat(report): persona 段真渲染 + status 双轨行（+ 审查修复） |
+| `f1ef878` | docs: m4-report §2.1 实跑①基线（三遍矩阵，51.9%） |
+| `5d24f13` | fix(persona): 禁工具过渡条款按 FA_PERSONA_SEARCH 条件拼接 |
+| `7448941` | docs: m4-report §2.2 实跑①修复后单遍（9/9） |
+| （本 commit） | docs: M4 验收报告完稿（§1/§3/§4/§5/§6）+ CLAUDE.md 状态更新 |
+
+## 7. 遗留与 M5 建议（按优先级）
+
+1. **额度节流**（既有结论，M5 首务）：单 region/pm 限比赛日，否则第 13 天耗尽免费额度。
+2. **推送重试**：reporting 层推送失败重试 1 次（§3.8 瞬态失败的廉价吸收）。
+3. **输入自洽性检查**：fixture.league 与两端 team.league 一致性校验，脏场隔离（§3.5/§5.4 的根治）。
+4. **搜索后端 key**：配置后置 `FA_PERSONA_SEARCH=1`，恢复查证用例并在真检索环境重测合规率（§5.1）。
+5. **CLAUDE.md Hermes 旧行改写**：随合并处理（§5.2）。
+6. **pm 相位实跑**：M5 首个比赛日顺带实测（§5.5）。
