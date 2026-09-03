@@ -169,8 +169,11 @@ def test_data_sync_history_refresh_flag(tmp_path, monkeypatch):
 from fa.pipeline.paper import BANKROLL_KEY, place_paper_bets  # noqa: E402
 
 
-def _seed_prediction(conn, league="E0", season=2025):
-    """A 线预测行（backtest_predictions，UNIQUE(match_id) → 每行自配一场完赛）。"""
+def _seed_prediction(conn, league="E0", season=2025, market=True):
+    """A 线预测行（backtest_predictions，UNIQUE(match_id) → 每行自配一场完赛）。
+
+    market=False → mkt_* 写 NULL（去水收盘基准缺失的残缺行，A 线 evaluate 不可评）。
+    """
     def team(name):
         row = conn.execute("SELECT id FROM teams WHERE league=? AND name=?",
                            (league, name)).fetchone()
@@ -184,11 +187,12 @@ def _seed_prediction(conn, league="E0", season=2025):
         "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
         " raw_line) VALUES (?, ?, '2025-08-16', ?, ?, '{}')",
         (league, season, home, away)).lastrowid
+    mkt = "0.45,0.30,0.25" if market else "NULL,NULL,NULL"
     return conn.execute(
         "INSERT INTO backtest_predictions (league, season, week_index, match_id,"
         " date, p_home, p_draw, p_away, mkt_home, mkt_draw, mkt_away, odds_home,"
         " odds_draw, odds_away, outcome, total_goals)"
-        " VALUES (?,?,1,?,'2025-08-16',0.5,0.3,0.2,0.45,0.30,0.25,2.0,3.2,3.8,'H',2)",
+        f" VALUES (?,?,1,?,'2025-08-16',0.5,0.3,0.2,{mkt},2.0,3.2,3.8,'H',2)",
         (league, season, match_id)).lastrowid
 
 
@@ -379,6 +383,64 @@ def test_bet_add_rejects_bad_mode_and_stake(tmp_path, monkeypatch):
         result = runner.invoke(app, ["bet", "add", str(rec), *args])
         assert result.exit_code == 1, (args, result.output)
     assert _bets(db) == []
+
+
+def test_bet_add_refuses_derived_zero_stake(tmp_path, monkeypatch):
+    """派生注金与显式 --stake 走同一道 >0 闸：kelly=0 / M4 final_stake_frac=0
+    必须拒，不得写成 0 注金行（审查 fix round 1 #1）。"""
+    db = _use_tmp_db(tmp_path, monkeypatch)
+    conn = connect(db)
+    fx = _seed_fixture_row(conn)
+    run = _seed_run_row(conn)
+    kelly0 = _seed_rec_row(conn, run, fx, market="H", kelly=0.0)
+    final0 = _seed_rec_row(conn, run, fx, market="D", kelly=0.02,
+                           final_stake_frac=0.0)
+    conn.commit()
+    conn.close()
+
+    for rec, frac in ((kelly0, "0.0"), (final0, "0.0")):
+        result = runner.invoke(app, ["bet", "add", str(rec)])
+        assert result.exit_code == 1, (rec, result.output)
+        assert "须 > 0" in result.output, result.output
+        assert "收到 0.0" in result.output, result.output   # 回显派生结果，操作者可见
+        assert "推导" not in result.output.splitlines()[0]  # 推导行不再先于拒绝打印
+    assert _bets(db) == []
+
+
+def test_bet_add_refuses_odds_at_or_below_one(tmp_path, monkeypatch):
+    """--odds ≤ 1 拒绝（无利润可言的赔率），0.8 与边界 1.0 都算违例。"""
+    db, (rec,) = _seed_rec_for_bet(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["bet", "add", str(rec), "--odds", "0.8"])
+    assert result.exit_code == 1, result.output
+    assert "--odds" in result.output and "0.8" in result.output
+    assert _bets(db) == []
+    boundary = runner.invoke(app, ["bet", "add", str(rec), "--odds", "1.0"])
+    assert boundary.exit_code == 1, boundary.output
+    assert _bets(db) == []
+
+
+def test_bet_list_rejects_bad_status_filter(tmp_path, monkeypatch):
+    """--status 词表外 → 中文友好报错并回显合法词表（审查 fix round 1 #2c）。"""
+    _use_tmp_db(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["bet", "list", "--status", "bogus"])
+    assert result.exit_code == 1, result.output
+    assert "--status" in result.output
+    assert "pending|won|lost|void" in result.output
+
+
+def test_status_a_line_null_market_probs_degrades_without_traceback(tmp_path, monkeypatch):
+    """mkt_* 缺收盘价的残缺行 → 明说「不可评」，exit 0（不 traceback、不给假判决）。"""
+    db = _use_tmp_db(tmp_path, monkeypatch)
+    conn = connect(db)
+    _seed_prediction(conn, market=False)
+    conn.commit()
+    conn.close()
+
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output          # 无 traceback
+    assert "不可评" in result.output and "mkt_*" in result.output
+    assert "判决=" not in result.output                  # 缺基准 → 不冒充判决
+    assert "B 线·运营模拟（paper）" in result.output     # A 线降级不拖垮 B 线渲染
 
 
 def test_bet_list_round_trip_with_filters(tmp_path, monkeypatch):

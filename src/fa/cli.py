@@ -246,8 +246,24 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _require_positive_stake(stake: float, source: str) -> None:
+    """注金闸：显式 ``--stake`` 与派生（仓位 × bankroll）走**同一道**闸——
+
+    kelly 为 0 或 M4 的 ``final_stake_frac=0`` 会派生出 0 注金，同样必须拒，
+    不得写成 0 注行（0 注金会让 ROI/CLV 的分母虚增、台账失真）。
+    """
+    if stake > 0:
+        return
+    typer.echo(f"{source} 须 > 0，收到 {stake}")
+    raise typer.Exit(code=1)
+
+
 def _a_line_summary(conn) -> str:
-    """A 线一行：全量 backtest_predictions 聚合 evaluate 的 n / 劣化 / 判决。"""
+    """A 线一行：全量 backtest_predictions 聚合 evaluate 的 n / 劣化 / 判决。
+
+    措辞用「backtest 全量聚合」而非「最近 backtest」——实现是**整张表**聚合，
+    不是「最近一次 run」（schema 没有 runs↔predictions 关联列，勿误导）。
+    """
     from fa.backtest.metrics import evaluate, fetch_predictions
     rows = fetch_predictions(conn)                    # 全量表，不带联赛/赛季过滤
     if not rows:
@@ -257,7 +273,7 @@ def _a_line_summary(conn) -> str:
     except TypeError:                                 # 残缺行（mkt_* 缺市场收盘价）
         return (f"n={len(rows)} 行预测不可评（mkt_* 缺市场收盘价）——"
                 "A 线判据需要去水收盘基准，先补齐回测输入")
-    return (f"最近 backtest：n={ev['n']}  模型 log-loss={ev['model_ll']:.4f}"
+    return (f"backtest 全量聚合：n={ev['n']}  模型 log-loss={ev['model_ll']:.4f}"
             f"  市场 log-loss={ev['market_ll']:.4f}"
             f"  劣化={ev['degradation_pct']:+.2f}%  判决={ev['verdict']}"
             f"（判据：劣化 ≤ +1.00%）")
@@ -362,9 +378,8 @@ def bet_add(
         typer.echo("拒绝：真实下单需显式确认——live 是真金。加 --i-know-mode-live 才放行"
                    "（spec §12.2：真实下注一期禁止，此旗标即最小豁免面）")
         raise typer.Exit(code=1)
-    if stake is not None and stake <= 0:
-        typer.echo(f"--stake 须 > 0，收到 {stake}")
-        raise typer.Exit(code=1)
+    if stake is not None:
+        _require_positive_stake(stake, "--stake")
     if odds is not None and odds <= 1:
         typer.echo(f"--odds 须 > 1（赔率下限），收到 {odds}")
         raise typer.Exit(code=1)
@@ -392,6 +407,7 @@ def bet_add(
                                (BANKROLL_KEY,)).fetchone()
             bankroll = INITIAL_BANKROLL if raw is None else float(raw["value"])
             stake = round(frac * bankroll, 2)
+            _require_positive_stake(stake, f"派生注金（仓位 {frac} × bankroll）")
             typer.echo(f"注金未指定：按仓位 {frac} × bankroll {bankroll:.2f}"
                        f" = {stake:.2f}")
         if odds is None:
