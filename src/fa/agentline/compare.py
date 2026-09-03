@@ -5,7 +5,6 @@ odds_*、outcome、total_goals 原样保留——evaluate 与 candidates 的入�
 schema 完全复用，评测代码零改动（市场是所有评估的对照线，spec §8.2）。
 """
 import json
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 

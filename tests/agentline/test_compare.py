@@ -63,6 +63,8 @@ def test_compare_lines_three_tracks(db_three):        # fixture 见 Step 3 注
     assert set(cmp) >= {"P", "A_base", "A_enh", "market", "roi", "n"}
     assert cmp["n"] >= 1
     assert cmp["P"]["model_ll"] > 0 and cmp["A_base"]["model_ll"] > 0
+    assert cmp["A_base"]["model_ll"] != cmp["P"]["model_ll"]   # 钉住：A 概率真在覆盖（dict(Row) 重复列名取 ap 侧）
+    assert cmp["A_enh"]["model_ll"] != cmp["P"]["model_ll"]
 
 
 def test_render_report_mentions_leakage_caveat(tmp_path):
