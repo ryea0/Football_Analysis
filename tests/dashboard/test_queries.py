@@ -65,6 +65,11 @@ def test_b_summary(db):
     set_meta(db, "paper_bankroll", "1000.0")
     set_meta(db, "odds_quota_remaining", "460")
     db.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac, created_at)"
+        " VALUES (3, 1, 1, 'model_only', 'D', 'am', 0.25, 0.30, 3.4, 'Pinnacle',"
+        " -0.05, -0.10, 0.000, '2026-09-04T11:30:00')")
+    db.execute(
         "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker, odds_taken,"
         " stake, status, settled_at, return_amt, closing_odds, clv)"
         " VALUES (1, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 10.0, 'won',"
@@ -74,14 +79,19 @@ def test_b_summary(db):
         " stake, status, settled_at, return_amt, closing_odds, clv)"
         " VALUES (2, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.1, 8.0, 'pending',"
         " NULL, NULL, NULL, NULL)")                                # 未结算：不计 P&L
+    db.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status, settled_at, return_amt, closing_odds, clv)"
+        " VALUES (3, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.4, 5.0, 'void',"
+        " '2026-09-06T06:30:00', 0.0, NULL, NULL)")                # 作废：零损益，双侧不计
     db.commit()
 
     s = b_summary(db)
     assert s["bankroll"] == 1000.0
     assert s["quota_remaining"] == 460.0
-    assert s["n_bets"] == 2
+    assert s["n_bets"] == 3
     assert s["n_pending"] == 1
-    assert s["pnl"] == pytest.approx(15.0)          # 25 − 10（pending 的 8 不进分母分子）
+    assert s["pnl"] == pytest.approx(15.0)          # 25 − 10（pending 的 8、void 的 5 都不进）
     assert s["staked"] == pytest.approx(10.0)
     assert s["quota_series"] == [{"id": 1, "type": "matchday", "phase": "am",
                                   "status": "ok", "started_at": "2026-09-04T11:00:00",
@@ -98,9 +108,33 @@ def test_b_summary_empty_db(db):
     assert s["quota_series"] == []
 
 
+def test_b_summary_excludes_live_mode(db):
+    from queries import b_summary
+
+    _seed_bline_base(db)
+    db.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status, settled_at, return_amt, closing_odds, clv)"
+        " VALUES (1, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 10.0, 'won',"
+        " '2026-09-06T06:30:00', 25.0, 2.2, 0.136364)")            # paper：计入
+    db.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status, settled_at, return_amt, closing_odds, clv)"
+        " VALUES (1, 'live', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 10.0, 'won',"
+        " '2026-09-06T06:30:00', 25.0, 2.2, 0.136364)")            # live：不进任何汇总
+    db.commit()
+
+    s = b_summary(db)
+    assert s["n_bets"] == 1
+    assert s["n_pending"] == 0
+    assert s["pnl"] == pytest.approx(15.0)
+    assert s["staked"] == pytest.approx(10.0)
+
+
 def test_b_summary_missing_meta_keys(db):
     from queries import b_summary
 
     _seed_bline_base(db)          # 只有 B 线表数据，meta 业务键一个都没写
     s = b_summary(db)
     assert s["bankroll"] is None  # 「未记录」而非 0（设计 §6）
+    assert s["quota_remaining"] is None
