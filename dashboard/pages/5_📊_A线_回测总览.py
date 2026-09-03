@@ -56,6 +56,8 @@ st.plotly_chart(fig, use_container_width=True)
 
 st.subheader("分联赛 / 分赛季")
 tab1, tab2 = st.tabs(["by league", "by season"])
-tab1.dataframe(pd.DataFrame(o["by_league"]).T, use_container_width=True)
-tab2.dataframe(pd.DataFrame(o["by_season"]).T, use_container_width=True)
+tab1.dataframe(pd.DataFrame(o["by_league"]).T.drop(columns=["cal_home"]),
+               use_container_width=True)
+tab2.dataframe(pd.DataFrame(o["by_season"]).T.drop(columns=["cal_home"]),
+               use_container_width=True)
 st.caption("A 线为历史回测证据，与 B 线前向运营结论分账（spec §12.3），互不冒充。")

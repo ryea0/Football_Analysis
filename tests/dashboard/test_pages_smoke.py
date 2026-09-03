@@ -11,6 +11,13 @@ PAGES = sorted((Path(__file__).resolve().parents[2] / "dashboard" / "pages").glo
 assert PAGES, "dashboard/pages/ 下没有页面文件"   # 空目录即失败信号，不让冒烟静默空跑
 
 
+@pytest.fixture(autouse=True)
+def _clear_cache():
+    """loaders 的 st.cache_data 键不含库路径（FA_DB 在 env）——每例前清缓存，
+    防止同进程跨 AppTest 串台（终审 Important #1）。"""
+    st.cache_data.clear()
+
+
 @pytest.mark.parametrize("page", PAGES, ids=lambda p: p.name)
 def test_page_renders_on_empty_db(page, tmp_path, monkeypatch):
     monkeypatch.setenv("FA_DB", str(tmp_path / "t.db"))
@@ -18,3 +25,4 @@ def test_page_renders_on_empty_db(page, tmp_path, monkeypatch):
     at = st.testing.v1.AppTest.from_file(str(page), default_timeout=60)
     at.run()
     assert not at.exception
+    assert len(at.header) == 1      # 页面真的渲染了（防退化成只 early-stop）
