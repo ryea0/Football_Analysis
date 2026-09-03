@@ -275,5 +275,30 @@ def run_matchday_cmd(
 @run_app.command("daily")
 def run_daily_cmd() -> None:
     """结算日课：完赛同步 → 结算 → 有结算才发一行简报（spec §3.4 / §7.3）"""
-    from fa.pipeline.daily import run_daily  # noqa: F401  (T10 提交接入)
+    from fa.pipeline.daily import run_daily
+    from fa.pipeline.reporting import last_error
 
+    conn = connect()
+    try:
+        out = run_daily(conn)
+    finally:
+        conn.close()
+
+    typer.echo(f"日课判决：{_STATUS_CN[out['status']]}")
+    sync = out["sync"]
+    if sync is None:
+        typer.echo("  完赛同步：失败降级（用库内旧数据结算）")
+    else:
+        typer.echo(f"  完赛同步：{sync['files_ok']} 个赛季文件，"
+                   f"新入库 {sync['inserted']} 场，出错 {sync['file_errors']} 个")
+    line = f"  结算 {out['settled']} 注（中 {out['won']}），净额 {out['pnl']:+.2f}"
+    line += ("，CLV 中位 "
+             f"{out['clv_median']:+.2%}" if out["clv_median"] is not None
+             else "，CLV 无收盘价基准")
+    typer.echo(line)
+    if out["sent"] is None:
+        typer.echo("  推送：静默（无可结注）")
+    elif out["sent"]:
+        typer.echo("  推送：已发 Telegram（结算简报）")
+    else:
+        typer.echo(f"  推送：失败（{last_error()}）——结算已落库")
