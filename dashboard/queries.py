@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from fa.backtest.metrics import by_group, calibration, evaluate, fetch_predictions
 from fa.config import db_path
 
 
@@ -136,3 +137,45 @@ def b_unknown_names(conn: sqlite3.Connection) -> pd.DataFrame:
     return pd.read_sql_query(
         "SELECT source, name, first_seen FROM unknown_names"
         " ORDER BY first_seen, name", conn)
+
+
+def a_overview(conn: sqlite3.Connection, leagues=None, seasons=None) -> dict:
+    """页5：全样本对比 + 分赛季/分联赛/交叉分解（evaluate 口径=spec §8.2）。
+
+    metrics.evaluate 对空行抛 ValueError——这里转成 empty 标记，页面走空态
+    （设计 §5/§6：查询对空库永不抛）。
+    """
+    rows = fetch_predictions(conn, leagues, seasons)
+    if not rows:
+        return {"empty": True}
+    cross: dict = {}
+    for r in rows:
+        cross.setdefault((r["league"], r["season"]), []).append(r)
+    return {"empty": False,
+            "overall": evaluate(rows),
+            "by_season": by_group(rows, "season"),
+            "by_league": by_group(rows, "league"),
+            "by_league_season": {f"{l}|{s}": evaluate(v)
+                                 for (l, s), v in sorted(cross.items())}}
+
+
+def a_calibration(conn: sqlite3.Connection, leagues=None, seasons=None) -> dict:
+    """页6：分市场十分位校准（复用 metrics.calibration，等宽分桶）。
+
+    O2.5 的命中定义 = total_goals ≥ 3（与 simulate._hit 同口径）；无
+    p_over25 行的库（大小球通道未跑）返回空列表而非报错。
+    """
+    rows = fetch_predictions(conn, leagues, seasons)
+    if not rows:
+        return {"empty": True}
+
+    def cal(pairs):
+        return calibration([p for p, _ in pairs], [h for _, h in pairs])
+
+    over_rows = [r for r in rows if r.get("p_over25") is not None]
+    return {"empty": False,
+            "H": cal([(r["p_home"], r["outcome"] == "H") for r in rows]),
+            "D": cal([(r["p_draw"], r["outcome"] == "D") for r in rows]),
+            "A": cal([(r["p_away"], r["outcome"] == "A") for r in rows]),
+            "O2.5": cal([(r["p_over25"], r["total_goals"] >= 3)
+                         for r in over_rows]) if over_rows else []}

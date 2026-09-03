@@ -3,6 +3,7 @@
 种子日期全部用字面量；断言数字均手算钉死。
 """
 import json
+import math
 import sqlite3
 
 import pytest
@@ -347,3 +348,76 @@ def test_b_runs_empty(db):
 
     assert b_runs(db).empty
     assert b_unknown_names(db).empty
+
+
+def _seed_bp_rows(db):
+    """两行 walk-forward 预测 + 所需 match（FK）。
+
+    行1：模型 (0.8,0.1,0.1) 市场 (0.5,0.25,0.25) 赔率 (2.0,3.5,4.0) 结果 H，3 球
+    行2：模型 (0.1,0.2,0.7) 市场 (0.3,0.30,0.40) 赔率 (2.5,3.4,4.0) 结果 A，1 球
+    """
+    db.execute("INSERT INTO teams (league, name) VALUES ('E0', 'Team A'), ('E0', 'Team B')")
+    db.execute(
+        "INSERT INTO matches (id, league, season, date, home_team_id, away_team_id,"
+        " fthg, ftag, raw_line) VALUES (1, 'E0', 2024, '2025-01-01', 1, 2, 2, 1, '{}'),"
+        " (2, 'E0', 2024, '2025-01-08', 1, 2, 0, 1, '{}')")
+    db.execute(
+        "INSERT INTO backtest_predictions (league, season, week_index, match_id, date,"
+        " p_home, p_draw, p_away, p_over25, mkt_home, mkt_draw, mkt_away, mkt_over25,"
+        " odds_home, odds_draw, odds_away, outcome, total_goals)"
+        " VALUES ('E0', 2024, 1, 1, '2025-01-01', 0.8, 0.1, 0.1, 0.6,"
+        " 0.5, 0.25, 0.25, NULL, 2.0, 3.5, 4.0, 'H', 3),"
+        " ('E0', 2024, 2, 2, '2025-01-08', 0.1, 0.2, 0.7, 0.3,"
+        " 0.3, 0.30, 0.40, NULL, 2.5, 3.4, 4.0, 'A', 1)")
+    db.commit()
+
+
+def test_a_overview_hand_computed(db):
+    """手算钉死（方向性：模型优于市场 → degradation < 0）。
+
+    model_ll  = −(ln0.8 + ln0.7)/2 = 0.289909…
+    market_ll = −(ln0.5 + ln0.4)/2 = 0.804719…
+    degradation_pct ≈ −63.974
+    """
+    from queries import a_overview
+
+    _seed_bp_rows(db)
+    o = a_overview(db)
+    assert o["empty"] is False
+    ov = o["overall"]
+    assert ov["n"] == 2
+    assert ov["model_ll"] == pytest.approx(-(math.log(0.8) + math.log(0.7)) / 2)
+    assert ov["market_ll"] == pytest.approx(-(math.log(0.5) + math.log(0.4)) / 2)
+    assert ov["degradation_pct"] == pytest.approx(
+        (math.log(0.8) + math.log(0.7)) / (math.log(0.5) + math.log(0.4)) * 100 - 100)
+    assert ov["degradation_pct"] < 0                            # 方向代入检查
+    assert ov["verdict"] == "GO"                                # 模型显著更优
+    assert o["by_league"]["E0"]["n"] == 2
+    assert o["by_season"][2024]["n"] == 2
+    assert o["by_league_season"]["E0|2024"]["n"] == 2
+    assert sum(v["n"] for v in o["by_league_season"].values()) == 2
+
+
+def test_a_overview_filter_and_empty(db):
+    from queries import a_overview
+
+    _seed_bp_rows(db)
+    assert a_overview(db, leagues=["SP1"])["empty"] is True     # 过滤后无行
+    assert a_overview(db, seasons=[2025])["empty"] is True
+    assert a_overview(db, leagues=["E0"], seasons=[2024])["overall"]["n"] == 2
+
+
+def test_a_calibration(db):
+    from queries import a_calibration
+
+    _seed_bp_rows(db)
+    c = a_calibration(db)
+    assert c["empty"] is False
+    h08 = [b for b in c["H"] if b["lo"] == 0.8][0]
+    assert h08 == {"lo": 0.8, "hi": 0.9, "n": 1, "avg_p": pytest.approx(0.8), "emp": 1.0}
+    h01 = [b for b in c["H"] if b["lo"] == 0.1][0]
+    assert h01["emp"] == 0.0                                    # 行2 的 p_home=0.1 未命中
+    o06 = [b for b in c["O2.5"] if b["lo"] == 0.6][0]
+    assert o06["emp"] == 1.0                                    # 3 球 ≥ 3 → over 命中
+    assert [b for b in c["O2.5"] if b["lo"] == 0.3][0]["emp"] == 0.0
+    assert a_calibration(db, leagues=["SP1"])["empty"] is True
