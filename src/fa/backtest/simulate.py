@@ -1,10 +1,21 @@
-"""模拟盘：spec §5.2/§5.3 门槛与仓位。回测以收盘价成交（保守）。"""
-EV_MIN = 0.03
-EDGE_MIN = 0.02
-ODDS_MIN = 1.4
-ODDS_MAX = 6.0
-KELLY_FRAC = 0.25
-STAKE_CAP = 0.02
+"""模拟盘：spec §5.2/§5.3 门槛与仓位。回测以收盘价成交（保守）。
+
+门槛/仓位常量的单一事实源在 ``fa/value/gates.py``——本模块 import 后 re-export，
+既有 ``from fa.backtest.simulate import EV_MIN, …`` 的调用面不变。``candidates``
+的 EV 改由 ``gates.ev_of`` 供给（逐位同一算式）。
+
+Kelly 公式在 ``simulate_kelly`` 内**就地展开**而不调用 ``gates.kelly_fraction``：
+既有测试以 monkeypatch **本模块**的全局常量来钉 ¼ 系数与上限
+（``test_kelly_uses_quarter_kelly_and_cap``），函数体引用的是本模块命名空间，
+re-export 恰好让这一点继续成立；两处算式的逐位等价由
+``tests/value/test_gates.py::test_kelly_fraction_is_the_stake_simulate_kelly_takes``
+钉住。
+"""
+from fa.value.gates import (EDGE_MIN, EV_MIN, KELLY_FRAC, ODDS_MAX, ODDS_MIN,
+                            STAKE_CAP, ev_of)
+
+__all__ = ["EV_MIN", "EDGE_MIN", "ODDS_MIN", "ODDS_MAX", "KELLY_FRAC",
+           "STAKE_CAP", "ev_of", "candidates", "simulate_flat", "simulate_kelly"]
 
 
 def _hit(row, market: str) -> bool:
@@ -36,7 +47,7 @@ def candidates(rows: list[dict]) -> list[dict]:
                 continue                              # 缺收盘赔率，无法算 EV，M3 接实时盘后启用
             if odds is None or not (ODDS_MIN <= odds <= ODDS_MAX):
                 continue
-            ev = p * (odds - 1) - (1 - p)
+            ev = ev_of(p, odds)
             if ev >= EV_MIN and edge >= EDGE_MIN:
                 out.append({"match_id": r["match_id"], "league": r["league"],
                             "date": r["date"], "market": market, "p": p,
