@@ -1,3 +1,5 @@
+import sqlite3
+
 import typer
 
 from fa.data.audit import audit_sample
@@ -215,6 +217,300 @@ def backtest_run(
     typer.echo(f"判决：{ev['verdict']}（劣化 {ev['degradation_pct']:+.2f}%，"
                f"判据 ≤ +1.00%）——报告见 docs/m2-report.md")
 
+
+# ---- 双线 status 与 bet 台账（T11）-----------------------------------------
+# spec §12.1：一个程序、一个库、两条线并存、结论分账——`fa status` 把两线的证据
+# 各占一屏、字样钉死（「A 线·研究评测」「B 线·运营模拟（paper）」），两线数字绝不
+# 互相冒充（A 线只读 backtest_predictions，B 线只读 paper 台账 + runs/fixtures 侧
+# 的运行水位）。`fa bet` 是台账的人工入口：live 是唯一的真实下单通道，故必须显式
+# 确认旗标（§12.2「真实下注依然禁止」下的最小豁免面）。
+
+_RUNS_SHOWN = 3                       # fa status 的「最近 runs」条数（brief 钉死）
+_BET_MODES = ("paper", "live")        # db.py bets.mode CHECK 词表
+_SETTLE_STATUSES = ("won", "lost", "void")   # db.py bets.status CHECK 的人工可写子集
+
+
+def _pct(value: float | None) -> str:
+    """比率 → 带符号百分比；None（无可算样本）→ 「—」，不冒充 0。"""
+    return "—" if value is None else f"{value:+.2f}%"
+
+
+def _money(value: float | None) -> str:
+    """金额两位小数；None → 「—」（区别于真实的 0.00）。"""
+    return "—" if value is None else f"{value:.2f}"
+
+
+def _now_iso() -> str:
+    """台账时间戳：UTC ISO-Z，与 paper 层 placed_at / settled_at 同一格式。"""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _require_positive_stake(stake: float, source: str) -> None:
+    """注金闸：显式 ``--stake`` 与派生（仓位 × bankroll）走**同一道**闸——
+
+    kelly 为 0 或 M4 的 ``final_stake_frac=0`` 会派生出 0 注金，同样必须拒，
+    不得写成 0 注行（0 注金会让 ROI/CLV 的分母虚增、台账失真）。
+    """
+    if stake > 0:
+        return
+    typer.echo(f"{source} 须 > 0，收到 {stake}")
+    raise typer.Exit(code=1)
+
+
+def _a_line_summary(conn) -> str:
+    """A 线一行：全量 backtest_predictions 聚合 evaluate 的 n / 劣化 / 判决。
+
+    措辞用「backtest 全量聚合」而非「最近 backtest」——实现是**整张表**聚合，
+    不是「最近一次 run」（schema 没有 runs↔predictions 关联列，勿误导）。
+    """
+    from fa.backtest.metrics import evaluate, fetch_predictions
+    rows = fetch_predictions(conn)                    # 全量表，不带联赛/赛季过滤
+    if not rows:
+        return "未运行（backtest_predictions 空表——fa backtest run 生成预测）"
+    try:
+        ev = evaluate(rows)
+    except TypeError:                                 # 残缺行（mkt_* 缺市场收盘价）
+        return (f"n={len(rows)} 行预测不可评（mkt_* 缺市场收盘价）——"
+                "A 线判据需要去水收盘基准，先补齐回测输入")
+    return (f"backtest 全量聚合：n={ev['n']}  模型 log-loss={ev['model_ll']:.4f}"
+            f"  市场 log-loss={ev['market_ll']:.4f}"
+            f"  劣化={ev['degradation_pct']:+.2f}%  判决={ev['verdict']}"
+            f"（判据：劣化 ≤ +1.00%）")
+
+
+def _b_line_summary(conn) -> list[str]:
+    """B 线各行：paper 台账汇总 + 额度水位 + 最近 runs + 隔离队名计数。"""
+    from fa.db import get_meta
+    from fa.pipeline.fixtures import QUOTA_META_KEY
+    from fa.pipeline.paper import BANKROLL_KEY, INITIAL_BANKROLL, paper_summary
+
+    s = paper_summary(conn)
+    bankroll = ("未初始化（首次落注时按 "
+                f"{INITIAL_BANKROLL:.0f} 写 meta {BANKROLL_KEY}）"
+                if s["bankroll"] is None else _money(s["bankroll"]))
+    lines = [f"注数={s['n']}（pending {s['pending']}）  "
+             f"已结算注金={_money(s['staked'])}  回报={_money(s['returned'])}"
+             f"  ROI={_pct(s['roi'])}  bankroll={bankroll}"
+             f"  CLV 中位数={_pct(s['clv_median'])}"]
+
+    quota = get_meta(conn, QUOTA_META_KEY)
+    if quota is None:
+        lines.append(f"额度水位：未记录（meta {QUOTA_META_KEY} 缺——尚未成功拉过实时盘）")
+    else:
+        lines.append(f"额度水位：余 {quota} 次（meta {QUOTA_META_KEY}）")
+
+    runs = conn.execute(
+        "SELECT id, type, phase, started_at, status, credits_after FROM runs"
+        " ORDER BY id DESC LIMIT ?", (_RUNS_SHOWN,)).fetchall()
+    lines.append(f"最近 runs（最多 {_RUNS_SHOWN} 条）：")
+    if not runs:
+        lines.append("  （无 run 记录——fa run matchday / daily 生成）")
+    for r in runs:
+        phase = f"/{r['phase']}" if r["phase"] else ""
+        credits = "—" if r["credits_after"] is None else f"{r['credits_after']}"
+        lines.append(f"  #{r['id']} {r['type']}{phase}  {r['started_at']}  "
+                     f"{r['status']}  额度 {credits}")
+
+    unknown = conn.execute("SELECT COUNT(*) c FROM unknown_names").fetchone()["c"]
+    line = f"未对齐队名（隔离表）：{unknown} 条"
+    if unknown:
+        line += "（fa data aliases 逐条给建议，--confirm 写别名）"
+    lines.append(line)
+    return lines
+
+
+@app.command("status")
+def status_cmd() -> None:
+    """双线总览：A 线研究评测 + B 线运营模拟（paper 台账，spec §12.1）"""
+    conn = connect()
+    try:
+        typer.echo("== A 线·研究评测 ==")
+        typer.echo(_a_line_summary(conn))
+        typer.echo("")
+        typer.echo("== B 线·运营模拟（paper） ==")
+        for line in _b_line_summary(conn):
+            typer.echo(line)
+    finally:
+        conn.close()
+
+
+bet_app = typer.Typer(help="投注台账（paper 模拟 / live 实盘，spec §7.2 / §12.2）")
+app.add_typer(bet_app, name="bet")
+
+
+def _bet_row(conn, bet_id: int) -> sqlite3.Row:
+    """bets 行或退出（未知 id 是操作失误，须显式报错而非静默空转）。"""
+    row = conn.execute("SELECT * FROM bets WHERE id=?", (bet_id,)).fetchone()
+    if row is None:
+        typer.echo(f"bet #{bet_id} 不存在（bets 表无此行）")
+        raise typer.Exit(code=1)
+    return row
+
+
+def _require_pending(conn, bet_id: int) -> sqlite3.Row:
+    """只允许结算 pending 注——台账终态不可被二次改写。"""
+    row = _bet_row(conn, bet_id)
+    if row["status"] != "pending":
+        typer.echo(f"bet #{bet_id} 已结算（status={row['status']}），拒绝重复结算")
+        raise typer.Exit(code=1)
+    return row
+
+
+@bet_app.command("add")
+def bet_add(
+    recommendation_id: int = typer.Argument(..., help="recommendations.id"),
+    stake: float | None = typer.Option(
+        None, "--stake", help="注金；缺省按仓位分数 × 当前 bankroll"
+                              "（final_stake_frac 优先，否则 kelly_stake_frac）"),
+    odds: float | None = typer.Option(
+        None, "--odds", help="成交赔率；缺省用推荐时最优价 best_odds"),
+    mode: str = typer.Option("paper", "--mode", help="paper（默认，模拟盘）/ live（实盘）"),
+    i_know_mode_live: bool = typer.Option(
+        False, "--i-know-mode-live",
+        help="live 显式确认旗标：真实下单必须带上，缺则拒绝（§12.2）"),
+) -> None:
+    """登记一笔注（写 bets，status=pending）。live 是唯一人工实盘入口，需确认旗标。"""
+    if mode not in _BET_MODES:
+        typer.echo(f"--mode 须为 {'|'.join(_BET_MODES)}，收到 {mode!r}")
+        raise typer.Exit(code=1)
+    if mode == "live" and not i_know_mode_live:
+        typer.echo("拒绝：真实下单需显式确认——live 是真金。加 --i-know-mode-live 才放行"
+                   "（spec §12.2：真实下注一期禁止，此旗标即最小豁免面）")
+        raise typer.Exit(code=1)
+    if stake is not None:
+        _require_positive_stake(stake, "--stake")
+    if odds is not None and odds <= 1:
+        typer.echo(f"--odds 须 > 1（赔率下限），收到 {odds}")
+        raise typer.Exit(code=1)
+
+    from fa.pipeline.paper import BANKROLL_KEY, INITIAL_BANKROLL
+    conn = connect()
+    try:
+        rec = conn.execute("SELECT * FROM recommendations WHERE id=?",
+                           (recommendation_id,)).fetchone()
+        if rec is None:
+            typer.echo(f"recommendation_id={recommendation_id} 不存在"
+                       "（recommendations 表无此行）")
+            raise typer.Exit(code=1)
+        if conn.execute(
+                "SELECT 1 FROM bets WHERE recommendation_id=? AND mode=?",
+                (recommendation_id, mode)).fetchone() is not None:
+            typer.echo(f"拒绝：recommendation_id={recommendation_id} 在 mode={mode}"
+                       " 下已有注（UNIQUE(recommendation_id, mode)）——换 mode 或直接结算")
+            raise typer.Exit(code=1)
+
+        if stake is None:                     # 缺省仓位：persona 位缺失则退回 kelly
+            frac = (rec["final_stake_frac"] if rec["final_stake_frac"] is not None
+                    else rec["kelly_stake_frac"])
+            raw = conn.execute("SELECT value FROM meta WHERE key=?",
+                               (BANKROLL_KEY,)).fetchone()
+            bankroll = INITIAL_BANKROLL if raw is None else float(raw["value"])
+            stake = round(frac * bankroll, 2)
+            _require_positive_stake(stake, f"派生注金（仓位 {frac} × bankroll）")
+            typer.echo(f"注金未指定：按仓位 {frac} × bankroll {bankroll:.2f}"
+                       f" = {stake:.2f}")
+        if odds is None:
+            odds = rec["best_odds"]
+        try:
+            bet_id = conn.execute(
+                "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker,"
+                " odds_taken, stake, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (recommendation_id, mode, _now_iso(), rec["bookmaker"], odds,
+                 stake, "pending")).lastrowid
+            conn.commit()
+        except sqlite3.IntegrityError as exc:   # 兜底：上面的预查与写入之间的竞争
+            typer.echo(f"拒绝：该推荐在此模式下已有注"
+                       f"（UNIQUE(recommendation_id, mode)）：{exc}")
+            raise typer.Exit(code=1)
+        typer.echo(f"已登记 bet #{bet_id}：mode={mode} status=pending  "
+                   f"stake={stake:.2f} @ {odds}（{rec['bookmaker']}，"
+                   f"market={rec['market']}）")
+    finally:
+        conn.close()
+
+
+@bet_app.command("list")
+def bet_list(
+    mode: str = typer.Option("", "--mode", help="过滤 paper|live，空=全部"),
+    status: str = typer.Option("", "--status", help="过滤 pending|won|lost|void，空=全部"),
+) -> None:
+    """列出台账注（可按 mode / status 过滤）。"""
+    for label, value, allowed in (("--mode", mode, _BET_MODES),
+                                  ("--status", status,
+                                   ("pending", "won", "lost", "void"))):
+        if value and value not in allowed:
+            typer.echo(f"{label} 须为 {'|'.join(allowed)}（空=全部），收到 {value!r}")
+            raise typer.Exit(code=1)
+
+    sql = ("SELECT b.*, r.market, r.strategy, f.league FROM bets b"
+           " JOIN recommendations r ON r.id = b.recommendation_id"
+           " LEFT JOIN fixtures f ON f.id = r.fixture_id WHERE 1=1")
+    args: list = []
+    if mode:
+        sql += " AND b.mode=?"
+        args.append(mode)
+    if status:
+        sql += " AND b.status=?"
+        args.append(status)
+    sql += " ORDER BY b.id"
+
+    conn = connect()
+    try:
+        rows = conn.execute(sql, args).fetchall()
+    finally:
+        conn.close()
+    scope = f"mode={mode or '全部'}, status={status or '全部'}"
+    typer.echo(f"投注台账：{len(rows)} 条（{scope}）")
+    if not rows:
+        typer.echo("（无记录）")
+        return
+    for r in rows:
+        settled = (f"结算 {r['settled_at']}  回报 {_money(r['return_amt'])}"
+                   if r["settled_at"] else "（未结）")
+        clv = "—" if r["clv"] is None else f"{r['clv']:+.4f}"
+        league = r["league"] if r["league"] else "—"
+        typer.echo(f"  #{r['id']} {r['mode']} {r['status']} {r['market']}"
+                   f"  stake={_money(r['stake'])} @ {r['odds_taken']}"
+                   f"（{r['bookmaker']}）  CLV {clv}  {settled}"
+                   f"  下 {r['placed_at']}  {league}/{r['strategy']}")
+
+
+@bet_app.command("settle")
+def bet_settle(
+    bet_id: int = typer.Argument(..., help="bets.id"),
+    status: str = typer.Option(..., "--status", help="won|lost|void"),
+    return_amt: float | None = typer.Option(
+        None, "--return", help="回报金额；缺省 won=stake×odds_taken，lost/void=0"),
+) -> None:
+    """人工结算一笔注（终态不可改写）。
+
+    注意：**不改动 paper bankroll**——余额只由 paper 自动结算路径记账
+    （fa run daily → settle_paper_bets）。paper 注被手工结算后即脱离该自动
+    路径，其盈亏**不会**进余额，只留在台账数字里；paper 注请优先让日课结算，
+    本命令主用场是 live（§7.2：live 归人工登记与结算）。
+    """
+    if status not in _SETTLE_STATUSES:
+        typer.echo(f"--status 须为 {'|'.join(_SETTLE_STATUSES)}，收到 {status!r}")
+        raise typer.Exit(code=1)
+
+    conn = connect()
+    try:
+        row = _require_pending(conn, bet_id)
+        if return_amt is None:
+            return_amt = (round(row["stake"] * row["odds_taken"], 2)
+                          if status == "won" else 0.0)
+        conn.execute(
+            "UPDATE bets SET status=?, settled_at=?, return_amt=? WHERE id=?",
+            (status, _now_iso(), return_amt, bet_id))
+        conn.commit()
+    finally:
+        conn.close()
+    typer.echo(f"已结算 bet #{bet_id}：status={status}  回报 {_money(return_amt)}"
+               f"（注金 {_money(row['stake'])} @ {row['odds_taken']}）")
+    if row["mode"] == "paper":
+        typer.echo("注意：paper 注手工结算不改动 bankroll（余额只由 fa run daily"
+                   " 的自动结算记账），且该注已脱离自动结算路径。")
 
 # ---- B 线 run 命令（T9/T10）----
 
