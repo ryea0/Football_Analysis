@@ -124,10 +124,11 @@ CREATE INDEX IF NOT EXISTS idx_bets_status ON bets (status);
 # A 线复盘归因子线两表（spec docs/superpowers/specs/2026-09-04-retro-attribution-design.md
 # §7）。物理隔离：retro 对 recommendations/bets 无任何代码通路。selector 词表含
 # S2/S3 的 paper_t1 / agentline_aligned——SQLite 无法后补 CHECK，趁表空一次到位。
-# is_control 是后补列（2026-09-04 终审）：纯加列 + DEFAULT 0，**不 bump
-# SCHEMA_VERSION**——生产库仍 v3，经 _migrate_up 全新建表即含该列；CREATE
-# TABLE IF NOT EXISTS 对已存在的 v4 库不生效，但见过的旧 v4 只有已作废的
-# worktree 快照（data/fa.db 快照与旧表结构不匹配属预期）。
+# is_control 是后补列（2026-09-04 终审）：纯加列 + DEFAULT 0——生产库经
+# fa init 逐级迁移（_migrate_up），本表随版本演进纯加列（v5 attributor
+# 列同法：新建 DDL 含列、迁移走 ALTER，见 _migrate_up 幂等护栏）；CREATE
+# TABLE IF NOT EXISTS 对已存在的库不生效，存量库加列一律经 ALTER 路径
+# （旧 worktree 快照库与现表结构不匹配属预期）。
 # 契约字段（miss_tags 等）在 status != 'ok' 的行上为 NULL（parse_fail 只留审计
 # 字段；原始输出留档属下个计划，spec §15 待办）。
 _RETRO_TABLE = """
