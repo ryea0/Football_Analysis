@@ -34,6 +34,34 @@ def test_backtest_help():
     result = runner.invoke(app, ["backtest", "run", "--help"])
     assert result.exit_code == 0
     assert "half-life" in result.output
+    assert "--sigma" in result.output
+
+
+def test_fit_config_sigma_helper():
+    """队级先验宽度只落 σ_att/σ_dfn；σ_mu/σ_ha 保持默认（联赛级非瓶颈）。"""
+    from fa.cli import _fit_config
+
+    cfg = _fit_config(200.0, 1.5)
+    assert (cfg.sigma_att, cfg.sigma_dfn, cfg.sigma_mu, cfg.sigma_ha) \
+        == (1.5, 1.5, 0.25, 0.25)
+    assert cfg.half_life_days == 200.0
+
+
+def test_backtest_run_sigma_passthrough(tmp_path, monkeypatch):
+    from fa.cli import _fit_config
+
+    _use_tmp_db(tmp_path, monkeypatch)
+    seen = {}
+
+    def fake_run_backtest(conn, lgs, seasons, cfg, verbose=False):
+        seen["cfg"] = cfg
+        return 0                                   # 0 行预测 → CLI 退出码 1
+
+    monkeypatch.setattr("fa.backtest.run.run_backtest", fake_run_backtest)
+    result = runner.invoke(app, ["backtest", "run", "--sigma", "0.8"])
+    assert result.exit_code == 1, result.output
+    assert seen["cfg"] == _fit_config(100.0, 0.8)
+    assert seen["cfg"].sigma_att == 0.8 and seen["cfg"].sigma_dfn == 0.8
 
 
 def test_data_subapp_help():

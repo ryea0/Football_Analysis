@@ -91,11 +91,20 @@ backtest_app = typer.Typer(help="回测")
 app.add_typer(backtest_app, name="backtest")
 
 
+def _fit_config(half_life: float, sigma: float) -> "FitConfig":
+    """回测拟合配置。σ 只透传到队级先验（sigma_att=sigma_dfn）；σ_mu/σ_ha 保持
+    默认——联赛级（均值/主场优势）收缩不是 M2 判决诊断出的瓶颈（过度收缩发生在
+    队级 att/dfn，判决书「机理诊断」节）。"""
+    from fa.model.fit import FitConfig
+    return FitConfig(half_life_days=half_life, sigma_att=sigma, sigma_dfn=sigma)
+
+
 @backtest_app.command("run")
 def backtest_run(
     from_season: int = typer.Option(2019, "--from", help="起始赛季（含）"),
     to_season: int = typer.Option(2025, "--to", help="结束赛季（含）"),
     half_life: float = typer.Option(100.0, "--half-life", help="衰减半衰期（天）"),
+    sigma: float = typer.Option(0.35, "--sigma", help="队级先验宽度（sigma_att=sigma_dfn）"),
     leagues: str = typer.Option("", "--leagues", help="逗号分隔联赛码，空=全部"),
     no_refit: bool = typer.Option(False, "--no-refit", help="跳过拟合，用表内预测出报告"),
 ) -> None:
@@ -105,12 +114,11 @@ def backtest_run(
     from fa.backtest.report import render_report
     from fa.backtest.metrics import fetch_predictions
     from fa.config import LEAGUES, project_root
-    from fa.model.fit import FitConfig
     lgs = [s.strip() for s in leagues.split(",") if s.strip()] or list(LEAGUES)
     conn = connect()
     if not no_refit:
         from fa.backtest.run import run_backtest
-        cfg = FitConfig(half_life_days=half_life)
+        cfg = _fit_config(half_life, sigma)
         t0 = datetime.now()
         n = run_backtest(conn, lgs, range(from_season, to_season + 1), cfg,
                          verbose=True)
