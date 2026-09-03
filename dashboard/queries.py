@@ -185,7 +185,8 @@ def a_calibration(conn: sqlite3.Connection, leagues=None, seasons=None) -> dict:
 
 def _odds_bands() -> list[tuple[float, float, str]]:
     """赔率区间表：成员判定用常量（gates 单一事实源），标签文案按 spec
-    §5.2 钉定的 1.4/6.0 书写——gates 改值须先改 spec，届时同步改标签。"""
+    §5.2 钉定的 1.4/6.0 书写——gates 改值须先改 spec，届时同步改标签。
+    成员判定与标签语义对齐：非末档半开（lo ≤ o < hi），末档含上限。"""
     return [(ODDS_MIN, 2.0, "[1.4,2.0)"), (2.0, 3.0, "[2.0,3.0)"),
             (3.0, ODDS_MAX, "[3.0,6.0]")]
 
@@ -211,7 +212,11 @@ def a_paper_sim(conn: sqlite3.Connection, leagues=None, seasons=None,
                             "bankroll": simulate_kelly(prefix, bankroll=bankroll)["final_bankroll"]})
 
     def band_label(o: float) -> str | None:
-        return next((lab for lo, hi, lab in _odds_bands() if lo <= o <= hi), None)
+        for i, (lo, hi, lab) in enumerate(_odds_bands()):
+            last = i == len(_odds_bands()) - 1
+            if lo <= o < hi or (last and o == hi):
+                return lab
+        return None
 
     return {"empty": False, "n_candidates": len(cands),
             "flat": simulate_flat(cands),

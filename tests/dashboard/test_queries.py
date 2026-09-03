@@ -447,9 +447,9 @@ def test_a_paper_sim_hand_computed(db):
     assert set(s["by_market"]) == {"H", "A"}
     assert s["by_market"]["H"]["pnl"] == pytest.approx(1.0)
     assert s["by_market"]["A"]["pnl"] == pytest.approx(3.0)
-    assert s["by_band"]["[1.4,2.0)"]["n"] == 1                    # H odds 2.0
+    assert s["by_band"]["[1.4,2.0)"]["n"] == 0
     assert s["by_band"]["[3.0,6.0]"]["n"] == 1                    # A odds 4.0
-    assert s["by_band"]["[2.0,3.0)"]["n"] == 0
+    assert s["by_band"]["[2.0,3.0)"]["n"] == 1                    # H odds 2.0 → [2.0,3.0)
 
 
 def test_a_paper_sim_empty(db):
