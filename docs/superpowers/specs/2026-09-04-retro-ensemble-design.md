@@ -90,3 +90,29 @@ ALTER TABLE retro_attributions ADD COLUMN attributor INTEGER NOT NULL DEFAULT 1;
 | 同模型采样相关性 → 一致性虚高或虚低 | 报告标注统计限制；异构成员是后续扩展 |
 | 无多数比例可能很高（承袭 LLM 归因随机性风险） | 这本身就是关卡 2 要测的数据；预写降格规则兜底 |
 | 开放：N 是否固定 3 | v1 固定 3（CLI 参数留给实验但文档口径以 3 为准）；N>3 的聚合规则（出现≥2 次）对更大 N 语义不变 |
+
+## 11. E2E 实测（2026-09-04，N=3 单场真机）
+
+**口径先行（必须与数字一起读）**：
+
+1. **k=1 批混入全同率**（E-T4 审查遗留提醒）：`fa retro run` 默认 `--attributors 1`（含现行单跑）产生的批，每场只有 1 个成员行，三档判定恒为「全同」——会把全同率向 100% 拉偏。当前 consistency 输出**不区分** k=1 批与真 ensemble 批，读全同率前必须先确认批的 `params_json.attributors` 与成员行数。
+2. **本批实际 k=2，不是 3**：本批成员 1 `parse_fail`，三档里这场是 **2/2 全同**，不是 3/3。consistency 只统计 `status='ok'` 的成员行（`analyze.consistency_report`），成员失败从分母里掉出去后，全同判定口径随之变窄——N=3 下一票失败的「全同」证据强度低于 3/3。
+3. **批号非全局**：本实测跑在 worktree 快照库（主库 v3 快照 → `fa init` 升 v5），`batch_id=1` 与主仓活库的 batch #1（3 场 S0+S1 首批，契约成功率 2/3、单场 ≈11.8s）**不是同一批数据**。跨库比较必须按「库 + batch_id」，不能只看 batch_id。
+4. **台账 `n_parse_fail=0` 是聚合口径**：N≥2 时台账按聚合行计（`n_ok`=聚合可用场数、`n_error`=全员失败场数），成员级失败只体现在成员行 status 与 consistency 的「成员失败行」计数——只看台账会得出「零失败」的乐观误读。
+
+**实测（batch #1，worktree 快照库，match_id 34180 = 2022-01-07 D1 Bayern Munich vs M'gladbach，div=+0.7598 全库 top1）**：
+
+| 项 | 实测 | 备注 |
+|---|---|---|
+| 一次跑成，未重跑挑结果 | 是 | 诚实条款 |
+| 三档分布 | 全同 1 / 多数 0 / 无多数 0（n=1 场） | 实际可用 k=2（见口径 2） |
+| 成员失败行 | 1（attributor=1，`parse_fail`） | 失败原因未落库（无 reason 列），无法区分空输出/JSON 破损 |
+| 一致率 | 100%（全同+多数，n=1） | 单场样本，无统计意义，只作管线可用性证据 |
+| 聚合行（attributor=0） | primary=`variance`、miss_tags=`{model_limitation, variance}`、confidence=0.65（0.6/0.7 中位数）、mvm=`model_wrong`、digest=成员 2 的 digest（primary 一致中序最小）、evidence=空并集 `[]`、status=`ok`、repaired=0 | 与 §4 规则逐字段核对一致 |
+| 单场耗时 | 总 31.2s（成员 13.9 / 9.1 / 8.2s，顺序）；聚合行 duration_s=31.2 | 与 §7 预估 ≈35s 同带 |
+| 契约成功率 | 成员级 2/3=67%（与上轮基线 2/3 同）；聚合级台账 1/1 ok | 两口径并存，见口径 4 |
+| audit | 检查 0 行，违规 0 | 本批 miss_tags 仅 `variance`/`model_limitation`，均非赛前成因标签（PREMATCH_CAUSE_TAGS），且证据本为空 → 不受检，非违规率 0 的证据 |
+| 落库 | 4 行 = 成员 1/2/3 + 聚合 0；成员 3 `repaired=1`（JSON 截取修复后过契约） | attributor 列迁移后 DEFAULT 1 未影响本批 |
+| 输入留档 | `data/retro/inputs/batch-…/34180.json`（data/ gitignore，不进 git） | |
+
+**结论（如实，不外推）**：管线端到端可用（跑通、落库、聚合规则实测正确、全量 523 passed）。**一致性数字本批不可用作关卡 2 结论**——n=1 且 k=2；「三票各异」的极端信号本批未出现（两票一致 + 一票契约失败），不能据此判断随机性高低。关卡 2 需要的数据 = 多场、多批、成员失败率已知的 ensemble 批，且解读前先做口径 1/2 的检查。
