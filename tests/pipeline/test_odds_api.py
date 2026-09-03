@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from fa.pipeline.odds_api import OddsApiError, OddsSnapshot, fetch_odds
+from fa.pipeline.odds_api import OddsApiError, OddsSnapshot, fetch_odds, list_events
 
 FIXTURE = Path(__file__).parent / "fixtures" / "odds_epl.json"
 QUOTA = "487"
@@ -479,3 +479,96 @@ def test_fetch_odds_requests_expected_query(replay):
             "markets": "h2h,totals",
             "oddsFormat": "decimal",
         }
+
+
+# ---------------------------------------------------------------- list_events（免费事件探测，T9 修复轮）
+
+
+def _raw_events():
+    """/events 的最小合法响应体（原样 dict，无 bookmakers）。"""
+    return [
+        {"id": "ev1", "sport_key": "soccer_epl",
+         "commence_time": "2026-09-04T14:00:00Z",
+         "home_team": "Chelsea", "away_team": "Arsenal"},
+        {"id": "ev2", "sport_key": "soccer_epl",
+         "commence_time": "2026-12-01T19:30:00Z",
+         "home_team": "Everton", "away_team": "Spurs"},
+    ]
+
+
+@pytest.fixture
+def events_replay(monkeypatch):
+    """把 _http_get 换成 /events 回放，记录 (url, params) 供断言。"""
+    calls = []
+
+    def fake_http_get(url, params):
+        calls.append((url, dict(params)))
+        return _raw_events(), {"X-Requests-Remaining": "499"}
+
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get", fake_http_get)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    return calls
+
+
+def test_list_events_returns_raw_events_and_quota(events_replay):
+    """原样返回事件 dict 列表 + 响应头额度；只发一次请求、不带 regions/markets。"""
+    from fa.config import ODDS_SPORT_KEYS
+
+    events, quota = list_events("E0")
+
+    assert events == _raw_events()                   # 原样，不做解析过滤
+    assert quota == 499
+    assert len(events_replay) == 1                   # 单请求：无 region 拆分
+    url, params = events_replay[0]
+    assert url == (f"https://api.the-odds-api.com/v4/sports/"
+                   f"{ODDS_SPORT_KEYS['E0']}/events")
+    assert params == {"apiKey": "test-key"}          # 无 regions/markets/oddsFormat
+
+
+def test_list_events_missing_quota_header_returns_none(monkeypatch):
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get",
+                        lambda url, params: (_raw_events(), {}))
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    assert list_events("E0") == (_raw_events(), None)
+
+
+def test_list_events_non_list_payload_raises(monkeypatch):
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get",
+                        lambda url, params: ({"error": "no"}, {}))
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    with pytest.raises(OddsApiError, match="事件响应结构异常"):
+        list_events("E0")
+
+
+def test_list_events_429_is_wrapped_as_odds_api_error(monkeypatch):
+    """429 / 网络错误经 _http_get 包成 OddsApiError 后原样上抛（调用方据此降级）。"""
+
+    def boom(url, params):
+        raise OddsApiError("Odds API 请求失败: HTTP 429（额度耗尽或限流）")
+
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get", boom)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    with pytest.raises(OddsApiError, match="429"):
+        list_events("E0")
+
+
+def test_list_events_no_key_raises_before_any_request(monkeypatch):
+    """守卫顺序：无 key 在触网之前就上抛（_http_get 打成炸弹也不该被走到）。"""
+
+    def boom(url, params):
+        raise AssertionError("无 key 不得触网")
+
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get", boom)
+    monkeypatch.delenv("ODDS_API_KEY", raising=False)
+    with pytest.raises(OddsApiError, match="ODDS_API_KEY"):
+        list_events("E0")
+
+
+def test_list_events_unknown_league_raises(monkeypatch):
+    def boom(url, params):
+        raise AssertionError("未知联赛不得触网")
+
+    monkeypatch.setattr("fa.pipeline.odds_api._http_get", boom)
+    monkeypatch.setenv("ODDS_API_KEY", "test-key")
+    with pytest.raises(OddsApiError, match="未知联赛"):
+        list_events("XX0")

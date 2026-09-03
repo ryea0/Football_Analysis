@@ -125,9 +125,11 @@ def env(tmp_path, monkeypatch):
     c.commit()
 
     box = SimpleNamespace(
-        conn=c, fetch=[], pushed=[], render=[], update=[],
+        conn=c, fetch=[], events=[], pushed=[], render=[], update=[],
         replay={"h2h": True, "totals": False, "quota": QUOTA,
-                "kickoff": KO, "fail": False})
+                "kickoff": KO, "fail": False, "fail_events": False,
+                "events": [{"id": "ev-probe", "commence_time": KO,
+                            "home_team": HOME, "away_team": AWAY}]})
     prices: dict = {}
 
     def fake_fetch_odds(league, *args, **kwargs):
@@ -147,7 +149,14 @@ def env(tmp_path, monkeypatch):
                                kickoff=box.replay["kickoff"]))
         return snaps, box.replay["quota"]
 
+    def fake_list_events(league, *args, **kwargs):
+        box.events.append(league)
+        if box.replay["fail_events"]:
+            raise OddsApiError("Odds API 请求失败: HTTP 429（额度耗尽或限流）")
+        return box.replay["events"], box.replay["quota"]
+
     monkeypatch.setattr(fixtures_mod, "fetch_odds", fake_fetch_odds)
+    monkeypatch.setattr(matchday, "list_events", fake_list_events)
     monkeypatch.setattr(matchday, "send",
                         lambda text: (box.pushed.append(text), True)[1])
     monkeypatch.setattr(matchday, "last_error", lambda: None)
@@ -275,20 +284,88 @@ def test_running_row_is_visible_before_finish(env, monkeypatch):
 
 
 def test_am_no_window_fixture_skips_without_push(env):
-    """无当日赛事 → 空跑收尾：status='skipped'，不渲染不推送（§9.6）。"""
+    """库内无窗口 fixture 且 /events 探测也无 → 空跑收尾，**零拉盘**（§9.6）。"""
     c = env.conn
     env.replay["kickoff"] = KO_FAR
+    env.replay["events"] = []                        # 探测也证实无赛事
     out = matchday.run_matchday(c, "am", [LEAGUE])
 
     assert out["status"] == "skipped" and out["sent"] is None
     assert out["recs"] == 0 and out["bets"] == 0
     assert env.pushed == [] and env.render == [] and env.update == []
+    assert env.events == [LEAGUE]                    # 免费探测发生了
+    assert env.fetch == []                           # 计费拉盘一次都没发生
     assert c.execute("SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 0
     assert c.execute("SELECT COUNT(*) c FROM bets").fetchone()["c"] == 0
     row = run_row(c, out["run_id"])
     assert row["status"] == "skipped" and row["finished_at"]
-    assert "当日" in summary_of(c, out["run_id"])["skip_reason"]
-    assert row["credits_after"] == QUOTA             # 拉盘已发生，额度照记
+    summary = summary_of(c, out["run_id"])
+    assert "当日" in summary["skip_reason"]
+    assert summary["probe"] == "events"
+    assert row["credits_after"] == QUOTA             # 探测读到的额度头照记账
+
+
+def _seed_fixture(c, event_key="ev-seed", kickoff=KO):
+    """直接落一行**已对齐**且在窗口内的 fixture（探测前置路径的「库内已知赛事」）。"""
+    ids = {r["name"]: r["id"] for r in c.execute("SELECT id, name FROM teams")}
+    return c.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc,"
+        " home_team_id, away_team_id, status, created_at)"
+        " VALUES (?,?, 'oddsapi', ?, ?, ?, 'scheduled', '2026-09-01T08:00:00Z')",
+        (LEAGUE, event_key, kickoff, ids[HOME], ids[AWAY])).lastrowid
+
+
+def test_persisted_window_fixture_skips_probe_and_syncs(env):
+    """库内已有窗口内 fixture：既不必探测也不必判空，直接常规拉盘刷新价格。"""
+    c = env.conn
+    _seed_fixture(c)
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.events == []                          # 探测被跳过（零额外请求）
+    assert env.fetch == [LEAGUE]
+    assert out["status"] == "ok" and out["recs"] == 1 and out["bets"] == 1
+    assert "probe" not in summary_of(c, out["run_id"])
+
+
+def test_probe_finding_event_triggers_full_sync(env):
+    """库内空但探测到窗口内事件 → 走常规全流程（拉盘刷新价格 + 新增 fixture）。"""
+    c = env.conn
+    env.replay["events"] = [{"id": "ev-x", "commence_time": KO,
+                             "home_team": HOME, "away_team": AWAY}]
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.events == [LEAGUE]
+    assert env.fetch == [LEAGUE]                     # 有赛事 → 照常计费拉盘
+    assert out["status"] == "ok" and out["recs"] == 1 and out["bets"] == 1
+    assert out["fixtures"] == 1
+    assert summary_of(c, out["run_id"])["probe"] == "found"
+
+
+def test_probe_failure_falls_through_to_sync(env):
+    """探测自身失败（429/网络）＝「无法确认当日赛程」，交回常规流程不静默漏跑。"""
+    c = env.conn
+    env.replay["fail_events"] = True
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert env.events == [LEAGUE]
+    assert env.fetch == [LEAGUE]                     # 宁可贵一次，也不空跑漏掉比赛日
+    assert out["status"] == "ok" and out["degraded"] is False   # 数据无损，不算降级
+    summary = summary_of(c, out["run_id"])
+    assert summary["probe"] == "unavailable"
+    assert summary["degraded_reasons"] == []
+
+
+def test_probe_quota_header_is_recorded_even_when_free(env):
+    """探测若真带回额度头：写 meta 并作 credits_after——E2E 据水位差验证「免费」。"""
+    c = env.conn
+    env.replay["quota"] = 77
+    env.replay["kickoff"] = KO_FAR
+    env.replay["events"] = []                        # 探测证实无赛事 → 空跑
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+
+    assert out["status"] == "skipped"
+    assert get_meta(c, "odds_quota_remaining") == "77"
+    assert run_row(c, out["run_id"])["credits_after"] == 77
 
 
 def test_no_key_returns_before_any_fetch(env, monkeypatch):
@@ -598,6 +675,10 @@ def test_cli_matchday_reports_counts_and_push(tmp_path, monkeypatch):
                                   "away": h2h["A"]})], QUOTA
 
         monkeypatch.setattr(fixtures_mod, "fetch_odds", fake_fetch)
+        monkeypatch.setattr(matchday, "list_events",
+                            lambda league, *a, **k: ([{"id": "ev-probe",
+                                                       "commence_time": KO}],
+                                                     QUOTA))
         monkeypatch.setattr(matchday, "send", lambda text: True)
         monkeypatch.setattr(
             matchday, "render_matchday_report",

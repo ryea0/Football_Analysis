@@ -85,13 +85,7 @@ def fetch_odds(
     429 / 其他 HTTP 错误 / 网络异常上抛 :class:`OddsApiError`。
     """
     LAST_FETCH_STATS.clear()                        # 任何失败（无 key / 未知联赛 / 网络）都留 {}
-    api_key = odds_api_key()
-    if not api_key:
-        raise OddsApiError("ODDS_API_KEY 未配置")
-    sport_key = ODDS_SPORT_KEYS.get(league)
-    if sport_key is None:
-        known = ", ".join(sorted(ODDS_SPORT_KEYS))
-        raise OddsApiError(f"未知联赛: {league}（可用: {known}）")
+    api_key, sport_key = _resolve_sport_key(league)
 
     stats = {"events": 0, "snapshots": 0, "dropped_totals_outcomes": 0}
     quotas: list[int] = []
@@ -130,6 +124,31 @@ def fetch_odds(
 OddsApiProvider = fetch_odds
 
 
+def list_events(league: str) -> tuple[list[dict], int | None]:
+    """拉某联赛的**事件清单**（不带盘口），返回 ``(事件 dict 列表, 剩余额度)``。
+
+    ``GET /v4/sports/{sport_key}/events``：不带 ``regions`` / ``markets``，响应体
+    就是事件数组（id / commence_time / home_team / away_team 等字段），**原样返回、
+    不做解析过滤**——窗口筛选归调用方（T9 用它做「当日是否有赛事」的免费探测）。
+
+    The Odds API 文档口径该端点**不计费**（quota-free），据此才把「无赛事空跑」的
+    判定前置到 :func:`fetch_odds`（计费）之前（spec §9.6「无赛事即空跑退出，不耗
+    额度」）；**真伪由 E2E 用 meta 水位差实测验证**——若实测计费，须回退空跑语义
+    并在报告标注。响应头若带额度，仍读取并随返回值交调用方落 meta：免费与否，
+    记账面一致才可对照。
+
+    签名镜像 :func:`fetch_odds` 的 ``(payload, quota)`` 口径（派单写 ``list[dict]``，
+    与「仍返回额度头」不可兼得，取后者——额度记账是本修复的验收面）。
+    429 / 其他 HTTP 错误 / 网络异常 / 非 JSON 数组上抛 :class:`OddsApiError`。
+    """
+    api_key, sport_key = _resolve_sport_key(league)
+    payload, headers = _http_get(f"{API_BASE}/{sport_key}/events",
+                                 {"apiKey": api_key})
+    if not isinstance(payload, list):
+        raise OddsApiError("Odds API 事件响应结构异常（应为事件数组）")
+    return payload, _quota_remaining(headers)
+
+
 def best_prices(snaps: list[OddsSnapshot], market: str) -> dict[str, tuple[float, str]]:
     """同一场比赛同一 market 内，各 outcome 的跨 bookmaker 最优（最大）价。
 
@@ -159,6 +178,18 @@ def best_prices(snaps: list[OddsSnapshot], market: str) -> dict[str, tuple[float
 
 
 # ---------------------------------------------------------------- 内部实现
+
+
+def _resolve_sport_key(league: str) -> tuple[str, str]:
+    """key 缺失 / 未知联赛的统一守卫（fetch_odds 与 list_events 同一口径）。"""
+    api_key = odds_api_key()
+    if not api_key:
+        raise OddsApiError("ODDS_API_KEY 未配置")
+    sport_key = ODDS_SPORT_KEYS.get(league)
+    if sport_key is None:
+        known = ", ".join(sorted(ODDS_SPORT_KEYS))
+        raise OddsApiError(f"未知联赛: {league}（可用: {known}）")
+    return api_key, sport_key
 
 
 def _http_get(url: str, params: dict[str, str]) -> tuple[Any, dict[str, str]]:

@@ -6,6 +6,13 @@
 - **am**（11:00 全量）：key 缺失 → ``no_key`` 早退（不触网）；照常拉盘；无当日赛事
   → ``skipped`` 空跑（不渲染不推送）；额度低于 :data:`QUOTA_FLOOR` 只**标注**降级
   ——比赛日本就是拉盘窗，§3.4 要降频的是「非比赛日拉取」，这里没有可跳的步骤。
+- **空跑零额度**（§9.6「无赛事即空跑退出，不耗额度」）：先查库内 52h 窗口的
+  fixture；为空则逐联赛调 :func:`fa.pipeline.odds_api.list_events`（``/events``，
+  不带盘口，文档口径**不计费**）探测，全部联赛都无窗口内事件才空跑——计费的
+  :func:`sync_fixtures` 在确认有赛事之前一次都不发。库内已有窗口内 fixture 时连
+  探测都跳过（零额外请求）；探测自身失败＝「无法确认当日赛程」而非「确认无赛事」，
+  交回常规流程（sync 自己还有降级路径，且不算数据降级）。「免费」这一文档口径由
+  E2E 用 meta 水位差实测验证，见 :func:`_probe_events`。
 - **pm**（17:00 更新版）：额度低于水位 → **跳过拉盘**、复用 am 已落库快照（§9.5
   「额度耗尽 → 跳过拉盘、用最近快照并标注」）；报告走 ``render_pm_update`` 对照
   当日最近一次成功的 am run；当日没有 am run 就回退全量报告（phase='pm'）。
@@ -29,10 +36,10 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
 from fa.config import odds_api_key
-from fa.db import get_meta
+from fa.db import get_meta, set_meta
 from fa.model.fit import FitConfig, training_rows
 from fa.pipeline.fixtures import QUOTA_META_KEY, sync_fixtures
-from fa.pipeline.odds_api import OddsApiError
+from fa.pipeline.odds_api import OddsApiError, list_events
 from fa.pipeline.paper import place_paper_bets
 from fa.pipeline.reporting import (last_error, render_matchday_report,
                                    render_pm_update, send)
@@ -88,6 +95,38 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
             + ("跳过拉盘，复用最近快照（非实时盘）" if phase == "pm"
                else "比赛日照常拉盘，仅标注水位"))
 
+    # pm 的报告对照「当日最近一次成功的 am run」；当日没有 am run 就回退全量报告
+    am_run_id = _latest_am_run(conn, _today()) if phase == "pm" else None
+    report = "pm_update" if am_run_id is not None else "matchday"
+
+    # §9.6「无赛事即空跑退出，不耗额度」：库内窗口为空时先用 /events（文档口径免费）
+    # 探测，确认当日真没有赛事才空跑——计费的 sync_fixtures 绝不前置
+    probe: str | None = None      # None＝库内已有窗口 fixture，连探测都不必发
+    if _window_fixture_count(conn, leagues, now) == 0:
+        found, probe_quota, probe_failed = _probe_events(leagues, now)
+        if probe_failed:
+            # 探测失败＝「无法确认当日赛程」，不是「确认无赛事」：交回常规流程
+            # （宁可贵一次，也不静默漏掉比赛日；sync 自己还有降级路径）。
+            # 不算数据降级——质量无损，只是没省到额度，故记 probe 而非 degraded_reasons
+            probe = "unavailable"
+        elif not found:
+            quota_left = quota_before if probe_quota is None else probe_quota
+            if probe_quota is not None:
+                # 探测若真带回额度头，照记账——E2E 据水位差验证该端点是否真免费
+                set_meta(conn, QUOTA_META_KEY, str(probe_quota))
+            finish_run(conn, run_id, STATUS_SKIPPED, {
+                "phase": phase, "leagues": leagues,
+                "fixtures": 0, "quota_left": quota_left,
+                "probe": "events",
+                "skip_reason": "52h 窗口内无当日赛事（/events 探测证实）——"
+                               "未拉盘、未推荐、未落注、未推送",
+                "telegram": None,
+            }, credits_after=quota_left)
+            return _result(STATUS_SKIPPED, run_id, phase, quota_left=quota_left,
+                           degraded=bool(reasons))
+        else:
+            probe = "found"
+
     sync = None
     if not (phase == "pm" and low):                  # pm 降级才跳过拉盘
         try:
@@ -95,22 +134,6 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         except OddsApiError as exc:
             reasons.append(f"Odds API 拉盘失败：{exc}；复用最近快照（非实时盘）")
     quota_left = sync["quota_left"] if sync else quota_before
-    # pm 的报告对照「当日最近一次成功的 am run」；当日没有 am run 就回退全量报告
-    am_run_id = _latest_am_run(conn, _today()) if phase == "pm" else None
-    report = "pm_update" if am_run_id is not None else "matchday"
-
-    if _window_fixture_count(conn, leagues, now) == 0:
-        finish_run(conn, run_id, STATUS_SKIPPED, {
-            "phase": phase, "leagues": leagues,
-            "fixtures": sync["fixtures"] if sync else 0,
-            "quota_left": quota_left,
-            "skip_reason": "52h 窗口内无当日赛事——未推荐、未落注、未推送",
-            "telegram": None,
-        }, credits_after=quota_left)
-        return _result(STATUS_SKIPPED, run_id, phase,
-                       fixtures=sync["fixtures"] if sync else 0,
-                       unknown=sync["unknown"] if sync else [],
-                       quota_left=quota_left, degraded=bool(reasons))
 
     rec_ids = generate_recommendations(conn, leagues, phase, run_id)
     placed = place_paper_bets(conn, run_id)
@@ -132,6 +155,8 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         "am_run_id": am_run_id,
         "report": report,
     }
+    if probe:
+        summary["probe"] = probe        # found / unavailable；缺省＝库内已有赛事
     # 报告必须在**本相位内**即时渲染推送（run_id 归因=最后刷新者，见模块 docstring）
     if report == "pm_update":
         text = render_pm_update(conn, am_run_id, run_id, quota_left, bool(reasons))
@@ -192,6 +217,37 @@ def _window_fixture_count(conn: sqlite3.Connection, leagues: list[str],
         if kickoff is not None and now <= kickoff <= end:
             n += 1
     return n
+
+
+def _probe_events(leagues: list[str],
+                  now: datetime) -> tuple[bool, int | None, bool]:
+    """逐联赛调 :func:`list_events`（``/events``，无盘口）确认当日是否真有赛事。
+
+    返回 ``(窗口内是否有事件, 探测读到的额度或 None, 是否有联赛探测失败)``。判空
+    须**全部联赛都探测成功且都无窗口内事件**——任何一档失败都算「无法确认」，
+    交回常规流程（宁可贵一次拉盘，也不静默漏掉比赛日）。窗口口径与
+    :func:`_window_fixture_count` 同一条（``WINDOW_HOURS`` / ``_parse_kickoff``）。
+
+    额度头即使探测端点免费也照读回传：调用方落 meta，E2E 才能用水位差实证
+    「/events 不计费」这一文档口径（若实测计费，须回退空跑语义）。
+    """
+    end = now + timedelta(hours=WINDOW_HOURS)
+    quotas: list[int] = []
+    found = False
+    failed = False
+    for league in leagues:
+        try:
+            events, quota = list_events(league)
+        except OddsApiError:
+            failed = True
+            continue
+        if quota is not None:
+            quotas.append(int(quota))
+        for event in events:
+            kickoff = _parse_kickoff((event or {}).get("commence_time"))
+            if kickoff is not None and now <= kickoff <= end:
+                found = True
+    return found, (min(quotas) if quotas else None), failed
 
 
 def _latest_am_run(conn: sqlite3.Connection, day: date) -> int | None:
