@@ -1,0 +1,49 @@
+"""线 A 落库（设计 §6）：UNIQUE(match_id, line) 幂等 upsert。"""
+import json
+import sqlite3
+from datetime import datetime, timezone
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def save_prediction(conn: sqlite3.Connection, match_id: int, line: str,
+                    parsed: dict, raw_output: str, harness: str,
+                    model: str, duration_s: float) -> int:
+    conn.execute(
+        "INSERT INTO agentline_predictions (match_id, line, p_home, p_draw,"
+        " p_away, p_over25, confidence, reasoning_digest, sources_json,"
+        " raw_output, status, repaired, harness, model, duration_s, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(match_id, line) DO UPDATE SET"
+        " p_home=excluded.p_home, p_draw=excluded.p_draw,"
+        " p_away=excluded.p_away, p_over25=excluded.p_over25,"
+        " confidence=excluded.confidence,"
+        " reasoning_digest=excluded.reasoning_digest,"
+        " sources_json=excluded.sources_json, raw_output=excluded.raw_output,"
+        " status=excluded.status, repaired=excluded.repaired,"
+        " harness=excluded.harness, model=excluded.model,"
+        " duration_s=excluded.duration_s, created_at=excluded.created_at",
+        (match_id, line, parsed["p_home"], parsed["p_draw"], parsed["p_away"],
+         parsed["p_over25"], parsed["confidence"], parsed["reasoning_digest"],
+         parsed["sources_json"], raw_output, parsed["status"],
+         int(parsed["repaired"]), harness, model, duration_s, _now()))
+    conn.commit()
+    row = conn.execute(
+        "SELECT id FROM agentline_predictions"
+        " WHERE match_id=? AND line=?", (match_id, line)).fetchone()
+    return row["id"]
+
+
+def save_run(conn, line: str, profile: str, model: str | None,
+             counts: dict, summary: dict) -> int:
+    cur = conn.execute(
+        "INSERT INTO agentline_runs (line, profile, model, n_ok,"
+        " n_parse_fail, n_timeout, n_error, started_at, finished_at, summary)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        (line, profile, model, counts.get("ok", 0), counts.get("parse_fail", 0),
+         counts.get("timeout", 0), counts.get("error", 0), _now(), _now(),
+         json.dumps(summary, ensure_ascii=False)))
+    conn.commit()
+    return cur.lastrowid

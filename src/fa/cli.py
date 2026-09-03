@@ -175,6 +175,55 @@ def _list_unknown(conn, source: str, league: str | None, top: int) -> None:
     typer.echo(f"确认方式：fa data aliases --confirm \"TEAM_ID=别名\"（建议范围：{scope}）")
 
 
+# ---- 线 A：dsh agent 当大脑（spec §12.5）------------------------------------
+
+agentline_app = typer.Typer(help="范式对比线（spec §12.5）——线 A：dsh agent 当大脑")
+app.add_typer(agentline_app, name="agentline")
+
+
+@agentline_app.command("export")
+def agentline_export(league: str = typer.Option(...), season: int = typer.Option(...),
+                     n: int = typer.Option(30), seed: int = typer.Option(42)) -> None:
+    """抽样并导出信息集 JSON（幂等，已存在跳过）"""
+    from fa.agentline.export import export_batch, pick_sample
+    from fa.config import project_root
+    conn = connect()
+    ids = pick_sample(conn, league, season, n, seed)
+    written = export_batch(conn, ids, project_root() / "data" / "agentline")
+    conn.close()
+    typer.echo(f"样本 {len(ids)} 场，新导出 {len(written)} 个信息集"
+               f"（data/agentline/）")
+
+
+@agentline_app.command("run")
+def agentline_run(line: str = typer.Option(..., help="A_base 或 A_enh"),
+                  limit: int = typer.Option(None)) -> None:
+    """跑一批线 A 预测（幂等续跑：只补无 ok 行的场次）"""
+    from fa.agentline.orchestrate import run_line
+    from fa.config import project_root
+    if line not in ("A_base", "A_enh"):
+        typer.echo(f"line 必须是 A_base 或 A_enh，收到 {line}")
+        raise typer.Exit(2)
+    conn = connect()
+    counts = run_line(conn, line, project_root() / "data" / "agentline", limit)
+    conn.close()
+    typer.echo(f"line={line} 完成：{counts}")
+
+
+@agentline_app.command()
+def runs() -> None:
+    """线 A 运行台账"""
+    conn = connect()
+    for r in conn.execute(
+            "SELECT id, line, n_ok, n_parse_fail, n_timeout, n_error,"
+            " started_at, summary FROM agentline_runs"
+            " ORDER BY id DESC LIMIT 20"):
+        typer.echo(f"#{r['id']} {r['line']} ok={r['n_ok']} "
+                   f"parse_fail={r['n_parse_fail']} timeout={r['n_timeout']} "
+                   f"error={r['n_error']} @{r['started_at']}")
+    conn.close()
+
+
 backtest_app = typer.Typer(help="回测")
 app.add_typer(backtest_app, name="backtest")
 
