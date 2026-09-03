@@ -33,6 +33,28 @@ def test_run_line_full_chain(db, tmp_path, monkeypatch):
     assert run_line(db, "A_base", tmp_path)["ok"] == 0
 
 
+def test_run_line_skips_non_numeric_json_stems(db, tmp_path, monkeypatch):
+    """杂散 JSON（如 agent 写散的 notes.json）不得毁掉整批，也不得当成 match_id。"""
+    info = {"match": {"league": "E0", "season": 2023, "date": "2024-02-01",
+                      "home": "Arsenal", "away": "Chelsea"}, "odds": {}}
+    (tmp_path / "10.json").write_text(json.dumps(info), encoding="utf-8")
+    (tmp_path / "notes.json").write_text(json.dumps({"note": "x"}), encoding="utf-8")
+    calls = []
+
+    def fake_run(prompt, profile, timeout_s=None):
+        calls.append(prompt)
+        return ('{"p_home": 0.4, "p_draw": 0.3, "p_away": 0.3, "p_over25": 0.5,'
+                ' "confidence": 0.5, "reasoning_digest": "r", "sources": []}',
+                None, 0.1)
+
+    monkeypatch.setattr(runner_mod, "run_headless", fake_run)
+    counts = run_line(db, "A_base", tmp_path)
+    assert counts["ok"] == 1 and len(calls) == 1          # 只处理数字命名的 10.json
+    ids = [r["match_id"] for r in db.execute(
+        "SELECT match_id FROM agentline_predictions")]
+    assert ids == [10]
+
+
 def test_run_line_degrades_when_dsh_dead(db, tmp_path, monkeypatch):
     (tmp_path / "10.json").write_text(
         json.dumps({"match": {"date": "2024-02-01"}, "odds": {}}),

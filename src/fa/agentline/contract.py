@@ -31,8 +31,16 @@ def parse_prediction(raw: str, repaired_ok: bool = False) -> dict:
             "p_away": None, "p_over25": None, "confidence": None,
             "reasoning_digest": "", "sources_json": "[]",
             "repaired": repaired_ok}
+    repaired = repaired_ok                   # 显式覆盖优先；默认路径自行判定
     try:
-        obj = _extract_json(raw)
+        try:
+            obj = json.loads(raw.strip())    # 直解优先：纯净输出不算救援
+        except json.JSONDecodeError:
+            # 直解失败才走救援提取（剥围栏/前后杂文字）。救援成功 = 模型输出了
+            # 非纯净 JSON，必须记 repaired=True——救援率是设计标注的实验性观测
+            # 数据，之前恒记 0 等于把 60%→100% 的差异抹掉（spike 附录 A）。
+            obj = _extract_json(raw)
+            repaired = True
         ph, pd, pa = (float(obj["p_home"]), float(obj["p_draw"]),
                       float(obj["p_away"]))
         po = float(obj["p_over25"])
@@ -53,7 +61,7 @@ def parse_prediction(raw: str, repaired_ok: bool = False) -> dict:
                 "reasoning_digest": str(obj.get("reasoning_digest", ""))[:200],
                 "sources_json": json.dumps(obj.get("sources", []),
                                            ensure_ascii=False),
-                "repaired": repaired_ok}
+                "repaired": repaired}
     except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
         fail["reasoning_digest"] = f"parse_fail 原因：{type(exc).__name__}: {exc}"
         return fail

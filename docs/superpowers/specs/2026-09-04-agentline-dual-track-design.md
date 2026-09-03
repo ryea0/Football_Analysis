@@ -273,7 +273,7 @@ llm-pi-ai:
 
 `dsh --profile fa-agent-base --dump-config` 验证合成结果为 `provider: ark / model: ark-code-latest`；`--dump-default-config` 确认 base 层仍为 `deepseek-official`（patch 只动用户层 ✔）。
 
-**③ key 注入方式**：`export ARK_API_KEY=ark-12005144…` 于启动 dsh 的进程环境（来源：`/home/ryea0/.hermes/config.yaml` 的 `model.api_key`，Hermes 同源同凭证；该文件另见 `base_url`/`api_mode: codex_responses`——**Hermes 走 responses，dsh 走 completions，两者互不影响**）。仅 export 不写盘；fa 侧由既有 `.env` 加载层注入。
+**③ key 注入方式**：`export ARK_API_KEY=ark-****`（完整前缀无必要，写盘文档一律脱敏）于启动 dsh 的进程环境（来源：`/home/ryea0/.hermes/config.yaml` 的 `model.api_key`，Hermes 同源同凭证；该文件另见 `base_url`/`api_mode: codex_responses`——**Hermes 走 responses，dsh 走 completions，两者互不影响**）。仅 export 不写盘；fa 侧由既有 `.env` 加载层注入。
 
 **试错记录**：无（一次配通）。曾担心的两点均不成立——plan/v3 接受 `max_tokens`+`system` 角色；`llm-pi-ai` 的 hand-declared route 直接吃 OpenAI 兼容网关。
 
@@ -389,3 +389,24 @@ profile 正常启动并产出合法 JSON。**但 `sources` 为空 ⇒ 本次运�
 - 成本量级：20 场 headless 会话总耗时 ≈ 15.5 分钟（base 3 批共 ≈5.2 min + enh ≈10.2 min），
   与设计 §7「百场量级成本个位数人民币」的估算相容。
 - 对比报告（首份）：`docs/agentline/compare-20260904.md`（n=10/线，市场为对照线）。
+
+---
+
+## 14. 按构建勘误（as-built notes）
+
+实现与计划的四处偏差，以本节为准（正文不再回改，保持设计阶段的原始决策可追溯）：
+
+- **§4 容差实为 ±0.05**：计划写 ±0.01，实现时放宽（`contract.py` 的 `_SUM_TOL=0.05`）；
+  超差按比例归一、容差内不动（避免无谓扰动 agent 的原始判断）；归一前的原始输出
+  可在 `raw_output` 复核，另设审计字段记录归一这一点未实现。
+- **§6 表列以实现为准**：`agentline_predictions` 没有 league/season/date 冗余列
+  （计划表把这四列并成一行「id, match_id, league, season, date」）——线 A 行只有
+  `id + match_id`，跨线对齐与联赛/赛季/日期一律经 `match_id` join
+  `backtest_predictions` 取得（`compare.py` 的 `_fetch_agent` 即按此实现）。
+- **§5.2 来源审计实现为计数**：`fa agentline compare` 的 audit 落为
+  `enh_sources` 条数计数（报告在 sources 全空时自行告警「检索未触发」）；
+  「逐条 `sources[].date` 早于比赛日」的抽查属后续任务，本批未实现。
+- **`repaired` 语义为「直解失败经提取救援成功」**：`parse_prediction` 先
+  `json.loads` 直解，失败才走围栏剥离/平衡花括号提取，救援成功记 `repaired=1`、
+  直解成功恒为 0——救援率因此才可观测（spike：裸 JSON 率 60%、救援后 100%）；
+  dsh-translate 的修复层只作用于工具调用、不覆盖 final message（附录 A.4），与本字段无关。

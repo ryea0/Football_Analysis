@@ -23,6 +23,8 @@ def conn(tmp_path):
 
 # B 线五表（schema v3）：表边界见 spec §12.1——B 线独占，绝不写 backtest_predictions
 _BLINE_TABLES = ("fixtures", "odds_snapshots", "recommendations", "bets", "runs")
+# 范式对比线两表（schema v4）：线 A 专属，物理隔离分账（spec §12.5）
+_AGENTLINE_TABLES = ("agentline_predictions", "agentline_runs")
 
 
 def _table_cols(c, table: str) -> dict:
@@ -333,10 +335,11 @@ def test_migrate_and_fresh_schemas_match(tmp_path):
     init_db(tmp_path / "a.db")                      # 全新库
     init_db(tmp_path / "b.db")                      # 降到 v1 再升级回当前版本
     _set_version(tmp_path / "b.db", 1,
-                 drop=("backtest_predictions", *_BLINE_TABLES))
+                 drop=("backtest_predictions", *_BLINE_TABLES,
+                       *_AGENTLINE_TABLES))
     init_db(tmp_path / "b.db")
 
-    tables = ("backtest_predictions", *_BLINE_TABLES)
+    tables = ("backtest_predictions", *_BLINE_TABLES, *_AGENTLINE_TABLES)
     a = connect(tmp_path / "a.db")
     b = connect(tmp_path / "b.db")
     for t in tables:

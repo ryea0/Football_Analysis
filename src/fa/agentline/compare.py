@@ -44,12 +44,14 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
     # 线 P 行直接复用回测读取器（联赛/赛季过滤语义单点维护）
     from fa.backtest.metrics import fetch_predictions
     bp = fetch_predictions(conn, leagues, seasons)
-    cmp = {"n": len(bp), "P": evaluate(bp),
-           "market": {"ll": evaluate(bp)["market_ll"]}}
+    e_p = evaluate(bp)                      # 只评一次：market 列与 P 行共用同一份
+    cmp = {"n": len(bp), "P": e_p,
+           "market": {"ll": e_p["market_ll"]}}
     roi_rows = {"P": bp}
     for line in ("A_base", "A_enh"):
         ag = _fetch_agent(conn, line, leagues, seasons)
         rows = merge_rows(bp, ag)
+        # evaluate 自带该子集的 market_ll——报告按行展示，分母不再混用全量值
         cmp[line] = evaluate(rows) if rows else {"n": 0}
         roi_rows[line] = rows
     cmp["roi"] = {k: simulate_flat(candidates(v)) if v else {"n": 0}
@@ -60,26 +62,40 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
     return cmp
 
 
+_FOOTNOTE = ("> 各行比值在其自身 n 场子集内计算，跨线直比无效；"
+             "n<100 的行为链路验证样本，数字无统计意义")
+
+
 def render_report(cmp: dict, out_path: Path) -> None:
-    """滚动对比报告（设计 §8）：诚实标注增强层泄漏限制。"""
+    """滚动对比报告（设计 §8）：诚实标注增强层泄漏限制与小样本边界。"""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = [f"# 双路对比滚动报告（生成于 {now}）", "",
              f"样本 n={cmp['n']}（线 P 与线 A 交集见各线 n）", "",
-             "| 线 | n | log-loss | Brier | vs 市场 |",
-             "|---|---|---|---|---|"]
+             "| 线 | n | log-loss | Brier | 子集市场 ll | vs 子集市场 |",
+             "|---|---|---|---|---|---|"]
     for k in ("P", "A_base", "A_enh"):
         e = cmp[k]
         if e.get("n"):
+            # vs 值与市场 ll 都取自同一行 dict（该线自己的 n 场子集），
+            # 不与全量市场行并排混排——避免「同一张表两套分母」的误读。
             lines.append(f"| {k} | {e['n']} | {e['model_ll']:.4f} | "
-                         f"{e['model_brier']:.4f} | {e['ratio']:.3f}× |")
+                         f"{e['model_brier']:.4f} | {e['market_ll']:.4f} | "
+                         f"{e['ratio']:.3f}× |")
         else:
-            lines.append(f"| {k} | 0 | — | — | — |")
-    lines.append(f"| 市场 | {cmp['n']} | {cmp['market']['ll']:.4f} | — | 1.000× |")
+            lines.append(f"| {k} | 0 | — | — | — | — |")
+    lines.append(f"| 市场 | {cmp['n']} | {cmp['market']['ll']:.4f} | — | "
+                 f"{cmp['market']['ll']:.4f} | 1.000× |")
     lines += ["", "## 平注 ROI", ""]
     for k, v in cmp["roi"].items():
         lines.append(f"- {k}: n={v['n']} roi={v['roi']:+.1%}"
                      if v.get("n") else f"- {k}: 无候选注")
     lines += ["", "> ⚠️ A_enh（增强层）为历史回放检索，可能受赛后信息泄漏污染"
-              "（缓解措施与抽查见设计 §5.2）——其结论不与 A_base 混排。", ""]
+              "（缓解措施与抽查见设计 §5.2）——其结论不与 A_base 混排。"]
+    # 审计数字要渲染出来才算审计：sources 计数为 0 而 A_enh 有样本时，说明增强层
+    # 的检索从未触发——两线差异只能是采样噪声，必须自己说破（E2E 实证 10/10 全空）。
+    if cmp.get("audit", {}).get("enh_sources") == 0 and cmp["A_enh"].get("n"):
+        lines += ["", "> ⚠️ 增强层检索未触发（sources 全空）——"
+                     "A_enh 与 A_base 差异为采样噪声，非检索增量。"]
+    lines += ["", _FOOTNOTE, ""]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")

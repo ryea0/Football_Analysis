@@ -6,11 +6,15 @@
 参数形态以设计文档附录 A（spike 实测）为唯一权威；若附录 A 与本文件的
 默认假设不符，改这里并保持测试同步。
 """
+import shutil
 import subprocess
+import tempfile
 import time
 
 _DSH = "dsh"
-_TIMEOUT_S = 300          # 单场 headless 会话上限；附录 A 的实测耗时应远小于此
+# 单场 headless 会话上限：首批 E2E 的 A_enh 单场实测 198.4s（检索尚未触发就已占
+# 旧上限 300s 的 2/3）——提到 600s 给检索真正触发后的余量，超时仍是降级不抛。
+_TIMEOUT_S = 600
 LAST_DSH_ERROR: str | None = None
 
 _PROFILE_LINE = {"A_base": "fa-agent-base", "A_enh": "fa-agent-enh"}
@@ -47,9 +51,12 @@ def run_headless(prompt: str, profile: str,
     """跑一次 headless 会话。返回 (stdout, error, duration_s)，失败不抛。"""
     global LAST_DSH_ERROR
     cmd = [_DSH, "--profile", profile, prompt]    # ← 附录 A 若非此形态，改这里
+    # agent 自带文件工具（可写盘）：不传 cwd 时子进程继承 fa 仓库根，首批 E2E
+    # 实证它把 prediction.json 落进了项目目录——每场给一个一次性 scratch 目录隔离。
+    scratch = tempfile.mkdtemp(prefix="fa-agentline-")
     t0 = time.monotonic()
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=scratch,
                               timeout=timeout_s or _TIMEOUT_S)
     except subprocess.TimeoutExpired:
         LAST_DSH_ERROR = f"dsh headless 超时（{timeout_s or _TIMEOUT_S}s）"
@@ -60,6 +67,9 @@ def run_headless(prompt: str, profile: str,
     except Exception as exc:
         LAST_DSH_ERROR = f"{type(exc).__name__}: {exc}"
         return None, LAST_DSH_ERROR, time.monotonic() - t0
+    finally:
+        # 产物走 stdout 被 capture_output 收走，scratch 即抛即清（降级路径同样清）
+        shutil.rmtree(scratch, ignore_errors=True)
     dur = time.monotonic() - t0
     if proc.returncode != 0:
         LAST_DSH_ERROR = f"dsh 退出码 {proc.returncode}：{proc.stderr[:200]}"

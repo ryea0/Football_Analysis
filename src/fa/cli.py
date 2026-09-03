@@ -228,18 +228,29 @@ def runs() -> None:
 def compare(league: str = typer.Option(None), season: int = typer.Option(None),
             out: str = typer.Option(None)) -> None:
     """三线对比滚动报告（docs/agentline/compare-YYYYMMDD.md）"""
-    from datetime import date
+    from datetime import datetime, timezone
     from pathlib import Path
 
     from fa.agentline.compare import compare_lines, render_report
     from fa.config import project_root
     conn = connect()
-    cmp = compare_lines(conn,
-                        [league] if league else None,
-                        [season] if season else None)
+    try:
+        cmp = compare_lines(conn,
+                            [league] if league else None,
+                            [season] if season else None)
+    except (ValueError, sqlite3.OperationalError) as exc:
+        # 空表（evaluate 抛 ValueError）与未迁移（表不存在 → OperationalError）
+        # 都是可预期的初装状态，给友好出口而非 traceback（先例：_a_line_summary）。
+        conn.close()
+        typer.echo(f"对比报告未生成：无预测行——先跑回测，或数据库未迁移"
+                   f"（先 fa init）（{exc}）")
+        raise typer.Exit(code=1)
     conn.close()
+    # 文件名与报告内时间戳统一 UTC：compare-YYYYMMDD 不随本机时区漂移，
+    # 报告首行的「生成于 … UTC」才能对得上同一个文件名。
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     p = Path(out) if out else (
-        project_root() / "docs" / "agentline" / f"compare-{date.today():%Y%m%d}.md")
+        project_root() / "docs" / "agentline" / f"compare-{stamp}.md")
     render_report(cmp, p)
     typer.echo(f"报告已写：{p}")
 

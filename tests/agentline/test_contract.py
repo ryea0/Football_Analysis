@@ -18,6 +18,22 @@ def test_strips_markdown_fence_and_text_around():
     raw = "分析如下……\n```json\n" + _OK + "\n```\n以上。"
     r = parse_prediction(raw)
     assert r["status"] == "ok"
+    # 救援路径（直解失败→提取成功）必须如实记 repaired=True：救援率是设计标注的
+    # 实验性观测数据，此前恒为 0 等于把指标测死（spike：60%→100% 的差异被抹掉）。
+    assert r["repaired"] is True
+
+
+def test_wrapped_in_prose_without_fence_is_repaired_too():
+    r = parse_prediction("结论：" + _OK + " 以上。")
+    assert r["status"] == "ok" and r["repaired"] is True
+
+
+def test_bare_json_is_not_repaired():
+    # 直解一次成功 = 模型输出了纯净 JSON，不得记成救援（否则指标虚高）。
+    r = parse_prediction(_OK)
+    assert r["repaired"] is False
+    # 显式覆盖（repaired_ok=True）仍然生效——调用方可以强制标记。
+    assert parse_prediction(_OK, repaired_ok=True)["repaired"] is True
 
 
 def test_sums_renormalized():

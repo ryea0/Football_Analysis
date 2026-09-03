@@ -1,6 +1,5 @@
 """信息集打包（设计 §5.1）：防泄漏是结构性约束——一切查询以 date < match_date 为界。"""
 import json
-import sqlite3
 
 import pytest
 

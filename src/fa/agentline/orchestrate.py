@@ -34,8 +34,10 @@ def run_line(conn: sqlite3.Connection, line: str, info_dir: Path,
     done = {r["match_id"] for r in conn.execute(
         "SELECT match_id FROM agentline_predictions"
         " WHERE line=? AND status='ok'", (line,))}
-    todo = sorted((int(p.stem) for p in info_dir.glob("*.json")
-                   if int(p.stem) not in done))
+    # 防呆：目录里混进非 match_id 命名的 JSON（杂散文件/agent 写散的产物）直接
+    # 跳过——int() 一次 ValueError 就会让整批跑不下去。
+    todo = sorted(int(p.stem) for p in info_dir.glob("*.json")
+                  if p.stem.isdigit() and int(p.stem) not in done)
     if limit is not None:
         todo = todo[:limit]
     counts = {"ok": 0, "parse_fail": 0, "timeout": 0, "error": 0}
