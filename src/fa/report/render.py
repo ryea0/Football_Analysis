@@ -22,6 +22,14 @@ _DEFAULT_HALF_LIFE = FitConfig.half_life_days
 
 _MARKET = {"H": "主胜", "D": "平局", "A": "客胜", "O2.5": "大2.5"}
 
+# §6.6 A/B 双轨：recommendations 的 UNIQUE(fixture_id, market, strategy, phase)
+# 允许两套 strategy 对同一 (fixture, market) 并存——键与展示都必须区分，
+# 否则 M4 上线后 am 全量报告丢行、pm diff 跨轨配价。
+_STRATEGY = {"model_only": "纯模型", "model_persona": "模型+persona"}
+
+# 价格比较容差：best_odds 经 JSON/浮点往返，1e-9 级差异视为未变，不产假「盘口移动」
+_ODDS_EPS = 1e-9
+
 # run summary 的样本量键名尚未被 T9 钉死（并行流），按常见命名容错识别；
 # 只认语义明确的训练样本键，避免把「场次数」误当样本量。
 # 都缺失时给中性占位，报告骨架不缺行。
@@ -122,21 +130,34 @@ def _mkt(rec):
     return _MARKET.get(rec["market"], rec["market"])
 
 
+def _strategy(rec):
+    return _STRATEGY.get(rec["strategy"], rec["strategy"])
+
+
 def _candidate_table(recs):
-    """§7.1 第 1 条：市场/赔率/模型 p vs 市场 p/EV/仓位。"""
-    header = ("| 联赛 | 场次 | 市场 | 最优价 | 模型 p | 市场 p | EV | 仓位 | "
-              "博彩商 |")
-    sep = "|---|---|---|---|---|---|---|---|---|"
+    """§7.1 第 1 条：市场/赔率/模型 p vs 市场 p/EV/仓位（+ 策略列，A/B 双轨）。"""
+    header = ("| 联赛 | 场次 | 市场 | 策略 | 最优价 | 模型 p | 市场 p | EV "
+              "| 仓位 | 博彩商 |")
+    sep = "|---|---|---|---|---|---|---|---|---|---|"
     rows = [
-        f"| {r['league']} | {_label(r)} | {_mkt(r)} | {r['best_odds']:.2f} "
-        f"| {r['model_p']:.3f} | {r['market_p']:.3f} | {r['ev']:+.2%} "
-        f"| {r['kelly_stake_frac']:.2%} | {r['bookmaker']} |"
+        f"| {r['league']} | {_label(r)} | {_mkt(r)} | {_strategy(r)} "
+        f"| {r['best_odds']:.2f} | {r['model_p']:.3f} | {r['market_p']:.3f} "
+        f"| {r['ev']:+.2%} | {r['kelly_stake_frac']:.2%} | {r['bookmaker']} |"
         for r in recs]
     return [header, sep] + rows
 
 
 def _key(rec):
-    return (rec["fixture_id"], rec["market"])
+    """pm diff 配对键：必须含 strategy——model_only 与 model_persona 各自成轨，
+    跨轨不得互相配价（M4 落 model_persona 行后尤其如此）。"""
+    return (rec["fixture_id"], rec["market"], rec["strategy"])
+
+
+def _clv_note(am_odds, pm_odds):
+    """pm 价作收盘近似的 CLV 预览；pm 价非正（脏数据）→ 跳过，不除零。"""
+    if pm_odds > 0:
+        return f"（CLV 预览 {am_odds / pm_odds - 1:+.1%}）"
+    return f"（无效价：pm 价 {pm_odds:.2f} ≤ 0，不计算 CLV）"
 
 
 def _heading(title, n):
@@ -189,7 +210,7 @@ def render_pm_update(conn, am_run_id, pm_run_id, quota_left, degraded):
         p = pm_by.get(k)
         if p is None:
             gone.append(r)
-        elif p["best_odds"] != r["best_odds"]:
+        elif abs(p["best_odds"] - r["best_odds"]) >= _ODDS_EPS:
             moved.append((r, p))
         else:
             unchanged.append(r)
@@ -199,22 +220,23 @@ def render_pm_update(conn, am_run_id, pm_run_id, quota_left, degraded):
 
     lines += _heading("盘口移动", len(moved))
     lines += [
-        f"- {r['league']} {_label(r)} · {_mkt(r)}："
-        f"{r['best_odds']:.2f} → {p['best_odds']:.2f}"
-        f"（CLV 预览 {r['best_odds'] / p['best_odds'] - 1:+.1%}）"
+        f"- {r['league']} {_label(r)} · {_mkt(r)} · {_strategy(r)}："
+        f"{r['best_odds']:.2f} → {p['best_odds']:.2f} "
+        f"{_clv_note(r['best_odds'], p['best_odds'])}"
         for r, p in moved] or ["- 无"]
     lines.append("")
 
     lines += _heading("新增候选", len(added))
     lines += [
-        f"- {r['league']} {_label(r)} · {_mkt(r)} @ {r['best_odds']:.2f}，"
-        f"EV {r['ev']:+.2%}，仓位 {r['kelly_stake_frac']:.2%}"
+        f"- {r['league']} {_label(r)} · {_mkt(r)} · {_strategy(r)} "
+        f"@ {r['best_odds']:.2f}，EV {r['ev']:+.2%}，"
+        f"仓位 {r['kelly_stake_frac']:.2%}"
         for r in added] or ["- 无"]
     lines.append("")
 
     lines += _heading("已消失", len(gone))
     lines += [
-        f"- {r['league']} {_label(r)} · {_mkt(r)}"
+        f"- {r['league']} {_label(r)} · {_mkt(r)} · {_strategy(r)}"
         f"（am @ {r['best_odds']:.2f}）——已消失"
         for r in gone] or ["- 无"]
     lines.append("")

@@ -249,7 +249,7 @@ def test_pm_update_does_not_resend_full_list(conn):
     assert "候选场次（" not in out                # am 全量表头不出现
     assert out.count("Arsenal vs Chelsea") == 0   # 未变候选不成行
     assert "未变" in out and "2" in out
-    assert "盘口移动" in out and "无" in out
+    assert "## 盘口移动（0）" in out
     assert "persona 未接入（M4）" in out
 
 
@@ -277,9 +277,9 @@ def test_pm_update_no_change(conn):
     _rec(conn, pm, _fid(conn, "ev-2"), "O2.5", "pm", 1.85)
     conn.commit()
     out = render_pm_update(conn, am, pm, 430, False)
-    assert "盘口移动" in out and "无" in out
-    assert "新增候选" in out and "无" in out
-    assert "已消失" in out and "无" in out
+    assert "## 盘口移动（0）" in out
+    assert "## 新增候选（0）" in out
+    assert "## 已消失（0）" in out
 
 
 def test_pm_update_quota_and_degraded(conn):
@@ -344,3 +344,116 @@ def test_pm_update_survives_unreadable_am_summary(conn):
     out = render_pm_update(conn, am, pm, 430, False)
     assert "样本量" in out
     assert "盘口移动" in out
+
+
+# ------------------------------------------------- A/B 双轨（M4 前向）
+
+
+def _persona_rec(conn, run_id, fixture_id, market, phase, best_odds):
+    conn.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " created_at) VALUES (?,?,'model_persona',?,?,?,?,?,'pinnacle',0.07,0.10,"
+        "0.020,'2026-09-03T03:00:00Z')",
+        (run_id, fixture_id, market, phase, 0.550, 0.460, best_odds))
+
+
+def test_am_report_two_strategies_same_market_render_distinctly(conn):
+    """M4 前向：同 (fixture, market) 两套 strategy 必须各自成行，不得互相覆盖。
+
+    DDL UNIQUE(fixture_id, market, strategy, phase) 允许 model_only 与
+    model_persona 并存——报告若按 (fixture_id, market) 键去重会丢行。
+    """
+    rid = _run(conn, "am")
+    fid = _fid(conn, "ev-1")
+    _rec(conn, rid, fid, "H", "am", 2.10)
+    _persona_rec(conn, rid, fid, "H", "am", 2.05)
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "候选场次" in out and "（2）" in out
+    assert out.count("Arsenal vs Chelsea") == 2      # 两行都在，未覆盖
+    assert "纯模型" in out and "模型+persona" in out
+    assert "2.10" in out and "2.05" in out
+
+
+def test_pm_diff_does_not_pair_across_strategies(conn):
+    """am=model_only / pm=model_persona 不得互相配对：应表现为 已消失+新增。"""
+    am = _am_with_two(conn)                          # ev-1 H model_only @2.10
+    pm = _run(conn, "pm")
+    _persona_rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", 2.20)
+    conn.commit()
+    out = render_pm_update(conn, am, pm, 430, False)
+    assert "## 盘口移动（0）" in out                  # 不得跨 strategy 配成「移动」
+    assert "2.10 → 2.20" not in out                  # 无跨轨 CLV 配对
+    assert "已消失" in out and "Arsenal" in out      # am model_only 无 pm 对应
+    assert "## 新增候选（1）" in out                  # pm model_persona 是新增
+    assert "2.20" in out
+
+
+# ------------------------------------------------- 降级分支（T4/T7 交互）
+
+
+def test_am_report_unaligned_fixture_never_renders_none(conn):
+    """fixtures.team_id 双 NULL（spec §3.3 未对齐）→ 回退 event_key 标注。"""
+    rid = _run(conn, "am")
+    fx = _fixture(conn, "ev-raw", None, None)
+    conn.commit()
+    _rec(conn, rid, fx, "H", "am", 2.10)
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "None" not in out
+    assert "未对齐（ev-raw）" in out
+
+
+def test_am_report_non_numeric_bankroll_renders_neutral(conn):
+    """meta.paper_bankroll 非数字（脏数据）→ 中性占位，不崩也不渲染原值。"""
+    rid = _am_with_two(conn)
+    conn.execute("UPDATE meta SET value='abc' WHERE key='paper_bankroll'")
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "bankroll" in out and "未初始化" in out
+    assert "abc" not in out
+
+
+def test_am_report_empty_string_bankroll_renders_neutral(conn):
+    rid = _am_with_two(conn)
+    conn.execute("UPDATE meta SET value='' WHERE key='paper_bankroll'")
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "未初始化" in out
+
+
+# ------------------------------------------------- pm diff 数值守卫
+
+
+def test_pm_update_zero_pm_price_skips_clv(conn):
+    """pm 价 0（脏数据）→ 不除零，显式「无效价」标注。"""
+    am = _am_with_two(conn)
+    pm = _run(conn, "pm")
+    _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", best_odds=0.0)
+    conn.commit()
+    out = render_pm_update(conn, am, pm, 430, False)
+    assert "盘口移动" in out and "Arsenal vs Chelsea" in out
+    assert "无效价" in out
+    assert "CLV 预览" not in out
+
+
+def test_pm_update_negative_pm_price_skips_clv(conn):
+    am = _am_with_two(conn)
+    pm = _run(conn, "pm")
+    _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", best_odds=-1.0)
+    conn.commit()
+    out = render_pm_update(conn, am, pm, 430, False)
+    assert "无效价" in out
+    assert "CLV 预览" not in out
+
+
+def test_pm_update_sub_epsilon_price_change_counts_as_unchanged(conn):
+    """浮点噪声（abs diff < 1e-9）→ 视为未变，不产假「盘口移动」。"""
+    am = _am_with_two(conn)
+    pm = _run(conn, "pm")
+    _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", best_odds=2.10 + 1e-12)
+    conn.commit()
+    out = render_pm_update(conn, am, pm, 430, False)
+    assert "## 盘口移动（0）" in out
+    assert "未变" in out and "2" in out
