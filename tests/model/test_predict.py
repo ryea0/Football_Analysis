@@ -1,5 +1,4 @@
 import numpy as np
-import pytest
 
 from fa.model.fit import FitConfig, fit_league
 from fa.model.predict import (btts_prob, expected_goals, fit_rho, over25_probs,
@@ -63,3 +62,10 @@ def test_fit_rho_prefers_negative_on_drawy_data():
     rho = fit_rho(rows, "2023-09-01", FitConfig(),
                   lambda h, a: (1.4, 1.1))
     assert rho < 0                                   # 低比分偏多 → 负 ρ
+
+
+def test_fit_rho_flat_window_returns_zero():
+    rows = [{"home": "A", "away": "B", "fthg": 3, "ftag": 2,
+             "date": "2023-08-01"}] * 15              # 无低比分样本 → 似然对 ρ 平坦
+    assert fit_rho(rows, "2023-09-01", FitConfig(),
+                   lambda h, a: (2.0, 1.8)) == 0.0    # 中性 0.0，非网格端点 −0.12

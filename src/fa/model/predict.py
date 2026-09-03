@@ -1,5 +1,3 @@
-from dataclasses import dataclass
-
 import numpy as np
 from scipy.stats import poisson
 
@@ -60,12 +58,14 @@ def btts_prob(m: np.ndarray) -> float:
 
 def fit_rho(rows: list[dict], asof: str, cfg: FitConfig,
             lh_la_fn) -> float:
-    """两阶段 ρ：给定已拟合 λ，网格最大化四格修正的加权对数似然。"""
-    h, a, yh, ya, w, _n = _design_arrays(rows, asof, cfg)
-    teams = sorted({r["home"] for r in rows} | {r["away"] for r in rows})
-    idx = {t: i for i, t in enumerate(teams)}
-    best, best_ll = 0.0, -np.inf
-    for rho in _RHO_GRID:
+    """两阶段 ρ：给定已拟合 λ，网格最大化四格修正的加权对数似然。
+
+    以 ρ=0 为种子：窗口内无低比分样本时似然对 ρ 完全平坦（恒为 0），
+    此时返回中性 0.0 而非网格端点 −0.12。
+    """
+    _h, _a, yh, ya, w, _n = _design_arrays(rows, asof, cfg)
+
+    def _ll(rho: float) -> float:
         ll = 0.0
         for k in range(len(yh)):
             x, y = int(yh[k]), int(ya[k])
@@ -73,6 +73,11 @@ def fit_rho(rows: list[dict], asof: str, cfg: FitConfig,
                 continue
             lh, la = lh_la_fn(rows[k]["home"], rows[k]["away"])
             ll += w[k] * np.log(_tau(x, y, lh, la, rho))
+        return ll
+
+    best, best_ll = 0.0, _ll(0.0)
+    for rho in _RHO_GRID:
+        ll = _ll(rho)
         if ll > best_ll:
             best_ll, best = ll, float(rho)
     return best

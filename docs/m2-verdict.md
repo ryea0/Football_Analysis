@@ -77,6 +77,7 @@
 
 ```bash
 uv run fa init
+uv run fa data sync-history   # data/ 不入库（.gitignore），新 clone 必须先拉历史 CSV 才能复现
 # 主判决（half-life=100，spec 默认）—— 先逐联赛执行留档，再单次干净全量重跑出最终报告
 uv run fa backtest run --from 2019 --to 2025 --leagues E0
 uv run fa backtest run --from 2019 --to 2025 --leagues SP1
@@ -92,6 +93,8 @@ uv run fa backtest run --from 2019 --to 2025 --leagues E0,SP1,D1,I1,F1 --half-li
 # 收尾：以默认 half-life=100 再重跑一次，确保提交的 docs/m2-report.md 为主判决口径
 uv run fa backtest run --from 2019 --to 2025 --leagues E0,SP1,D1,I1,F1
 ```
+
+> 复核记录（2026-09-03，fit_rho 平坦似然修复后）：上列前 7 条命令按序原样重跑（13.99 s + 13.63 s + 10.86 s + 13.78 s + 10.96 s + 67.09 s + 0.9 s），重生成的 `docs/m2-report.md` 与修复前 **逐字节一致**（sha256 `42e956cc793f9251cc8a84c689c0c3fe17b5da3797d47bb50e8bc8f7ec38d11f`，`git diff --stat docs/m2-report.md` 为空）——1,195 个 league-week 训练窗中 0 个出现平坦 ρ 似然，该修复在本数据集上未改变任何预测。
 
 ## 数据说明
 
@@ -121,3 +124,39 @@ uv run fa backtest run --from 2019 --to 2025 --leagues E0,SP1,D1,I1,F1
 **按 spec §10 M2 与 §1「跑不赢市场就止步」：项目止步于研究结论，M3+（persona、实时盘、下单）不启动。**
 
 可留档的研究发现（若未来重启）：模型确有信号（优于常数基线 7.7%），主要缺口是概率锐度而非方向——后续若重启，优先方向是放宽 σ_att/σ_dfn 先验、缩短窗口（half-life 200–400 已示 +2.2% 平台）、以及对 1X3 以外市场（大小球/BTTS，本次因缺收盘赔率未入模拟盘）单独评估。
+
+## 附录：模拟盘分解（spec §8.3）
+
+平注（flat）口径，与上文主判决同一批 hl=100 下注（9,679 注 / P&L −537.7 / ROI −5.6%）。
+
+分赛季：
+
+| 赛季 | n | 平注 P&L | ROI |
+|---|---|---|---|
+| 2019 | 1427 | −29.6 | −2.1% |
+| 2020 | 1571 | −121.3 | −7.7% |
+| 2021 | 1534 | −81.6 | −5.3% |
+| 2022 | 1492 | −65.6 | −4.4% |
+| 2023 | 1447 | −154.8 | −10.7% |
+| 2024 | 1444 | −26.9 | −1.9% |
+| 2025 | 764 | −57.9 | −7.6% |
+
+分市场：
+
+| 市场 | n | 平注 P&L | ROI |
+|---|---|---|---|
+| H（主胜） | 3635 | −349.2 | −9.6% |
+| D（平局） | 2372 | −57.4 | −2.4% |
+| A（客胜） | 3672 | −131.0 | −3.6% |
+
+分赔率区间（左闭右开，末段含 6.0）：
+
+| 赔率区间 | n | 平注 P&L | ROI |
+|---|---|---|---|
+| 1.4–2.0 | 486 | −14.1 | −2.9% |
+| 2.0–3.0 | 2269 | −68.9 | −3.0% |
+| 3.0–6.0 | 6924 | −454.6 | −6.6% |
+
+三张表逐行相加均回到 9,679 注 / −537.7 单位，**无任何赛季、市场或赔率区间为正 ROI**——亏损不是个别切片造成的，负 EV 在所有分组上一致成立。
+
+> 派生命令（读既有 `backtest_predictions` 表重算，未重跑回测）：`uv run python -c "from fa.db import connect; from fa.backtest.metrics import fetch_predictions; from fa.backtest.simulate import candidates, simulate_flat; cs=candidates(fetch_predictions(connect())); print(simulate_flat(cs))"`（分赛季 / 分市场 / 分赔率区间为同一调用按 `season`、`market`、`odds` 过滤后分组）。
