@@ -17,6 +17,8 @@ packages = ["src/fa"]
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
+dashboard = ["streamlit>=1.40", "plotly>=5.24"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["dashboard"]
