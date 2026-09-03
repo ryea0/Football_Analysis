@@ -1,0 +1,161 @@
+"""persona I/O 契约（spec §6.3）：输入组装（全来自库内已有数据）与输出提取校验。
+
+输入裁剪（对 §6.3 示例的有意裁定）：``model_summary`` 只含 H/D/A 行的 ``model_p``
+（λ 不在库内，不发明数字）；``home_pos``/``away_pos`` 赛季无数据则缺省（缺键，
+不写 NULL）。时间口径：form / h2h / 排名一律取 kickoff **日历日之前**的完赛行
+（当日同场不是历史；未完赛行 ``fthg IS NULL`` 一律剔除）。
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime, timezone
+
+from fa.persona import PersonaError
+
+_MARKET_TO_KEY = {"H": "p_home", "D": "p_draw", "A": "p_away"}
+
+_FORM_LEN = 5
+_H2H_LEN = 3
+
+_CONTRACT_CLAUSE = """
+
+## 输出契约（必须严格遵守）
+输出必须是且仅是一个 JSON 对象（不要代码围栏、不要任何多余文字），字段：
+- verdict：三选一 "agree" / "downweight" / "veto"
+- confidence_delta：[-0.15, +0.15] 内的数；downweight 时必须 < 0；veto 时填 0
+- key_factors：1–5 条字符串数组，每条 ≤ 50 字
+- report_md：≤ 500 字中文点评（markdown）
+不合规的输出会被程序整场丢弃（该场按纯模型处理），宁保守勿越界。
+"""
+
+
+def build_prompt(persona_md: str, input_obj: dict) -> str:
+    """prompt = persona 全文 + 该场输入 JSON + 输出契约说明（spec §6.2）。"""
+    return (persona_md.rstrip() + "\n\n## 本场输入\n```json\n"
+            + json.dumps(input_obj, ensure_ascii=False, indent=2)
+            + "\n```" + _CONTRACT_CLAUSE)
+
+
+# ---------------------------------------------------------------- 输入组装
+
+
+def build_input(conn: sqlite3.Connection, fixture_id: int) -> dict:
+    """§6.3 输入 JSON 的 dict 形态——字段全部来自库内（§1.4：不发明数字）。
+
+    fixture 不存在 / 主客任一侧未对齐（§3.3 NULL）/ kickoff 不可解析时抛
+    :class:`PersonaError`：persona 失败可降级（§6.6，该场按纯模型处理）。
+    """
+    head = conn.execute(
+        "SELECT f.league, f.kickoff_utc, f.home_team_id, f.away_team_id,"
+        " h.name AS home, a.name AS away"
+        " FROM fixtures f"
+        " LEFT JOIN teams h ON h.id = f.home_team_id"
+        " LEFT JOIN teams a ON a.id = f.away_team_id"
+        " WHERE f.id = ?", (fixture_id,)).fetchone()
+    if head is None:
+        raise PersonaError(f"fixture {fixture_id} 不存在")
+    if head["home"] is None or head["away"] is None:
+        raise PersonaError(f"fixture {fixture_id} 主客未对齐，persona 无从点评")
+    kickoff_date = _kickoff_date(head["kickoff_utc"])
+
+    # 该场 model_persona 轨全部行（按落库序）；summary 从 H/D/A 行拼 model_p，
+    # 同 market 多行（am/pm 两窗）时取后落库者——persona 本就一场一次（§6.2）。
+    rows = conn.execute(
+        "SELECT market, model_p, market_p, best_odds, edge, ev, kelly_stake_frac"
+        " FROM recommendations"
+        " WHERE fixture_id = ? AND strategy = 'model_persona' ORDER BY id",
+        (fixture_id,)).fetchall()
+
+    obj: dict = {
+        "league": head["league"],
+        "match": {"kickoff_utc": head["kickoff_utc"],
+                  "home": head["home"], "away": head["away"]},
+        "candidates": [dict(r) for r in rows],
+        "model_summary": {_MARKET_TO_KEY[r["market"]]: r["model_p"]
+                          for r in rows if r["market"] in _MARKET_TO_KEY},
+        "form": {"home_last5": _last5(conn, head["league"], head["home_team_id"],
+                                      kickoff_date),
+                 "away_last5": _last5(conn, head["league"], head["away_team_id"],
+                                      kickoff_date)},
+        "h2h_recent": _h2h(conn, head["league"], head["home_team_id"],
+                           head["away_team_id"], kickoff_date),
+    }
+    pos = _positions(conn, head["league"], _season(kickoff_date), kickoff_date)
+    for key, team in (("home_pos", head["home_team_id"]),
+                      ("away_pos", head["away_team_id"])):
+        if team in pos:                      # 无本赛季行 → 键缺省（不写 NULL）
+            obj[key] = pos[team]
+    return obj
+
+
+def _kickoff_date(kickoff_utc: str) -> str:
+    """``...Z`` / 带偏移 ISO 串 → UTC 日历日（``YYYY-MM-DD``，与 ``matches.date``
+    同口径可比）；不可解析 → :class:`PersonaError`（不猜时区，同 paper 层）。"""
+    try:
+        parsed = datetime.fromisoformat(str(kickoff_utc).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise PersonaError(f"kickoff_utc 不可解析: {kickoff_utc!r}") from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)     # 裸时间按 UTC 读
+    return parsed.astimezone(timezone.utc).date().isoformat()
+
+
+def _season(kickoff_date: str) -> int:
+    """赛季推断（M1 口径，``matches.season`` = 起始年）：7 月起算新季。"""
+    year, month = int(kickoff_date[:4]), int(kickoff_date[5:7])
+    return year if month >= 7 else year - 1
+
+
+def _last5(conn: sqlite3.Connection, league: str, team_id: int,
+           before_date: str) -> list[str]:
+    """该队 ``before_date`` 之前的近 5 场 W/D/L 串（date DESC，跨赛季照取）。"""
+    rows = conn.execute(
+        "SELECT date, fthg, ftag, home_team_id FROM matches"
+        " WHERE league=? AND (home_team_id=? OR away_team_id=?)"
+        "  AND date<? AND fthg IS NOT NULL"
+        " ORDER BY date DESC, id DESC LIMIT ?",
+        (league, team_id, team_id, before_date, _FORM_LEN)).fetchall()
+    out = []
+    for r in rows:
+        gf, ga = ((r["fthg"], r["ftag"]) if r["home_team_id"] == team_id
+                  else (r["ftag"], r["fthg"]))       # 队视角：客场时主客互换
+        out.append("W" if gf > ga else "D" if gf == ga else "L")
+    return out
+
+
+def _h2h(conn: sqlite3.Connection, league: str, home_id: int, away_id: int,
+         before_date: str) -> list[dict]:
+    """近 3 次交手，近的在前；``score``/``home`` 按当场的真实主客方位写。"""
+    rows = conn.execute(
+        "SELECT m.date, m.fthg, m.ftag, t.name AS home FROM matches m"
+        " JOIN teams t ON t.id = m.home_team_id"
+        " WHERE m.league=? AND m.date<? AND m.fthg IS NOT NULL"
+        "  AND ((m.home_team_id=? AND m.away_team_id=?)"
+        "    OR (m.home_team_id=? AND m.away_team_id=?))"
+        " ORDER BY m.date DESC, m.id DESC LIMIT ?",
+        (league, before_date, home_id, away_id, away_id, home_id,
+         _H2H_LEN)).fetchall()
+    return [{"date": r["date"], "score": f"{r['fthg']}-{r['ftag']}",
+             "home": r["home"]} for r in rows]
+
+
+def _positions(conn: sqlite3.Connection, league: str, season: int,
+               before_date: str) -> dict[int, int]:
+    """本赛季 ``before_date`` 之前的积分榜 → ``{team_id: 名次}``（胜 3 平 1，
+    净胜球 → 进球 → 队 id 定序）。无行 → 空 dict，调用方据此省略两个 pos 键。"""
+    rows = conn.execute(
+        "SELECT home_team_id, away_team_id, fthg, ftag FROM matches"
+        " WHERE league=? AND season=? AND date<? AND fthg IS NOT NULL",
+        (league, season, before_date)).fetchall()
+    stats: dict[int, list[int]] = {}     # team_id -> [积分, 净胜球, 进球]
+    for r in rows:
+        for team, gf, ga in ((r["home_team_id"], r["fthg"], r["ftag"]),
+                             (r["away_team_id"], r["ftag"], r["fthg"])):
+            s = stats.setdefault(team, [0, 0, 0])
+            s[0] += 3 if gf > ga else (1 if gf == ga else 0)
+            s[1] += gf - ga
+            s[2] += gf
+    order = sorted(stats,
+                   key=lambda t: (-stats[t][0], -stats[t][1], -stats[t][2], t))
+    return {team: i + 1 for i, team in enumerate(order)}
