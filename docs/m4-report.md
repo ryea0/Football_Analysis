@@ -45,12 +45,26 @@ build_command = ["hermes", "-z", <prompt>, "-t", "search"]     # 不带 --yolo
 ### 0.4 已知限制（如实记）
 
 - **web_search 当前不可用**：无任何搜索后端 key → `-t search` 的实际工具集是**空集**（比 §6.1 更严：连 web_search 也没有）。人格将纯靠 contract 输入产出，§6.1 的「伤停/新闻查证」用例暂不可用；若要启用，需配置后端（如 Tavily / Firecrawl key），配好后 `-t search` 恰好等于「仅 web_search、禁其余一切」。
+  **（勘误：本条「空集」表述被 T9 冒烟实证推翻，见 §0.6）**
 - **模型自报工具列表真假混报**（#5）：7 个自报名字中 **2 个真实**（`skill_view`——在默认 30 工具枚举中；`cronjob`——注册于 `tools/cronjob_tools.py:935`），**5 个编造**（`bash / view_files / write_to_file / search_by_regex / hermes_admin` 不在任何内置 toolset/注册表中，本机也无 MCP server / plugins 目录可提供）。真假并列比纯幻觉更危险——**验收不得用「问模型有哪些工具」**，只能以 CLI 校验 + 源码/离线枚举为准。
 - 运行期 stderr 被 `-z` 丢弃：persona 调用的诊断信息（如后端不可用告警）不会回传 caller，caller 只能靠 exit code + stdout 判定。
 
 ### 0.5 成本
 
 6 次 hermes 调用，其中 3 次真实推理（#3/#4/#5）。实测数字仅 #4（带 `--usage-file`）：`input_tokens=17571 / output_tokens=7 / api_calls=1`；#3/#5 未带 `--usage-file`，其 token 数**未单独测得**（Task 15 实跑补测）。额度消耗量级可忽略——此为与 CLAUDE.md 前提一致的定性判断，非实测。
+
+### 0.6 勘误（2026-09-04 T9 冒烟实证）：`-t search` 不是空集，模型会真实发起 web_search 调用
+
+§0.2 的「`['search']` → **0 个工具**」与 §0.4 第一条「`-t search` 的实际工具集是**空集**」的推断**不成立**：0 个工具只说明**离线 schema 枚举**（`get_tool_definitions` 经 `check_fn=check_web_api_key` 门控）为空，推不出「模型看到的工具集是空集」。T9 真跑（`hermes -z '<人格 prompt>' -t search`，hermes v0.19.0，本机无搜索后端 key）实测：
+
+- 工具**存在**——`toolsets.py` 定义 `search = {web_search}`，模型侧真实看到并**发起了 `web_search` 调用**（stdout 含 `<seed:tool_call><function name="web_search">` 标记）。
+- 在 `hermes -z` 一次性运行下，该调用**既不执行、错误也不回传模型**，进程 exit 0，stdout 只剩开场白 + 工具调用标记——**输出 derail，永远到不了 JSON**。brief 原版人格（无工具纪律条款）0/2 全灭、同一失败模式（task-9-report.md §3.1/§3.2），是本机无搜索 key 环境下的**系统性**失败，不是偶发。
+- §0.4 的推论「人格将纯靠 contract 输入产出」因此同样不成立：不是「纯靠输入」，而是「整场输出报废」。
+
+**处置（已落地 + 待办）**：
+
+1. **人格纪律第 8 条**（四个人格 + bundesliga 均已写入：web_search 不可用/失败/查无 → 不调用工具、不空等检索、不复述查证计划，直接给判断）——T9 修改后 1/1 通过，T10 四联赛冒烟 4/4 通过（`extract_json` + `validate_output` 无异常），防 derail 有效。
+2. **M5 实跑前建议配置搜索后端 key**（如 Tavily / Firecrawl）：既恢复 §6.1 的「伤停/新闻查证」用例（检索补偿，当前人格只能 agree/凭输入判断），也消除残留的 derail 面——T10 E0 的原始输出显示模型仍会先起「让我先尝试搜索」的念头、靠第 8 条自我拉回，条款有效但属每场都在走的钢丝。
 
 ## 1. 验收表（spec §10 M4）
 
