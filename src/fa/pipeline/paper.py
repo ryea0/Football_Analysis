@@ -2,18 +2,21 @@
 
 三件事，均为 ``paper`` 模式（``live`` 归人工 ``fa bet add/settle``，§7.2/§12.2）：
 
-1. :func:`place_paper_bets`——把某个 run 的 ``model_only`` 推荐按推荐时最优价
-   自动落成虚拟注：``stake = final_stake_frac（M4 位，NULL 则退回 kelly）× 当前
-   bankroll``、``odds_taken = best_odds``、``status='pending'``。
+1. :func:`place_paper_bets`——把某个 run 的**双轨**（§6.6 A/B，:data:`STRATEGIES`）
+   推荐按推荐时最优价自动落成虚拟注：``stake = final_stake_frac（persona 位，
+   NULL 则退回 kelly）× 该轨 bankroll``、``odds_taken = best_odds``、
+   ``status='pending'``；veto（final 双零）跳过不落注。
 2. :func:`settle_paper_bets`——把 ``fixtures`` 与 ``matches`` 配对后按市场判胜，
-   写 ``status`` / ``return_amt`` / ``closing_odds`` / ``clv``，并把净额记入
-   bankroll。
-3. :func:`paper_summary`——``fa status`` 消费的台账汇总。
+   写 ``status`` / ``return_amt`` / ``closing_odds`` / ``clv``，并把各轨净额
+   记入**各轨** bankroll（D2 分账）。
+3. :func:`paper_summary`——``fa status`` 消费的台账汇总，按轨返回。
 
 **bankroll**（spec §7.1「bankroll 快照」）：经 ``meta`` 持久化，键
-:func:`BANKROLL_KEY` 是**单一事实源**（T8 的 render 曾自声明同名字面量，合流后
-已改指此处）。首次落注时惰性初始化为 :func:`INITIAL_BANKROLL`（未用过不写 meta，
-保持「未初始化」可观测）。语义：余额只在**结算**时按净额增减（落注不冻结注金，
+:func:`bankroll_key`（``paper_bankroll:{strategy}``，D2 分轨）——两轨独立记账、
+互不混水；M3 的单键 :data:`LEGACY_BANKROLL_KEY` 由 :func:`ensure_bankroll_migrated`
+一次性搬进 ``:model_only`` 轨后删除（M3 的 14 注全 model_only，归属无歧义）。
+首次落注时惰性初始化为 :data:`INITIAL_BANKROLL`（未用过不写 meta，保持
+「未初始化」可观测）。语义：余额只在**结算**时按净额增减（落注不冻结注金，
 注金以 ``bets.stake`` 记账、仓位按当前余额计）——这正是 §7.3 ROI = 净利 / 总投注
 额的口径，也是 paper 模式零真金下最简单的可复算账本。
 
@@ -25,7 +28,8 @@ psc_away``；O2.5 → ``over25_psc``），缺失则 ``NULL``；``clv = odds_take
 时间：``placed_at`` / ``settled_at`` 都经 :func:`_now`（唯一注入缝，测试
 monkeypatch 它）。本模块**不触网**；``matches`` / ``backtest_predictions`` 只读
 （表边界 spec §12.1）。事务：每个公开函数恰好一次 ``conn.commit()``——任一环节
-上抛即整体无半写（与 fixtures/value 同一纪律）。
+上抛即整体无半写（与 fixtures/value 同一纪律）；:func:`ensure_bankroll_migrated`
+的 meta 写随该 commit 走（summary 本身只读，迁移动了 meta 时自行补一次单行 commit）。
 """
 
 from __future__ import annotations
@@ -35,10 +39,11 @@ import statistics
 from datetime import date, datetime, timezone
 
 from fa.db import get_meta, set_meta
+from fa.pipeline.value import STRATEGIES
 
-BANKROLL_KEY = "paper_bankroll"     # 单一事实源（fa.report.render 已改指此处）
+LEGACY_BANKROLL_KEY = "paper_bankroll"  # M3 单键，仅迁移读（T14 起 render 亦走
+                                        # bankroll_key，此常量是全仓唯一读点）
 INITIAL_BANKROLL = 1000.0           # 首次落注时惰性初始化（brief 钉死）
-STRATEGY = "model_only"             # M3 只落 model_only 轨（model_persona 归 M4，§6.6）
 MODE = "paper"                      # 本 Provider 的模式（§7.2 双模式的 paper 侧）
 STATUS_PENDING = "pending"
 SETTLED_STATUSES = ("won", "lost")  # 终态；void = 退款，不进 ROI 的分母/分子
@@ -50,7 +55,7 @@ MAX_MATCH_DAY_GAP = 2               # fixture↔match 配对窗上界（brief：
 _CLOSING_COLUMN = {"H": "psc_home", "D": "psc_draw", "A": "psc_away",
                    "O2.5": "over25_psc"}
 
-# 待落注推荐：该 run 的 model_only，且 (fixture_id, market, strategy, mode=paper)
+# 待落注推荐：该 run 指定轨，且 (fixture_id, market, strategy, mode=paper)
 # 级未下过（bets join recommendations——pm 窗对同场同市场不重下，UNIQUE 含 phase）。
 _UNPLACED_SQL = (
     "SELECT r.id, r.market, r.bookmaker, r.best_odds, r.kelly_stake_frac,"
@@ -63,47 +68,100 @@ _UNPLACED_SQL = (
     "     AND r2.market = r.market AND r2.strategy = r.strategy)"
     " ORDER BY r.id")
 
+# 分轨台账聚合（paper_summary 用；join recommendations 才能按 strategy 切轨）
+_SUMMARY_SQL = (
+    "SELECT COUNT(*) AS n,"
+    " COALESCE(SUM(CASE WHEN b.status=? THEN 1 ELSE 0 END), 0) AS pending,"
+    " COALESCE(SUM(CASE WHEN b.status IN (?, ?) THEN b.stake END), 0.0) AS staked,"
+    " COALESCE(SUM(CASE WHEN b.status IN (?, ?) THEN b.return_amt END), 0.0)"
+    "   AS returned"
+    " FROM bets b JOIN recommendations r ON r.id = b.recommendation_id"
+    " WHERE b.mode=? AND r.strategy=?")
+_CLV_SQL = (
+    "SELECT b.clv AS clv FROM bets b"
+    " JOIN recommendations r ON r.id = b.recommendation_id"
+    " WHERE b.mode=? AND r.strategy=? AND b.clv IS NOT NULL")
+
+
+def bankroll_key(strategy: str) -> str:
+    """分轨 bankroll 的 meta 键（D2）：``paper_bankroll:{strategy}``。"""
+    return f"paper_bankroll:{strategy}"
+
+
+def ensure_bankroll_migrated(conn: sqlite3.Connection) -> None:
+    """M3 旧单键 → ``:model_only`` 轨（M3 的 14 注全 model_only，归属无歧义）。
+
+    幂等：旧键缺席即空操作（绝大多数调用立刻返回）；新轨已有账则只删旧键，
+    绝不倒灌覆盖新账。不 commit——place/settle 随外层唯一 commit 入库。
+    place / settle / summary 三个入口都调（老库第一次落注、第一次结算、
+    第一次 ``fa status`` 都能见到旧账）。
+    """
+    legacy = get_meta(conn, LEGACY_BANKROLL_KEY)
+    if legacy is None:
+        return
+    if get_meta(conn, bankroll_key("model_only")) is None:
+        set_meta(conn, bankroll_key("model_only"), legacy)
+    conn.execute("DELETE FROM meta WHERE key=?", (LEGACY_BANKROLL_KEY,))
+
 
 def place_paper_bets(conn: sqlite3.Connection, run_id: int) -> int:
-    """把 *run_id* 的 model_only 推荐落成 paper 注，返回本次新下的注数。
+    """把 *run_id* 的双轨推荐（§6.6 A/B）落成 paper 注，返回本次新下的注数。
 
+    逐轨循环：各查各轨未落推荐（:data:`_UNPLACED_SQL` 参数化 strategy）、各读
+    各轨 bankroll（键缺失惰性初始化，仅当该轨确有落注）。``final_stake_frac``
+    为 NULL → 退回 kelly（M3 语义）；≤ 0（veto 双零）→ 跳过不落注——
+    未落的推荐不产生 bets 行，后续窗口 persona 若翻案仍可落。
     幂等：同一 run 重跑、或 am 已下后 pm 对同场同市场再触发，都返回 0。
-    bankroll 键缺失时以 :func:`INITIAL_BANKROLL` 初始化（仅当确有落注）。
     """
+    ensure_bankroll_migrated(conn)
     placed_at = _iso(_now())
-    bankroll, initialized = _bankroll(conn)
     placed = 0
-    for row in conn.execute(_UNPLACED_SQL, (run_id, STRATEGY, MODE)).fetchall():
-        frac = row["final_stake_frac"]
-        if frac is None:                       # M3 无 persona → 退回 kelly 仓位
-            frac = row["kelly_stake_frac"]
-        conn.execute(
-            "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker,"
-            " odds_taken, stake, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (row["id"], MODE, placed_at, row["bookmaker"], row["best_odds"],
-             _money(frac * bankroll), STATUS_PENDING),
-        )
-        placed += 1
-    if placed and not initialized:              # 首次使用：初始化余额并落 meta
-        set_meta(conn, BANKROLL_KEY, str(INITIAL_BANKROLL))
+    for strategy in STRATEGIES:                 # 双轨分账：各查各轨、各读各轨余额
+        bankroll, initialized = _bankroll(conn, strategy)
+        n_track = 0
+        for row in conn.execute(_UNPLACED_SQL,
+                                (run_id, strategy, MODE)).fetchall():
+            frac = row["final_stake_frac"]
+            if frac is None:                    # persona 位缺失 → 退回 kelly 仓位
+                frac = row["kelly_stake_frac"]
+            if frac is None or frac <= 0:       # veto 双零（或无仓位）→ 不落注
+                continue
+            conn.execute(
+                "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker,"
+                " odds_taken, stake, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (row["id"], MODE, placed_at, row["bookmaker"], row["best_odds"],
+                 _money(frac * bankroll), STATUS_PENDING),
+            )
+            placed += 1
+            n_track += 1
+        if n_track and not initialized:         # 该轨首次使用：初始化余额并落 meta
+            set_meta(conn, bankroll_key(strategy), str(INITIAL_BANKROLL))
     conn.commit()
     return placed
 
 
 def settle_paper_bets(conn: sqlite3.Connection) -> dict:
-    """结算所有已可判定的 pending paper 注，返回 ``{"settled","won","pnl","clv_median"}``。
+    """结算所有已可判定的 pending paper 注，**分轨**返回：
+
+    ``{"by_strategy": {strategy: {"settled","won","pnl","clv_median"}},
+    "settled","won","pnl","clv_median"}``——顶层为双轨合计（daily 简报 /
+    :func:`fa.report.render.render_settlement_brief` 消费），``by_strategy``
+    恒含 :data:`STRATEGIES` 全部键（空轨零值），形状与顶层同。
 
     配对：``fixtures`` 与 ``matches`` 按 ``(league, home_team_id, away_team_id)``
     且比赛日期落在 ``[kickoff 日期, kickoff 日期 + MAX_MATCH_DAY_GAP 天]`` 对上
     （多场候选取日期差最小者；无完赛行 / 未对齐侧 / 缺比分 / kickoff 不可解析
     → 不配对）。``settled``/``won`` 按注数计；``pnl`` = 已结算注的
     ``return − stake``；``clv_median`` = 本次结算注 CLV 的中位数（缺收盘者不计，
-    全缺 → ``None``）。
+    全缺 → ``None``）。bankroll 分轨回写：pnl 按 ``recommendations.strategy``
+    累计，各轨结算前只读一次余额、只写一次 meta；本窗没有结算的轨不动账
+    （保持「未初始化/原值」可观测）。
     """
+    ensure_bankroll_migrated(conn)
     pending = conn.execute(
         "SELECT b.id AS bet_id, b.stake, b.odds_taken,"
-        " r.market, r.fixture_id, f.league, f.home_team_id, f.away_team_id,"
-        " f.kickoff_utc"
+        " r.market, r.strategy, r.fixture_id, f.league, f.home_team_id,"
+        " f.away_team_id, f.kickoff_utc"
         " FROM bets b"
         " JOIN recommendations r ON r.id = b.recommendation_id"
         " JOIN fixtures f ON f.id = r.fixture_id"
@@ -113,8 +171,10 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
     settled = won = 0
     pnl = 0.0
     clvs: list[float] = []
-    bankroll, _initialized = _bankroll(conn)        # 只读：未初始化时不写 meta
-    settled_at = _iso(_now())                       # 一次结算一个时间戳（同 T5 纪律）
+    tracks: dict[str, dict] = {}          # 各轨累计器（含空轨，返回形状恒完整）
+    for strategy in STRATEGIES:
+        tracks[strategy] = {"settled": 0, "won": 0, "pnl": 0.0, "clvs": []}
+    settled_at = _iso(_now())             # 一次结算一个时间戳（同 T5 纪律）
     by_fixture: dict[int, list[sqlite3.Row]] = {}
     for row in pending:
         by_fixture.setdefault(row["fixture_id"], []).append(row)
@@ -127,6 +187,8 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
         if match is None:
             continue                                    # 无从判定 → 保持 pending
         for bet in group:
+            track = tracks.setdefault(                  # 未知轨也不丢账（防御）
+                bet["strategy"], {"settled": 0, "won": 0, "pnl": 0.0, "clvs": []})
             is_won = _is_won(bet["market"], match["fthg"], match["ftag"])
             closing = match[_CLOSING_COLUMN[bet["market"]]]
             clv = (bet["odds_taken"] / closing - 1
@@ -141,48 +203,64 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
             settled += 1
             won += 1 if is_won else 0
             pnl += return_amt - bet["stake"]
+            track["settled"] += 1
+            track["won"] += 1 if is_won else 0
+            track["pnl"] += return_amt - bet["stake"]
             if clv is not None:
                 clvs.append(clv)
+                track["clvs"].append(clv)
         conn.execute("UPDATE fixtures SET status=? WHERE id=?",
                      (STATUS_FINISHED, fixture_id))
 
-    if settled:
-        set_meta(conn, BANKROLL_KEY, str(_money(bankroll + pnl)))
+    by_strategy: dict[str, dict] = {}
+    for strategy in list(STRATEGIES) + sorted(set(tracks) - set(STRATEGIES)):
+        track = tracks[strategy]
+        if track["settled"]:
+            bankroll, _initialized = _bankroll(conn, strategy)   # 各轨只读一次
+            set_meta(conn, bankroll_key(strategy),
+                     str(_money(bankroll + track["pnl"])))
+        by_strategy[strategy] = {
+            "settled": track["settled"], "won": track["won"],
+            "pnl": _money(track["pnl"]),
+            "clv_median": (statistics.median(track["clvs"])
+                           if track["clvs"] else None)}
     conn.commit()
-    return {"settled": settled, "won": won, "pnl": _money(pnl),
+    return {"by_strategy": by_strategy,
+            "settled": settled, "won": won, "pnl": _money(pnl),
             "clv_median": statistics.median(clvs) if clvs else None}
 
 
-def paper_summary(conn: sqlite3.Connection) -> dict:
-    """paper 台账汇总（``fa status`` 消费）。
+def paper_summary(conn: sqlite3.Connection) -> dict[str, dict]:
+    """paper 台账汇总，**分轨**返回（D2，``fa status`` 消费）。
 
-    ``n`` = 全部 paper 注；``pending`` = 未结注数；``staked``/``returned``/``roi``
-    只计终态为 won/lost 的注（在途仓位不进分母，否则 ROI 被在途注拖成假负；
-    void = 退款，净额为 0，同样不进）；``roi`` 无已结算注金时为 ``None``；
-    ``bankroll`` 读 meta（未初始化 → ``None``）；``clv_median`` 为已结算注 CLV
-    中位数（缺收盘者不计）。
+    返回 ``{strategy: 汇总}``，键序 = :data:`STRATEGIES`；每轨的形状：
+    ``n`` = 该轨全部 paper 注；``pending`` = 未结注数；``staked``/``returned``/
+    ``roi`` 只计终态为 won/lost 的注（在途仓位不进分母，否则 ROI 被在途注拖成
+    假负；void = 退款，净额为 0，同样不进）；``roi`` 无已结算注金时为 ``None``；
+    ``bankroll`` 读该轨 meta（未初始化 → ``None``）；``clv_median`` 为已结算注
+    CLV 中位数（缺收盘者不计）。
     """
-    row = conn.execute(
-        "SELECT COUNT(*) AS n,"
-        " COALESCE(SUM(CASE WHEN status=? THEN 1 ELSE 0 END), 0) AS pending,"
-        " COALESCE(SUM(CASE WHEN status IN (?, ?) THEN stake END), 0.0) AS staked,"
-        " COALESCE(SUM(CASE WHEN status IN (?, ?) THEN return_amt END), 0.0)"
-        "   AS returned"
-        " FROM bets WHERE mode=?",
-        (STATUS_PENDING, *SETTLED_STATUSES, *SETTLED_STATUSES, MODE)).fetchone()
-    clvs = [r["clv"] for r in conn.execute(
-        "SELECT clv FROM bets WHERE mode=? AND clv IS NOT NULL", (MODE,))]
-    raw = get_meta(conn, BANKROLL_KEY)
-    staked = float(row["staked"])
-    return {
-        "n": int(row["n"]),
-        "staked": staked,
-        "returned": float(row["returned"]),
-        "roi": (float(row["returned"]) - staked) / staked if staked else None,
-        "pending": int(row["pending"]),
-        "bankroll": None if raw is None else float(raw),
-        "clv_median": statistics.median(clvs) if clvs else None,
-    }
+    ensure_bankroll_migrated(conn)
+    if conn.in_transaction:     # 迁移写后自持提交（meta 单行写，安全）；若未来
+        conn.commit()           # 管线内调用需改显式信号，别靠读路径顺手 commit
+    out: dict[str, dict] = {}
+    for strategy in STRATEGIES:
+        row = conn.execute(_SUMMARY_SQL,
+                           (STATUS_PENDING, *SETTLED_STATUSES, *SETTLED_STATUSES,
+                            MODE, strategy)).fetchone()
+        clvs = [r["clv"] for r in conn.execute(_CLV_SQL, (MODE, strategy))]
+        raw = get_meta(conn, bankroll_key(strategy))
+        staked = float(row["staked"])
+        out[strategy] = {
+            "n": int(row["n"]),
+            "staked": staked,
+            "returned": float(row["returned"]),
+            "roi": (float(row["returned"]) - staked) / staked if staked else None,
+            "pending": int(row["pending"]),
+            "bankroll": None if raw is None else float(raw),
+            "clv_median": statistics.median(clvs) if clvs else None,
+        }
+    return out
 
 
 # ---------------------------------------------------------------- 内部实现
@@ -202,9 +280,9 @@ def _money(amount: float) -> float:
     return round(amount, 2)
 
 
-def _bankroll(conn: sqlite3.Connection) -> tuple[float, bool]:
-    """读当前余额 → ``(值, 是否已初始化)``；键缺失返回默认值且**不写** meta。"""
-    raw = get_meta(conn, BANKROLL_KEY)
+def _bankroll(conn: sqlite3.Connection, strategy: str) -> tuple[float, bool]:
+    """读该轨当前余额 → ``(值, 是否已初始化)``；键缺失返回默认值且**不写** meta。"""
+    raw = get_meta(conn, bankroll_key(strategy))
     return (INITIAL_BANKROLL, False) if raw is None else (float(raw), True)
 
 

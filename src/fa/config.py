@@ -71,3 +71,49 @@ def load_env(path: Path | None = None) -> dict[str, str]:
 def odds_api_key() -> str | None:
     """Odds API key；未配置或空串视为 None（额度纪律见 spec §3.4）。"""
     return os.environ.get("ODDS_API_KEY") or None
+
+
+# ---------------------------------------------------------------- persona（M4，spec §6）
+
+PERSONA_TIMEOUT_S = 120.0            # §6.2「超时默认 120s（可配）」
+PERSONA_FILES = {                    # §9.2 目录规划（personas/ 文件名）
+    "E0": "epl.md", "SP1": "laliga.md", "D1": "bundesliga.md",
+    "I1": "seriea.md", "F1": "ligue1.md",
+}
+
+
+def hermes_bin() -> str:
+    """hermes 可执行文件路径；测试以 env HERMES_BIN 指向 fixture 脚本（C1：mock
+    与实跑同一 subprocess 代码路径）。"""
+    return os.environ.get("HERMES_BIN") or "hermes"
+
+
+def persona_timeout() -> float:
+    """persona 单次调用超时秒数（env FA_PERSONA_TIMEOUT 覆盖；非法值回退默认）。"""
+    raw = os.environ.get("FA_PERSONA_TIMEOUT")
+    if raw is None:
+        return PERSONA_TIMEOUT_S
+    try:
+        return float(raw)
+    except ValueError:
+        return PERSONA_TIMEOUT_S
+
+
+def persona_search_enabled() -> bool:
+    """web_search 对 persona 是否可用（env ``FA_PERSONA_SEARCH``，默认 off）。
+
+    判定权交运维：M5 配好搜索后端 key 时置 1——届时 :func:`build_prompt` 的
+    禁工具过渡条款自动消失（stopgap，根治 = 配 key；T15 fix round 1，
+    m4-report §2.1 实测 derail 13/27 的对症缓解）。
+    """
+    return os.environ.get("FA_PERSONA_SEARCH", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def persona_path(league: str) -> Path:
+    """联赛 → personas/ 下的人格文件路径（spec §9.2）。"""
+    try:
+        name = PERSONA_FILES[league]
+    except KeyError:
+        raise ValueError(f"无 persona 文件映射：{league!r}") from None
+    return project_root() / "personas" / name

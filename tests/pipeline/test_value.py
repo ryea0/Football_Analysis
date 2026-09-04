@@ -159,11 +159,19 @@ def add_run(c, phase="am"):
         (phase,)).lastrowid
 
 
-def recs(c, fixture_id, market=None):
-    q = ("SELECT * FROM recommendations WHERE fixture_id=?"
-         + (" AND market=?" if market else "") + " ORDER BY market")
-    args = (fixture_id, market) if market else (fixture_id,)
-    return [dict(r) for r in c.execute(q, args)]
+def recs(c, fixture_id, market=None, strategy="model_only"):
+    """取该 fixture 的推荐行。A1 双落后每个 (fixture, market, phase) 有两轨行——
+    既有断言锚定的是 model_only 轨（M3 语义），故默认过滤到该轨；跨轨/全轨
+    断言显式传 ``strategy=None``（空集断言一律走 None，保持「一行都没有」强度）。"""
+    q = "SELECT * FROM recommendations WHERE fixture_id=?"
+    args = [fixture_id]
+    if market:
+        q += " AND market=?"
+        args.append(market)
+    if strategy:
+        q += " AND strategy=?"
+        args.append(strategy)
+    return [dict(r) for r in c.execute(q + " ORDER BY market, strategy", args)]
 
 
 def best_of(c, fixture_id, market):
@@ -219,7 +227,7 @@ def test_in_gate_writes_h_and_o25_recommendations(priced):
     assert all(r["phase"] == "am" for r in mine)
     assert all(r["run_id"] == run for r in mine)
     assert all(r["created_at"] for r in mine)
-    assert len(ids) == 6                                    # 窗口内 3 场各 2 条
+    assert len(ids) == 12                            # 3 场 × 2 market × 2 轨（A1 双落）
 
 
 def test_model_p_matches_library_training_data(priced):
@@ -311,8 +319,7 @@ def test_out_of_gate_no_recommendation(priced):
     assert ev_of(probs["H"], o["home"]) < EV_MIN            # EV 同样不过
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
     assert recs(c, fid) == []
-
-
+    assert recs(c, fid, strategy=None) == []                # 两轨都没有
 def test_edge_gate_inclusive_at_exact_boundary(priced, monkeypatch):
     """把 EDGE_MIN monkeypatch 到**逐位等于**该边界的值，钉死 >=（含端点）。"""
     c, fx, probs = priced
@@ -324,7 +331,7 @@ def test_edge_gate_inclusive_at_exact_boundary(priced, monkeypatch):
     monkeypatch.setattr(value, "EDGE_MIN", math.nextafter(edge, math.inf))
     c.execute("DELETE FROM recommendations")
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
-    assert recs(c, fx["in"], "H") == []                     # 阈值高 1 ulp 即剔除
+    assert recs(c, fx["in"], "H", strategy=None) == []      # 阈值高 1 ulp 即剔除（两轨皆无）
 
 
 def test_ev_gate_inclusive_at_exact_boundary(priced, monkeypatch):
@@ -337,7 +344,7 @@ def test_ev_gate_inclusive_at_exact_boundary(priced, monkeypatch):
     monkeypatch.setattr(value, "EV_MIN", math.nextafter(ev, math.inf))
     c.execute("DELETE FROM recommendations")
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
-    assert recs(c, fx["in"], "H") == []
+    assert recs(c, fx["in"], "H", strategy=None) == []      # 两轨皆无
 
 
 def test_odds_band_gates_isolated(priced, monkeypatch):
@@ -355,7 +362,7 @@ def test_odds_band_gates_isolated(priced, monkeypatch):
         generate_recommendations(c, [LEAGUE], "am", add_run(c))
         assert probs["H"] - devig_proportional(
             [mk["home"], mk["draw"], mk["away"]])[0] > EDGE_MIN, tag
-        return [r["market"] for r in recs(c, fid, "H")]
+        return sorted({r["market"] for r in recs(c, fid, "H", strategy=None)})
 
     assert probe("lo-in", 1.4) == ["H"]
     assert probe("lo-out", 1.39) == []
@@ -372,8 +379,8 @@ def test_52h_window_inclusive_lower_and_upper(priced):
     assert recs(c, fx["in"])                                # 窗口内
     assert recs(c, fx["at0"])                               # 恰 now（下端点，含）
     assert recs(c, fx["at52"])                              # 恰 52h（上端点，含）
-    assert recs(c, fx["at53"]) == []                        # 53h → 出窗
-    assert recs(c, fx["past"]) == []                        # 已开球（now−1h）→ 出窗
+    assert recs(c, fx["at53"], strategy=None) == []         # 53h → 出窗（两轨皆无）
+    assert recs(c, fx["past"], strategy=None) == []         # 已开球（now−1h）→ 出窗
 
 
 def test_window_lower_endpoint_is_exactly_now(priced):
@@ -383,14 +390,15 @@ def test_window_lower_endpoint_is_exactly_now(priced):
     assert recs(c, fx["at0"])                               # 有盘口、对齐、恰在下端点
     assert {r["market"] for r in recs(c, fx["at0"])} == {"H", "O2.5"}
     assert {r["id"] for r in recs(c, fx["at0"])} <= set(ids)
-    # 阳性对照：出窗侧在完全相同的盘口下确实为空（排除「靠缺价误绿」）
-    assert recs(c, fx["at53"]) == [] and recs(c, fx["past"]) == []
+    # 阳性对照：出窗侧在完全相同的盘口下确实为空（排除「靠缺价误绿」，两轨皆无）
+    assert recs(c, fx["at53"], strategy=None) == []
+    assert recs(c, fx["past"], strategy=None) == []
 
 
 def test_unaligned_fixture_never_recommended(priced):
     c, fx, probs = priced
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
-    assert recs(c, fx["unaligned"]) == []                   # 有盘口也不推荐
+    assert recs(c, fx["unaligned"], strategy=None) == []    # 有盘口也不推荐（两轨皆无）
 
 
 def test_league_without_training_data_is_skipped(priced):
@@ -425,7 +433,7 @@ def test_model_is_fitted_once_per_league_per_run(priced, monkeypatch):
     monkeypatch.setattr(value, "fit_league", counting)
     ids = generate_recommendations(c, [LEAGUE], "am", add_run(c))
     assert calls == [LEAGUE]                                # 恰 1 次，且是该联赛
-    assert len(ids) == 6                                    # 拟合结果被全部候选复用
+    assert len(ids) == 12                            # 拟合结果被全部候选复用（3 场×2 市场×2 轨）
 
 
 # ---------------------------------------------------------------- UNIQUE 刷新
@@ -454,6 +462,11 @@ def test_unique_conflict_refreshes_prices_and_keeps_persona(priced):
     assert second["best_odds"] > first["best_odds"]
     assert second["bookmaker"] == "betfair"
     assert second["run_id"] == run2                         # 归属刷新它的 run
+    # kelly 重算的有效 pin（控制器裁定）：best_odds 刷新前后确已变化（上一行断言
+    # second > first），故 kelly 必须等于「新价」的重算值——若 DO UPDATE 漏刷该列，
+    # 这里读到的是旧价的 kelly，恒真假象被拆穿
+    assert second["kelly_stake_frac"] == kelly_fraction(
+        second["model_p"], second["best_odds"])
     # M4 persona 三列**不被** M3 的刷新清掉
     assert second["verdict"] == "keep"
     assert second["confidence_delta"] == 0.1
@@ -480,6 +493,56 @@ def test_quotes_within_same_batch_still_compete(priced):
     assert recs(c, fx["in"], "H")[0]["bookmaker"] == "b_high"   # 高于 pinnacle 的价
     assert recs(c, fx["in"], "H")[0]["best_odds"] == pytest.approx(
         1.0 / ((probs["H"] - 0.08) * S))
+
+
+# ---------------------------------------------------------------- 双轨同刻双落（A1，§6.6）
+
+
+def test_generate_writes_both_tracks_single_commit(priced):
+    """每个过门槛候选写 model_only + model_persona 两行：同数字、persona 轨中性初始。"""
+    c, fx, probs = priced
+    run = add_run(c)
+    ids = generate_recommendations(c, [LEAGUE], "am", run)
+    rows = c.execute(
+        "SELECT * FROM recommendations WHERE run_id=? ORDER BY strategy, market",
+        (run,)).fetchall()
+    mo = [r for r in rows if r["strategy"] == "model_only"]
+    mp = [r for r in rows if r["strategy"] == "model_persona"]
+    assert len(mo) == len(mp) > 0 and len(rows) == 2 * len(mo)
+    assert {r["id"] for r in rows} == set(ids)              # 返回 ids 含两轨
+    for a, b in zip(mo, mp):                                # 同数字、两轨
+        for col in ("fixture_id", "market", "phase", "run_id", "model_p",
+                    "market_p", "best_odds", "bookmaker", "edge", "ev",
+                    "kelly_stake_frac"):
+            assert a[col] == b[col], col
+        assert a["final_stake_frac"] is None                # model_only：退回 kelly（M3 语义）
+    for r in mp:                                            # persona 轨中性初始
+        assert r["final_stake_frac"] == r["kelly_stake_frac"]
+        assert r["verdict"] is None and r["confidence_delta"] is None
+        assert r["key_factors"] is None and r["report_md"] is None
+
+
+def test_rerun_refreshes_prices_keeps_verdict(priced):
+    """重跑刷新价格列但不清 persona 位：verdict/confidence_delta/final 三列保留。"""
+    c, fx, probs = priced
+    generate_recommendations(c, [LEAGUE], "am", add_run(c))
+    before = c.execute(
+        "SELECT id, kelly_stake_frac FROM recommendations"
+        " WHERE strategy='model_persona' ORDER BY id").fetchall()
+    c.execute("UPDATE recommendations SET verdict='veto', confidence_delta=0,"
+              " final_stake_frac=0 WHERE strategy='model_persona'")
+    c.commit()
+    generate_recommendations(c, [LEAGUE], "am", add_run(c))     # pm 重跑语义
+    rows = c.execute(
+        "SELECT id, verdict, confidence_delta, final_stake_frac,"
+        " kelly_stake_frac FROM recommendations"
+        " WHERE strategy='model_persona' ORDER BY id").fetchall()
+    assert [r["id"] for r in rows] == [r["id"] for r in before]  # 无第二行，原地刷新
+    assert all(r["verdict"] == "veto" for r in rows)             # 判决三列不清（M3 接缝语义）
+    assert all(r["confidence_delta"] == 0 for r in rows)
+    assert all(r["final_stake_frac"] == 0.0 for r in rows)
+    assert all(r["kelly_stake_frac"] == b["kelly_stake_frac"]
+               for r, b in zip(rows, before))                    # kelly 照常刷新计算
 
 
 # ---------------------------------------------------------------- 纪律

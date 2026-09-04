@@ -184,6 +184,8 @@ hermes cron（调度）
 
 5 个联赛人格（项目内 `personas/*.md`：懂德甲的、懂意甲的……），职责是模型看不到的东西：**伤停、赛程密度、欧战轮换、更衣室新闻、动机（保级/争冠/无欲无求）**。工具白名单仅 `web_search`（这是选 B 的意义所在），禁其余一切工具。
 
+> **落地注（2026-09-04，M4）**：CLI 以 `-t search`（工具集恰为 {web_search}）执行白名单。本机暂无搜索后端 key——`hermes -z` 下工具在册但调用静默不执行、输出被 derail（实测合规率 51.9%），故程序侧输出契约按 `FA_PERSONA_SEARCH`（默认 off）条件拼接「不调用工具、直接判断」过渡条款，修复后单遍合规率 100%（docs/m4-report.md §2，小样本口径）。配置搜索后端 key 后置 `FA_PERSONA_SEARCH=1`，该条款自动消失、检索恢复，合规口径需重测。
+
 ### 6.2 调用方式
 
 - Python 侧用 `hermes -z` headless 调用：prompt = persona 文件全文 + 该场输入 JSON + 输出契约说明
@@ -206,7 +208,7 @@ hermes cron（调度）
   },
   "candidates": [
     {
-      "market": "OU_over_2.5",
+      "market": "O2.5",
       "model_p": 0.58,
       "market_p": 0.545,
       "best_odds": 1.95,
@@ -215,15 +217,12 @@ hermes cron（调度）
       "kelly_stake_frac": 0.008
     }
   ],
-  "model_summary": {
-    "p_home": 0.52, "p_draw": 0.22, "p_away": 0.26,
-    "exp_goals_home": 2.1, "exp_goals_away": 1.4
-  },
+  "model_summary": { "p_home": 0.52, "p_draw": 0.22, "p_away": 0.26 },  // （λ 不在库内，输入不含——M4 实现裁定）
   "form": {
     "home_last5": ["W", "W", "D", "L", "W"],
-    "away_last5": ["D", "L", "W", "W", "L"],
-    "home_pos": 2, "away_pos": 5
+    "away_last5": ["D", "L", "W", "W", "L"]
   },
+  "home_pos": 2, "away_pos": 5,
   "h2h_recent": [{ "date": "2026-04-12", "score": "4-2", "home": "Bayern Munich" }]
 }
 ```
@@ -254,7 +253,7 @@ hermes cron（调度）
 
 ### 6.5 降级策略
 
-超时 / 解析失败 / JSON 不合规 / 超出值域 → **该联赛自动回退纯模型推荐**，报告中标注「persona 未生效 + 原因」。降级事件记入 `runs.summary`。
+超时 / 解析失败 / JSON 不合规 / 超出值域 → **该场次**自动回退纯模型推荐，报告中标注「persona 未生效 + 原因」。降级事件记入 `runs.summary`。（粒度裁定 2026-09-04：调用本按场次发起，一场失败不撤销同联赛已成功判决；当日降级不重试。）
 
 ### 6.6 A/B 双轨追踪
 
@@ -290,6 +289,8 @@ hermes cron（调度）
 | ROI | 净利 / 总投注额 | 最终结果，但小样本噪声大 |
 | 累计 P&L | 累计净额 | 绝对量 |
 | **CLV** | odds_taken / Pinnacle 收盘价 − 1，按注中位数 | **金标准**：持续买在收盘前且价格更好 = 长期正期望的信号，比短期盈亏更早暴露真相 |
+
+paper bankroll 与上表指标按 `strategy` 分轨统计（model_only / model_persona 各一本，初始各 1000）——§12.3 预注册判据的分轨对比口径（M4 裁定，2026-09-04：分轨隔离使一轨盈余不放大另一轨仓位，A/B 对比不失真）。
 
 ### 7.4 本地只读看板（v0.6）
 

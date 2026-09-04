@@ -59,6 +59,20 @@ def _set_version(path, version: int, drop: tuple = ()) -> None:
     c.close()
 
 
+def _strip_persona_columns(path) -> None:
+    """把库退到 v3 形状：摘掉 v4 新增两列并置版本号=3——模拟 M3 上线库。
+
+    两列是普通可空列（无索引/CHECK/外键引用），SQLite ≥3.35 的
+    DROP COLUMN 可直接摘除，摘完 recommendations 与 v3 逐列等价。
+    """
+    c = connect(path)
+    c.execute("ALTER TABLE recommendations DROP COLUMN key_factors")
+    c.execute("ALTER TABLE recommendations DROP COLUMN report_md")
+    c.execute("UPDATE schema_version SET version=3")
+    c.commit()
+    c.close()
+
+
 def test_init_creates_tables(conn):
     names = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -93,6 +107,13 @@ def test_fresh_db_is_current(tmp_path):
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
+    cols = _table_cols(c, "recommendations")
+    assert cols["key_factors"] == ("TEXT", 0, 0)      # 可空、非主键
+    assert cols["report_md"] == ("TEXT", 0, 0)
+    order = list(cols)
+    # 紧跟 final_stake_frac 之后（brief Step 3 的列位），v3 既有列序不动
+    assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
+        ["key_factors", "report_md"]
     c.close()
 
 
@@ -145,6 +166,7 @@ def test_v2_upgrades_to_current(tmp_path):
     for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions", *_AGENTLINE_TABLES):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c)
+    assert {"key_factors", "report_md"} <= set(_table_cols(c, "recommendations"))
     c.close()
 
 
@@ -168,6 +190,7 @@ def test_v1_upgrades_to_current(tmp_path):
               *_AGENTLINE_TABLES):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c, bp_count=0)
+    assert {"key_factors", "report_md"} <= set(_table_cols(c, "recommendations"))
     c.close()
 
 
@@ -308,6 +331,7 @@ def test_migrate_up_v1_adds_everything(tmp_path):
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
+    assert {"key_factors", "report_md"} <= set(_table_cols(c, "recommendations"))
     assert c.execute(
         "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     c.close()
@@ -328,6 +352,7 @@ def test_migrate_up_v2_adds_bline_and_retro(tmp_path):
     assert c.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='backtest_predictions'").fetchone()["sql"] == bp_before
+    assert {"key_factors", "report_md"} <= set(_table_cols(c, "recommendations"))
     assert c.execute(
         "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     c.close()
@@ -347,16 +372,22 @@ def test_migrate_and_fresh_schemas_match(tmp_path):
     a = connect(tmp_path / "a.db")
     b = connect(tmp_path / "b.db")
     for t in tables:
-        sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
-        assert a.execute(sql, (t,)).fetchone()["sql"] == \
-            b.execute(sql, (t,)).fetchone()["sql"], t
+        # 列级形状（名/类型/非空/主键）逐列一致
+        assert _table_cols(a, t) == _table_cols(b, t), t
+        # 唯一约束同样一致（recommendations 的四元组 UNIQUE 不因迁移丢失）
+        assert _unique_columns(a, t) == _unique_columns(b, t), t
         # 索引（含 UNIQUE 自动索引之外的命名索引）也须一致
         sql = "SELECT name, sql FROM sqlite_master " \
               "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name"
         assert a.execute(sql, (t,)).fetchall() == \
             b.execute(sql, (t,)).fetchall(), t
-        # 列级形状（名/类型/非空/主键）逐列一致
-        assert _table_cols(a, t) == _table_cols(b, t), t
+        # DDL 文本逐字一致。from_v1 腿的表全部由常量 executescript 建出，无列级
+        # ALTER，恒与新建一致；from_v3 腿（recommendations 走 ALTER 补列、列序
+        # 缀尾）的形状一致性由独立的
+        # test_v3_shape_matches_fresh_on_persona_columns 以无序形状比对覆盖。
+        sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
+        assert a.execute(sql, (t,)).fetchone()["sql"] == \
+            b.execute(sql, (t,)).fetchone()["sql"], t
     a.close(); b.close()
 
 
@@ -410,7 +441,8 @@ def test_bline_nullability(conn):
     nullable = {
         "fixtures": ("home_team_id", "away_team_id"),
         "odds_snapshots": ("fixture_id",),
-        "recommendations": ("verdict", "confidence_delta", "final_stake_frac"),
+        "recommendations": ("verdict", "confidence_delta", "final_stake_frac",
+                            "key_factors", "report_md"),
         "bets": ("settled_at", "return_amt", "closing_odds", "clv"),
         "runs": ("phase", "finished_at", "credits_before", "credits_after",
                  "summary"),
@@ -700,7 +732,8 @@ def test_v5_attributor_column_defaults_and_values(tmp_path):
 
 
 def test_v4_migrates_to_v5(tmp_path):
-    """v4 库（无 attributor 列）经 init_db ALTER 升 v5，存量行回填 1。"""
+    """v4 库（无 attributor 列）经 init_db ALTER 升级（v6 链下升到当前版），
+    存量行回填 1。"""
     from fa.db import connect, init_db
     db = tmp_path / "v4.db"
     init_db(db)                                   # v5 新建
@@ -730,7 +763,7 @@ def test_v4_migrates_to_v5(tmp_path):
     conn = connect(db)
     try:
         assert conn.execute("SELECT version FROM schema_version"
-                            ).fetchone()["version"] == 5
+                            ).fetchone()["version"] == SCHEMA_VERSION
         cols = {c["name"] for c in conn.execute(
             "PRAGMA table_info(retro_attributions)")}
         assert "attributor" in cols
@@ -738,3 +771,70 @@ def test_v4_migrates_to_v5(tmp_path):
                             ).fetchone()["attributor"] == 1
     finally:
         conn.close()
+
+
+# ------------------------------------- persona 两列（M4，v6 迁移链）
+
+
+
+
+
+def test_fresh_recommendations_has_persona_columns(tmp_path):
+    """全新库 recommendations 即含 persona 点评两列（可空、非主键，§6.3）。"""
+    init_db(tmp_path / "t.db")
+    c = connect(tmp_path / "t.db")
+    cols = _table_cols(c, "recommendations")
+    assert cols["key_factors"] == ("TEXT", 0, 0)
+    assert cols["report_md"] == ("TEXT", 0, 0)
+    order = list(cols)
+    assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
+        ["key_factors", "report_md"]
+    c.close()
+
+
+def test_v3_upgrades_to_current_preserves_m3_rows(tmp_path):
+    """v3→当前（经 v4/v5/v6 全链）：persona 两列补齐，M3 既有推荐行原样保留。"""
+    p = tmp_path / "t.db"
+    init_db(p)
+    c = connect(p)
+    run = c.execute(
+        "INSERT INTO runs (type, phase, started_at, status) VALUES "
+        "('matchday', 'am', '2026-09-03T11:00:00Z', 'ok')")
+    fx = c.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, status, "
+        "created_at) VALUES ('E0', 'ev-v3', 'oddsapi', '2026-09-04T14:00:00Z', "
+        "'scheduled', '2026-09-03T11:00:00Z')")
+    c.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " created_at) VALUES (?, ?, 'model_only', 'H', 'am', 0.55, 0.50, 2.10,"
+        " 'Pinnacle', 0.05, 0.155, 0.01, '2026-09-03T11:00:00Z')",
+        (run.lastrowid, fx.lastrowid))
+    c.commit(); c.close()
+
+    _strip_persona_columns(p)          # 模拟 M3 上线库：v3 形状 + 一行既有推荐
+    init_db(p)                         # 不抛异常即升级成功
+
+    c = connect(p)
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+    r = c.execute("SELECT * FROM recommendations").fetchone()
+    assert (r["strategy"], r["market"], r["phase"]) == ("model_only", "H", "am")
+    assert r["model_p"] == 0.55 and r["kelly_stake_frac"] == 0.01
+    assert r["key_factors"] is None and r["report_md"] is None
+    assert r["verdict"] is None and r["confidence_delta"] is None \
+        and r["final_stake_frac"] is None
+    c.close()
+
+
+def test_v3_shape_matches_fresh_on_persona_columns(tmp_path):
+    """v3 升级库与全新库的 recommendations 形状（含类型）一致——ALTER 列序缀尾
+    与 fresh 列序不同属已知豁免（按名形状比对，M4 分叉合并为 v6 后两路同构）。"""
+    init_db(tmp_path / "a.db")
+    init_db(tmp_path / "b.db")
+    _strip_persona_columns(tmp_path / "b.db")
+    _set_version(tmp_path / "b.db", 3, drop=())
+    init_db(tmp_path / "b.db")
+    ca, cb = connect(tmp_path / "a.db"), connect(tmp_path / "b.db")
+    assert _table_cols(ca, "recommendations") == _table_cols(cb, "recommendations")
+    ca.close(); cb.close()

@@ -317,8 +317,14 @@ _SETTLE_STATUSES = ("won", "lost", "void")   # db.py bets.status CHECK 的人工
 
 
 def _pct(value: float | None) -> str:
-    """比率 → 带符号百分比；None（无可算样本）→ 「—」，不冒充 0。"""
-    return "—" if value is None else f"{value:+.2f}%"
+    """**分数** → 带符号百分比（×100）；None（无可算样本）→ 「—」，不冒充 0。
+
+    入参口径：`paper_summary` 的 roi / clv_median 都是比率分数（全输 roi=-1.0、
+    clv=odds_taken/closing−1），故必须 ×100 再挂百分号——直出会把 -100% 显示成
+    -1.00%（T16 审查 P2）。本文件的 `degradation_pct` 等字段是真百分数，且走
+    f-string 内联格式、不经本函数，勿混用。
+    """
+    return "—" if value is None else f"{value * 100:+.2f}%"
 
 
 def _money(value: float | None) -> str:
@@ -366,19 +372,27 @@ def _a_line_summary(conn) -> str:
 
 
 def _b_line_summary(conn) -> list[str]:
-    """B 线各行：paper 台账汇总 + 额度水位 + 最近 runs + 隔离队名计数。"""
+    """B 线各行：paper 双轨台账汇总（D2，每轨一行）+ 额度水位 + 最近 runs
+    + 隔离队名计数。
+
+    双轨行用方括号裸 strategy 键（``[model_only]`` / ``[model_persona]``）——
+    与报告 bankroll 块、meta 键名同字面，A/B 两本账一眼可分、不互相冒充
+    （§12.3 预注册判据按轨分账）。
+    """
     from fa.db import get_meta
     from fa.pipeline.fixtures import QUOTA_META_KEY
-    from fa.pipeline.paper import BANKROLL_KEY, INITIAL_BANKROLL, paper_summary
+    from fa.pipeline.paper import INITIAL_BANKROLL, bankroll_key, paper_summary
 
-    s = paper_summary(conn)
-    bankroll = ("未初始化（首次落注时按 "
-                f"{INITIAL_BANKROLL:.0f} 写 meta {BANKROLL_KEY}）"
-                if s["bankroll"] is None else _money(s["bankroll"]))
-    lines = [f"注数={s['n']}（pending {s['pending']}）  "
-             f"已结算注金={_money(s['staked'])}  回报={_money(s['returned'])}"
-             f"  ROI={_pct(s['roi'])}  bankroll={bankroll}"
-             f"  CLV 中位数={_pct(s['clv_median'])}"]
+    lines = []
+    for strategy, s in paper_summary(conn).items():
+        bankroll = ("未初始化（首次落注时按 "
+                    f"{INITIAL_BANKROLL:.0f} 写 meta {bankroll_key(strategy)}）"
+                    if s["bankroll"] is None else _money(s["bankroll"]))
+        lines.append(f"[{strategy}] "
+                     f"注数={s['n']}（pending {s['pending']}）  "
+                     f"已结算注金={_money(s['staked'])}  回报={_money(s['returned'])}"
+                     f"  ROI={_pct(s['roi'])}  bankroll={bankroll}"
+                     f"  CLV 中位数={_pct(s['clv_median'])}")
 
     quota = get_meta(conn, QUOTA_META_KEY)
     if quota is None:
@@ -470,7 +484,7 @@ def bet_add(
         typer.echo(f"--odds 须 > 1（赔率下限），收到 {odds}")
         raise typer.Exit(code=1)
 
-    from fa.pipeline.paper import BANKROLL_KEY, INITIAL_BANKROLL
+    from fa.pipeline.paper import INITIAL_BANKROLL, bankroll_key
     conn = connect()
     try:
         rec = conn.execute("SELECT * FROM recommendations WHERE id=?",
@@ -490,7 +504,7 @@ def bet_add(
             frac = (rec["final_stake_frac"] if rec["final_stake_frac"] is not None
                     else rec["kelly_stake_frac"])
             raw = conn.execute("SELECT value FROM meta WHERE key=?",
-                               (BANKROLL_KEY,)).fetchone()
+                               (bankroll_key(rec["strategy"]),)).fetchone()
             bankroll = INITIAL_BANKROLL if raw is None else float(raw["value"])
             stake = round(frac * bankroll, 2)
             _require_positive_stake(stake, f"派生注金（仓位 {frac} × bankroll）")

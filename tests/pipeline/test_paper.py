@@ -7,8 +7,9 @@
 
 时间注入缝（**唯一**）：``fa.pipeline.paper._now``（placed_at / settled_at 取此）。
 
-bankroll 经 ``meta``（键 ``paper_bankroll``）：落注按**当前**余额乘仓位分数，
-结算把净额加回余额——测试用 ``set_meta`` 造余额，再用落注断言它被读走。
+bankroll 经 ``meta`` 分轨持久化（D2，键 ``paper_bankroll:{strategy}``，旧单键
+``paper_bankroll`` 仅迁移读）：落注按**当前**轨余额乘仓位分数，结算把各轨净额
+加回各轨余额——测试用 ``set_meta`` 造余额，再用落注断言它被读走。
 """
 import urllib.request
 from datetime import datetime, timezone
@@ -16,9 +17,11 @@ from datetime import datetime, timezone
 import pytest
 
 from fa.db import connect, get_meta, init_db, set_meta
+from fa.persona.apply import apply_verdict
 from fa.pipeline import paper
-from fa.pipeline.paper import (BANKROLL_KEY, INITIAL_BANKROLL, paper_summary,
-                               place_paper_bets, settle_paper_bets)
+from fa.pipeline.paper import (INITIAL_BANKROLL, LEGACY_BANKROLL_KEY,
+                               bankroll_key, ensure_bankroll_migrated,
+                               paper_summary, place_paper_bets, settle_paper_bets)
 
 LEAGUE = "E0"
 _NOW = datetime(2026, 9, 3, 9, 0, 0, tzinfo=timezone.utc)
@@ -117,9 +120,12 @@ def fixture_status(c):
 
 
 def test_bankroll_key_is_the_canonical_constant():
-    """控制器裁定：BANKROLL_KEY 单源在本模块，T8 render 合流时改指此处。"""
-    assert paper.BANKROLL_KEY == "paper_bankroll"
-    assert BANKROLL_KEY == "paper_bankroll"
+    """控制器裁定（T14 收尾）：分轨键单源 ``bankroll_key()``——旧单键别名
+    ``BANKROLL_KEY`` 已随 render 分轨改造删除，``paper_bankroll`` 只剩迁移读
+    这一个合法读点（:data:`LEGACY_BANKROLL_KEY`），不再有任何别名。"""
+    assert not hasattr(paper, "BANKROLL_KEY")            # 别名已删，无双源
+    assert paper.LEGACY_BANKROLL_KEY == LEGACY_BANKROLL_KEY == "paper_bankroll"
+    assert bankroll_key("model_only") != LEGACY_BANKROLL_KEY   # 分轨键 ≠ legacy
     assert INITIAL_BANKROLL == 1000.0
 
 
@@ -127,6 +133,7 @@ def test_bankroll_key_is_the_canonical_constant():
 
 
 def test_places_this_runs_model_only_recs(conn):
+    """别 run 的推荐不落；同 run 跨轨落注（D2 双轨）另见分轨一节。"""
     run = add_run(conn)
     fx1 = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
     fx2 = add_fixture(conn, "ev2", "Everton", "Spurs")
@@ -134,7 +141,6 @@ def test_places_this_runs_model_only_recs(conn):
     r2 = add_rec(conn, run, fx2, "O2.5", kelly=0.01, best_odds=1.9)
     other = add_run(conn)
     add_rec(conn, other, fx1, "A")                          # 别的 run → 不落
-    add_rec(conn, run, fx1, "D", strategy="model_persona")  # M4 轨 → 本层不落
 
     assert place_paper_bets(conn, run) == 2
     rows = bets(conn)
@@ -151,16 +157,17 @@ def test_places_this_runs_model_only_recs(conn):
 
 
 def test_first_use_initializes_bankroll_meta(conn):
-    assert get_meta(conn, BANKROLL_KEY) is None
+    assert get_meta(conn, bankroll_key("model_only")) is None
     run = add_run(conn)
     add_rec(conn, run, add_fixture(conn, "ev1", "Chelsea", "Arsenal"), "H")
     place_paper_bets(conn, run)
-    assert get_meta(conn, BANKROLL_KEY) == "1000.0"         # 首次使用即初始化
+    assert get_meta(conn, bankroll_key("model_only")) == "1000.0"  # 首次使用即初始化
 
 
 def test_no_placements_leaves_meta_untouched(conn):
     place_paper_bets(conn, add_run(conn))                   # 该 run 无推荐
-    assert get_meta(conn, BANKROLL_KEY) is None             # 未使用 → 不初始化
+    assert get_meta(conn, bankroll_key("model_only")) is None      # 未使用 → 不初始化
+    assert get_meta(conn, bankroll_key("model_persona")) is None
     assert bets(conn) == []
 
 
@@ -179,7 +186,7 @@ def test_stake_prefers_final_stake_frac_over_kelly(conn):
 def test_stake_scales_with_current_bankroll(conn):
     run = add_run(conn)
     add_rec(conn, run, add_fixture(conn, "ev1", "Chelsea", "Arsenal"), "H", kelly=0.02)
-    set_meta(conn, BANKROLL_KEY, "2000.0")
+    set_meta(conn, bankroll_key("model_only"), "2000.0")
     conn.commit()
     place_paper_bets(conn, run)
     assert bet_by_market(conn, "H")["stake"] == pytest.approx(40.0)
@@ -277,8 +284,9 @@ def test_pre_kickoff_match_does_not_latch_settlement(conn):
     run = add_run(conn)
     add_rec(conn, run, fx, "H")
     place_paper_bets(conn, run)
-    assert settle_paper_bets(conn) == {"settled": 0, "won": 0, "pnl": 0.0,
-                                       "clv_median": None}
+    out = settle_paper_bets(conn)
+    assert out["settled"] == 0 and out["won"] == 0 and out["pnl"] == 0.0
+    assert out["clv_median"] is None
     assert bet_by_market(conn, "H")["status"] == "pending"
     assert fixture_status(conn)[fx] == "scheduled"                 # 未 latch 成 finished
 
@@ -309,10 +317,11 @@ def test_unpaired_fixture_stays_pending(conn):
     add_rec(conn, run, fx_none, "H")
     add_rec(conn, run, fx_unaligned, "A")
     assert place_paper_bets(conn, run) == 2
-    assert settle_paper_bets(conn) == {"settled": 0, "won": 0, "pnl": 0.0,
-                                       "clv_median": None}
+    out = settle_paper_bets(conn)
+    assert out["settled"] == 0 and out["won"] == 0 and out["pnl"] == 0.0
+    assert out["clv_median"] is None
     assert all(b["status"] == "pending" for b in bets(conn))
-    assert get_meta(conn, BANKROLL_KEY) == "1000.0"                  # 余额不动
+    assert get_meta(conn, bankroll_key("model_only")) == "1000.0"    # 余额不动
     assert set(fixture_status(conn).values()) == {"scheduled"}
 
 
@@ -328,10 +337,11 @@ def test_settlement_is_idempotent_and_bankroll_not_double_counted(conn):
     assert first["settled"] == 2 and first["won"] == 1
     assert first["pnl"] == pytest.approx(10.0)
     assert first["clv_median"] == pytest.approx((2.0 / 1.8 - 1 + 3.5 / 3.4 - 1) / 2)
-    assert get_meta(conn, BANKROLL_KEY) == "1010.0"
-    assert settle_paper_bets(conn) == {"settled": 0, "won": 0, "pnl": 0.0,
-                                       "clv_median": None}   # 幂等
-    assert get_meta(conn, BANKROLL_KEY) == "1010.0"          # 不重复计入
+    assert get_meta(conn, bankroll_key("model_only")) == "1010.0"
+    again = settle_paper_bets(conn)
+    assert again["settled"] == 0 and again["won"] == 0       # 幂等
+    assert again["by_strategy"]["model_only"]["settled"] == 0
+    assert get_meta(conn, bankroll_key("model_only")) == "1010.0"   # 不重复计入
     assert len(bets(conn)) == 2
 
 
@@ -343,7 +353,7 @@ def test_loss_drains_bankroll(conn):
     place_paper_bets(conn, run)
     out = settle_paper_bets(conn)
     assert out["won"] == 0 and out["pnl"] == pytest.approx(-20.0)
-    assert get_meta(conn, BANKROLL_KEY) == "980.0"
+    assert get_meta(conn, bankroll_key("model_only")) == "980.0"
 
 
 def test_live_bets_are_not_settled_by_paper_provider(conn):
@@ -366,9 +376,12 @@ def test_live_bets_are_not_settled_by_paper_provider(conn):
 def test_settle_with_nothing_settled_does_not_touch_bankroll_meta(conn):
     """空台账、或 pending 但配不上：结算不落 meta——「未初始化」保持可观测，
     且每日空跑不产生 meta 写。"""
-    assert settle_paper_bets(conn) == {"settled": 0, "won": 0, "pnl": 0.0,
-                                       "clv_median": None}
-    assert get_meta(conn, BANKROLL_KEY) is None
+    out = settle_paper_bets(conn)
+    assert out["settled"] == 0 and out["won"] == 0 and out["pnl"] == 0.0
+    assert out["clv_median"] is None
+    assert out["by_strategy"]["model_only"]["settled"] == 0
+    assert get_meta(conn, bankroll_key("model_only")) is None
+    assert get_meta(conn, LEGACY_BANKROLL_KEY) is None
     fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")      # 无完赛行 → 配不上
     rec = add_rec(conn, add_run(conn), fx, "H")
     conn.execute("INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker,"
@@ -376,7 +389,7 @@ def test_settle_with_nothing_settled_does_not_touch_bankroll_meta(conn):
                  (rec, "paper", _TS, "pinnacle", 2.0, 20.0, "pending"))
     conn.commit()
     assert settle_paper_bets(conn)["settled"] == 0
-    assert get_meta(conn, BANKROLL_KEY) is None              # 未被「顺手」初始化
+    assert get_meta(conn, bankroll_key("model_only")) is None  # 未被「顺手」初始化
 
 
 def test_settled_fixture_is_marked_finished(conn):
@@ -484,7 +497,7 @@ def test_exception_mid_settlement_leaves_no_partial_commit(conn, tmp_path, monke
         assert all(b["status"] == "pending" and b["return_amt"] is None
                    and b["settled_at"] is None for b in bets(reader))
         assert set(fixture_status(reader).values()) == {"scheduled"}
-        assert get_meta(reader, BANKROLL_KEY) == "1000.0"
+        assert get_meta(reader, bankroll_key("model_only")) == "1000.0"
     finally:
         reader.close()
 
@@ -509,14 +522,17 @@ def test_provider_never_writes_a_line_tables(conn):
 
 
 def test_summary_keys_are_exactly_the_brief_contract(conn):
-    assert set(paper_summary(conn)) == {"n", "staked", "returned", "roi",
-                                        "pending", "bankroll", "clv_median"}
+    """D2：paper_summary 分轨——键 = strategy（STRATEGIES 序），值为原形状 dict。"""
+    assert list(paper_summary(conn)) == ["model_only", "model_persona"]
+    for track in paper_summary(conn).values():
+        assert set(track) == {"n", "staked", "returned", "roi",
+                              "pending", "bankroll", "clv_median"}
 
 
 def test_summary_of_empty_ledger(conn):
-    assert paper_summary(conn) == {"n": 0, "staked": 0.0, "returned": 0.0,
-                                   "roi": None, "pending": 0, "bankroll": None,
-                                   "clv_median": None}
+    empty = {"n": 0, "staked": 0.0, "returned": 0.0, "roi": None, "pending": 0,
+             "bankroll": None, "clv_median": None}
+    assert paper_summary(conn) == {"model_only": empty, "model_persona": empty}
 
 
 def test_summary_counts_money_and_clv(conn):
@@ -531,13 +547,15 @@ def test_summary_counts_money_and_clv(conn):
     add_rec(conn, run, fx3, "D", kelly=0.02, best_odds=3.4)   # pending
     place_paper_bets(conn, run)
     assert settle_paper_bets(conn)["settled"] == 2
-    s = paper_summary(conn)
+    s = paper_summary(conn)["model_only"]                     # 种子全在 model_only 轨
     assert s["n"] == 3 and s["pending"] == 1
     assert s["staked"] == pytest.approx(30.0)                 # 已结算两注的注金
     assert s["returned"] == pytest.approx(40.0)
     assert s["roi"] == pytest.approx(10.0 / 30.0)
     assert s["bankroll"] == pytest.approx(1010.0)
     assert s["clv_median"] == pytest.approx((2.0 / 1.8 - 1 + 2.5 / 2.0 - 1) / 2)
+    other = paper_summary(conn)["model_persona"]              # 未用轨：全零 + 未初始化
+    assert other["n"] == 0 and other["bankroll"] is None and other["roi"] is None
 
 
 def test_summary_money_columns_are_settled_only(conn):
@@ -546,7 +564,7 @@ def test_summary_money_columns_are_settled_only(conn):
     run = add_run(conn)
     add_rec(conn, run, fx, "H", kelly=0.02, best_odds=2.0)
     place_paper_bets(conn, run)
-    s = paper_summary(conn)
+    s = paper_summary(conn)["model_only"]
     assert s["n"] == 1 and s["pending"] == 1
     assert s["staked"] == 0.0 and s["returned"] == 0.0
     assert s["roi"] is None
@@ -562,5 +580,206 @@ def test_summary_is_scoped_to_paper_mode(conn):
                  (rec, "live", _TS, "pinnacle", 2.0, 500.0, "pending"))
     conn.commit()
     place_paper_bets(conn, run)
-    s = paper_summary(conn)
+    s = paper_summary(conn)["model_only"]
     assert s["n"] == 1 and s["staked"] == 0.0                 # live 的 500 不入 paper 账
+
+
+# ---------------------------------------------------------------- D2 分轨 bankroll
+
+MO, MP = bankroll_key("model_only"), bankroll_key("model_persona")
+
+
+def _run_id(c):
+    """种子里唯一 run 的 id（分轨用例都只造一个 run）。"""
+    return c.execute("SELECT run_id FROM recommendations LIMIT 1").fetchone()[0]
+
+
+def test_bankroll_key_shape():
+    assert bankroll_key("model_only") == "paper_bankroll:model_only"
+    assert bankroll_key("model_persona") == "paper_bankroll:model_persona"
+
+
+def test_migration_copies_legacy_to_model_only(conn):
+    """M3 旧单键 → ``:model_only`` 轨（M3 的 14 注全 model_only，归属无歧义）；
+    旧键删除（无双源），且幂等——重入不再改写。"""
+    set_meta(conn, LEGACY_BANKROLL_KEY, "990.5")
+    conn.commit()
+    ensure_bankroll_migrated(conn)
+    conn.commit()
+    assert get_meta(conn, MO) == "990.5"
+    assert get_meta(conn, LEGACY_BANKROLL_KEY) is None       # 旧键删除，无双源
+    ensure_bankroll_migrated(conn)
+    conn.commit()                                            # 幂等
+    assert get_meta(conn, MO) == "990.5"
+    assert get_meta(conn, LEGACY_BANKROLL_KEY) is None
+
+
+def test_migration_keeps_new_track_value_if_already_written(conn):
+    """新轨已有账（人先写）→ 只删旧键，不覆盖新账（防迁移倒灌）。"""
+    set_meta(conn, MO, "1234.0")
+    set_meta(conn, LEGACY_BANKROLL_KEY, "990.5")
+    conn.commit()
+    ensure_bankroll_migrated(conn)
+    conn.commit()
+    assert get_meta(conn, MO) == "1234.0"
+    assert get_meta(conn, LEGACY_BANKROLL_KEY) is None
+
+
+def test_place_migrates_legacy_key_first(conn):
+    """落注入口也迁移：M3 老库的首笔 M4 落注按迁移后的轨余额计仓。"""
+    set_meta(conn, LEGACY_BANKROLL_KEY, "2000.0")
+    conn.commit()
+    run = add_run(conn)
+    add_rec(conn, run, add_fixture(conn, "ev1", "Chelsea", "Arsenal"), "H", kelly=0.02)
+    assert place_paper_bets(conn, run) == 1
+    assert bet_by_market(conn, "H")["stake"] == pytest.approx(40.0)   # 0.02 × 2000
+    assert get_meta(conn, MO) == "2000.0"
+    assert get_meta(conn, LEGACY_BANKROLL_KEY) is None
+
+
+@pytest.fixture
+def conn_two_recs(conn):
+    """同 fixture 同市场双轨各一行，final 均为中性 0.01（brief 已验算：两轨各
+    kelly=0.01 × bankroll 1000 → stake 10.00）。"""
+    run = add_run(conn)
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_rec(conn, run, fx, "H", kelly=0.01, final_stake_frac=0.01,
+            strategy="model_only")
+    add_rec(conn, run, fx, "H", kelly=0.01, final_stake_frac=0.01,
+            strategy="model_persona")
+    return conn
+
+
+def test_place_double_track_separate_bankrolls(conn_two_recs):
+    placed = place_paper_bets(conn_two_recs, _run_id(conn_two_recs))
+    assert placed == 2                                       # 双轨各一注
+    stakes = conn_two_recs.execute(
+        "SELECT b.stake, r.strategy FROM bets b JOIN recommendations r"
+        " ON r.id=b.recommendation_id").fetchall()
+    assert all(s["stake"] == 10.0 for s in stakes)           # 各轨 1000 × 0.01
+    assert get_meta(conn_two_recs, MO) == "1000.0"
+    assert get_meta(conn_two_recs, MP) == "1000.0"           # 各轨独立惰性初始化
+
+
+def test_place_double_track_scales_on_own_balance_only(conn):
+    """A 轨余额不影响 B 轨仓位：persona 轨 3000 × 0.01 = 30，model_only 仍 20。"""
+    run = add_run(conn)
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_rec(conn, run, fx, "H", kelly=0.02, strategy="model_only")
+    add_rec(conn, run, fx, "A", kelly=0.01, strategy="model_persona")
+    set_meta(conn, MP, "3000.0")
+    conn.commit()
+    assert place_paper_bets(conn, run) == 2
+    by_market = {b["market"]: b for b in bets(conn)}
+    assert by_market["H"]["stake"] == pytest.approx(20.0)     # model_only 轨 1000 × 0.02
+    assert by_market["A"]["stake"] == pytest.approx(30.0)     # persona 轨 3000 × 0.01
+
+
+@pytest.fixture
+def conn_veto(conn):
+    """persona 轨被 veto（final=0）：只 model_only 该落。"""
+    run = add_run(conn)
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_rec(conn, run, fx, "H", kelly=0.02, strategy="model_only")
+    add_rec(conn, run, fx, "H", kelly=0.02, final_stake_frac=0.0,
+            strategy="model_persona")
+    return conn
+
+
+def test_place_skips_veto(conn_veto):
+    placed = place_paper_bets(conn_veto, _run_id(conn_veto))
+    assert placed == 1                                       # 只落 model_only
+    row = conn_veto.execute(
+        "SELECT r.strategy FROM bets b JOIN recommendations r"
+        " ON r.id=b.recommendation_id").fetchone()
+    assert row["strategy"] == "model_only"
+    assert get_meta(conn_veto, MP) is None                   # veto 轨未用 → 不初始化
+
+
+@pytest.fixture
+def conn_played(conn):
+    """双轨各落一注且已完赛（brief 已验算的数字）：model_only 的 H 注中
+    （odds 2.0、stake 10 → 回报 20）、model_persona 的 A 注负（stake 10）。"""
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")      # 2-1 主胜
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-02", 2, 1)
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", kelly=0.01, best_odds=2.0, strategy="model_only")
+    add_rec(conn, run, fx, "A", kelly=0.01, best_odds=2.0, strategy="model_persona")
+    assert place_paper_bets(conn, run) == 2
+    return conn
+
+
+def test_settle_writes_per_strategy_bankroll(conn_played):
+    out = settle_paper_bets(conn_played)
+    assert get_meta(conn_played, MO) == "1010.0"             # won: 1000 + (20−10)
+    assert get_meta(conn_played, MP) == "990.0"              # lost: 1000 − 10
+    assert out["by_strategy"]["model_only"]["pnl"] == 10.0
+    assert out["by_strategy"]["model_persona"]["pnl"] == -10.0
+    assert out["pnl"] == 0.0                                 # 顶层合计（daily 简报消费）
+    assert out["settled"] == 2 and out["won"] == 1
+    assert get_meta(conn_played, LEGACY_BANKROLL_KEY) is None
+
+
+def test_settle_by_strategy_shape_has_all_tracks(conn_played):
+    """分轨形状同顶层四键，且**两轨恒在**（空轨零值）——T14 渲染可无脑遍历。"""
+    by = settle_paper_bets(conn_played)["by_strategy"]
+    assert set(by) == {"model_only", "model_persona"}
+    for track in by.values():
+        assert set(track) == {"settled", "won", "pnl", "clv_median"}
+
+
+def test_settle_unsettled_track_keeps_its_bankroll_untouched(conn):
+    """本窗没有可结注的轨不回写——原余额保持可观测（不造 1000 假账）。"""
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")      # 无完赛行 → 配不上
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", kelly=0.01, strategy="model_only")
+    add_rec(conn, run, fx, "D", kelly=0.01, strategy="model_persona")
+    assert place_paper_bets(conn, run) == 2
+    out = settle_paper_bets(conn)
+    assert out["settled"] == 0 and out["pnl"] == 0.0
+    assert get_meta(conn, MO) == "1000.0"
+    assert get_meta(conn, MP) == "1000.0"                    # 落注时初始化过 → 原值不动
+
+
+def test_summary_by_strategy(conn_played):
+    settle_paper_bets(conn_played)                   # conn_played 只种到「已落注」
+    s = paper_summary(conn_played)
+    assert set(s) == {"model_only", "model_persona"}
+    assert s["model_only"]["roi"] is not None                # 1 中 1 未结 → (20−10)/10
+    assert s["model_persona"]["n"] == 1
+    assert s["model_persona"]["roi"] == pytest.approx(-1.0)
+    assert s["model_only"]["bankroll"] == pytest.approx(1010.0)
+    assert s["model_persona"]["bankroll"] == pytest.approx(990.0)
+
+
+def test_summary_reads_migrated_legacy_value(conn):
+    """summary 入口也迁移：M3 老库第一次 `fa status` 即见旧账（挂到 model_only 轨）。"""
+    set_meta(conn, LEGACY_BANKROLL_KEY, "990.5")
+    conn.commit()
+    s = paper_summary(conn)
+    assert s["model_only"]["bankroll"] == pytest.approx(990.5)
+    assert get_meta(conn, LEGACY_BANKROLL_KEY) is None
+
+
+# ---------------------------------------------------------------- T8 遗留补钉
+
+
+def test_apply_verdict_touches_model_persona_rows_only(conn):
+    """T8 遗留补钉（控制器裁定）：判决只写 model_persona 轨——同 fixture 的
+    model_only 行（paper 落注源）的 verdict / final_stake_frac 不得被触碰。"""
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", kelly=0.02, strategy="model_only")
+    add_rec(conn, run, fx, "H", kelly=0.02, strategy="model_persona")
+    conn.commit()
+
+    agree = {"verdict": "agree", "confidence_delta": 0.1,
+             "key_factors": ["a"], "report_md": "x"}
+    assert apply_verdict(conn, fx, agree) == 1
+    rows = {r["strategy"]: r for r in conn.execute(
+        "SELECT strategy, verdict, confidence_delta, final_stake_frac"
+        " FROM recommendations WHERE fixture_id=?", (fx,)).fetchall()}
+    assert rows["model_persona"]["verdict"] == "agree"
+    assert rows["model_persona"]["final_stake_frac"] == pytest.approx(0.02 * 1.1)
+    assert rows["model_only"]["verdict"] is None             # 纯模型轨不被判决波及
+    assert rows["model_only"]["final_stake_frac"] is None

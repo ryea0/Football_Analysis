@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -30,7 +30,8 @@ CREATE INDEX IF NOT EXISTS idx_bp_league_season
 # B 线（paper 运营）五表：spec §3.2 / §12.1。表边界硬约束——B 线只写这五张
 # （外加 meta），绝不写 backtest_predictions / matches。与 _BP_TABLE 同理，
 # 新建与迁移共用同一常量，两条路径的表结构由构造即一致。
-# M4 persona 才落的位（verdict / confidence_delta / final_stake_frac）建库即可空。
+# M4 persona 才落的位（verdict / confidence_delta / final_stake_frac /
+# key_factors / report_md）建库即可空。
 # 词表用 CHECK 钉死（mode/status/strategy/market/phase/type）——SQLite 无法
 # ALTER ADD CHECK，须趁表空时一次到位；fixtures.status 词表仍在演进，暂不加。
 _BLINE_TABLE = """
@@ -96,6 +97,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     verdict          TEXT,                   -- M4 persona 填写
     confidence_delta REAL,                   -- M4
     final_stake_frac REAL,                   -- M4
+    key_factors      TEXT,                   -- M4 persona：JSON 数组串（§6.3，1–5 条）
+    report_md        TEXT,                   -- M4 persona：点评 ≤500 字（§6.3）
     created_at       TEXT NOT NULL,
     UNIQUE (fixture_id, market, strategy, phase)
 );
@@ -298,7 +301,9 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     retro 两表（retro_runs / retro_attributions，A 线复盘归因子线）；
     v4->v5 新增范式对比线两表（agentline_predictions / agentline_runs）并给
     retro_attributions 加 attributor 列——v5 分层由 2026-09-04 并行分支合并产生
-    （retro ensemble 与 agentline 同日各自 bump v4，合并时统一为单一 v5）。"""
+    （retro ensemble 与 agentline 同日各自 bump v4，合并时统一为单一 v5）；
+    v5->v6 recommendations 补 persona 两列（key_factors / report_md，§6.3）
+    ——M4 分支同日也 bump 了 v4，与 retro/agentline 分叉合并为单一 v6。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -318,6 +323,22 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
             conn.execute(
                 "ALTER TABLE retro_attributions ADD COLUMN"
                 " attributor INTEGER NOT NULL DEFAULT 1")
+    if from_v < 6:
+        # persona 两列（M4）：守卫兜住「M4 v4 老库两列已在」
+        # 列级加法只能 ALTER：老库已有数据，不得重建表。from_v<3 的库上一步
+        # _BLINE_TABLE 刚建出含两列形状（M4 DDL，两列已在），故按列存在性判定、只补真缺
+        # 的——顺带让半途断掉的迁移可续跑（ADD COLUMN 非事务原子）。与
+        # _BLINE_TABLE 同名列同语义，文本上难免两处（ALTER 无法复用 DDL 常量），
+        # 形状一致性由 test_migrate_and_fresh_schemas_match[from_v3] 钉住。
+        cols = {r["name"] for r in
+                conn.execute("PRAGMA table_info(recommendations)")}
+        if cols:                          # 空集＝表不存在（假形状最小库），无事可做
+            if "key_factors" not in cols:
+                conn.execute(
+                    "ALTER TABLE recommendations ADD COLUMN key_factors TEXT")
+            if "report_md" not in cols:
+                conn.execute(
+                    "ALTER TABLE recommendations ADD COLUMN report_md TEXT")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
