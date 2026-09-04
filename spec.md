@@ -505,3 +505,19 @@ A 线新增「agent 当大脑」对比子线（线 A）：dsh headless agent 对
 `A_enh`（+web 检索）度量定性信息增量，为 M4 persona 设计提供先导数据。
 「agent 不当大脑」由公设转为待实证命题。设计文档：
 docs/superpowers/specs/2026-09-04-agentline-dual-track-design.md。
+
+### 12.6 复盘归因子线（2026-09-04）
+
+A 线新增复盘归因子线（retro）：赛后对选定场次（分歧周批含命中对照 / paper
+T+1 / 线 A 对齐 / 手动）做定性归因（封闭标签枚举、`tag_set_version` 版本
+化），产出落 `retro_attributions` 表，永不进入推荐与落注流。验收三关卡：
+证据日期审计、重跑一致性测量（已实施为 ensemble 形态：N=3 独立归因者 +
+确定性投票聚合，`attributor` 列分账成员/聚合行；<50% 全同率降格为假设生成
+器）、按标签分层的预测效度检验（允许结论为「归因无信息量」）。多 agent
+总纲（Python 指挥官/测量纪律/混合门控）见
+docs/superpowers/specs/2026-09-04-multi-agent-charter.md。分期：统计分歧
+报告（S0）→ hermes 周批（S1）→ paper T+1（S2）→ 线 A 案例库（S3，版本
+标记供给，A_base 永不供给）。设计文档：
+docs/superpowers/specs/2026-09-04-retro-attribution-design.md 与
+2026-09-04-retro-ensemble-design.md。编号协调：C 线（M6 进化线）宪章
+原拟 §12.6，改为 §12.7（其宪章明文「不抢号、跟随」）。
