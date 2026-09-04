@@ -10,7 +10,7 @@ from typer.testing import CliRunner
 
 from fa.cli import app
 from fa.db import connect, init_db
-from fa.retro.analyze import stratified_analysis
+from fa.retro.analyze import _mwu, stratified_analysis
 
 runner = CliRunner()
 
@@ -429,3 +429,27 @@ class TestAnalyze:
         result = runner.invoke(app, ["retro", "analyze"])
         assert result.exit_code == 0
         assert "injury" in result.output and "分层" in result.output
+
+    def test_null_tags_row_skipped_not_fatal(self, db):
+        """status='ok' 但 miss_tags_json 为 NULL：与 audit_batch 同一过滤
+        （IS NOT NULL）——无标签集无从分层，不入 n_rows，命令不崩。"""
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE)
+        self._seed_attrib(conn, 2, ["variance"])
+        conn.execute(
+            "UPDATE retro_attributions SET miss_tags_json=NULL"
+            " WHERE match_id=2")
+        conn.commit()
+        try:
+            res = stratified_analysis(conn)
+        finally:
+            conn.close()
+        assert res["n_rows"] == 1                       # NULL tags 行不入分层
+        result = runner.invoke(app, ["retro", "analyze"])
+        assert result.exit_code == 0
+        assert "injury" in result.output and "variance" not in result.output
+
+    def test_mwu_all_ties_returns_none_not_nan(self, db):
+        """全平手（两组值全同）且两侧 n≥8（asymptotic）→ 双侧 p=nan，
+        如实记 None——不让 nan 漏进渲染成 p=nan。"""
+        assert _mwu([1.0] * 8, [1.0] * 8) is None

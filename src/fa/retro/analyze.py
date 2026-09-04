@@ -12,6 +12,7 @@ audit 规则：行含赛前成因标签（PREMATCH_CAUSE_TAGS）时，证据须�
 复用本模块 _row_violation（audit 与 analyze 单一事实源，两处不分叉）。
 """
 import json
+import math
 import sqlite3
 from datetime import date
 
@@ -122,13 +123,18 @@ def consistency_report(conn: sqlite3.Connection, batch_id=None) -> dict:
 
 
 def _mwu(a: list[float], b: list[float]):
-    """Mann-Whitney U 双侧；任一侧 n<2 无法检验返回 None；n<8 用 exact。"""
+    """Mann-Whitney U 双侧；任一侧 n<2 无法检验返回 None；n<8 用 exact。
+
+    全平手（两组值全同）时双侧 U 的 p 值为 nan——如实记 None（无差异
+    信息），不让 nan 漏进报告渲染成 p=nan。
+    """
     if len(a) < 2 or len(b) < 2:
         return None
     from scipy.stats import mannwhitneyu
     method = "exact" if (len(a) < 8 or len(b) < 8) else "asymptotic"
-    return float(mannwhitneyu(a, b, alternative="two-sided",
-                              method=method).pvalue)
+    p = float(mannwhitneyu(a, b, alternative="two-sided",
+                           method=method).pvalue)
+    return None if math.isnan(p) else p
 
 
 def _mean(xs):
@@ -144,12 +150,16 @@ def stratified_analysis(conn: sqlite3.Connection, batch_id=None,
     取单成员行（attributor=1）——ensemble 批不被成员行重复计数。audit 违规
     行默认剔除（§15 裁定前不作分层依据），--include-violations 可含并显式
     报 n_excluded。缺 backtest_predictions 的场次跳过计数（div 无从算起）。
+    miss_tags_json 为 NULL 的 ok 行不入分层（与 audit_batch 同一过滤——无
+    标签集无从分层，宁缺毋崩）。现状（v1 不改行为）：k≥2 ensemble 批若无
+    有效聚合行，成员 2..N 行被静默丢弃（attributor=1 兜底只覆盖首个成员行）。
     诚实条款：不因「想让某层显著」而调整口径；点估计+样本量为主读数，
     p 值仅参考（v1 小样本不装精确）。
     """
     sql = ("SELECT a.batch_id, a.match_id, a.date, a.miss_tags_json,"
            " a.evidence_json, a.is_control FROM retro_attributions a"
-           " WHERE a.status='ok' AND (a.attributor=0 OR (a.attributor=1"
+           " WHERE a.status='ok' AND a.miss_tags_json IS NOT NULL"
+           " AND (a.attributor=0 OR (a.attributor=1"
            " AND NOT EXISTS (SELECT 1 FROM retro_attributions b"
            " WHERE b.batch_id=a.batch_id AND b.match_id=a.match_id"
            " AND b.attributor=0 AND b.status='ok')))")
