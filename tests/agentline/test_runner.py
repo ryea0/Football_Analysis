@@ -86,3 +86,16 @@ def test_build_prompt_contract():
     assert "严禁使用任何比赛开始后产生的信息" in enh
     assert "严禁使用任何比赛开始后产生的信息" not in base   # 基线层无检索段
     assert "before:2024-02-01" in enh
+
+
+def test_build_prompt_enh_directive_search():
+    """A_enh 检索指示须为指令式而非许可式（附录 A.6：首批「可以检索」措辞下
+    检索虽发生但结果垃圾致 sources 全空；且须禁 timeRange 近期过滤——它会
+    把历史回放场次的目标内容滤掉——并钉住「检索不可用→sources 留空且注明」
+    的诚实降级条款，禁止编造来源）。"""
+    enh = build_prompt({"match": {"home": "Arsenal", "date": "2024-02-01"}},
+                       "A_enh")
+    assert "至少发起一次检索" in enh          # 指令式：必须检索
+    assert "timeRange" in enh and "不要使用" in enh   # 禁近期时间过滤
+    assert "检索无可用结果" in enh            # 诚实降级条款
+    assert "严禁编造来源" in enh

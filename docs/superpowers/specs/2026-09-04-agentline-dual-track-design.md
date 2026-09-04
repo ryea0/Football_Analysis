@@ -392,6 +392,49 @@ profile 正常启动并产出合法 JSON。**但 `sources` 为空 ⇒ 本次运�
 
 ---
 
+## A.10 增强层检索修复实录（2026-09-04，A.9 结论勘误）
+
+A.9 断言「增强层检索从未真正触发」——**此为误诊**，本节以 transcript 证据勘误并记录修复。
+
+**误诊根因**：`fa agentline compare` 的 audit 只数最终 `sources` 引用数（引用口径），
+0 引用被读成 0 检索（调用口径）。翻查 `~/.dsh/sessions/` 持久化 transcript：首批 E2E
+的 11 个 A_enh 会话**全部**含检索调用，其中 8 场有大量真实调用（每场 11–45 行
+`web_search`/`advanced_search`），且查询词质量良好（英文、双方全名、日期、伤停关键词）。
+真相是「检索发生了 → 引擎返回垃圾 → 无可引用项 → sources 诚实留空」。
+
+**引擎垃圾的证据**（同题对照实验，2026-09-04 本机）：
+
+| 路由 | 查询 | 返回 |
+|---|---|---|
+| bing（free-search 默认，无 timeRange） | Manchester United vs Luton Town preview team news November 2023 | 海贼王图片素材站 ×5 |
+| ddg（web seam，searchProvider） | 同上英文查询 | 知乎首页/四川人社厅 ×5 |
+| tavily（带 timeRange 时引擎链前置） | 同上（timeRange=2mo） | 真实足球内容，但被近期过滤锁在 2026 年内容 |
+
+加 Clash 代理重跑对照：垃圾依旧——**排除网络层，定位为引擎路由**（bing/ddg keyless
+对英文查询不可用；bingMarket 默认 zh-CN 加剧）。另发现 free-search 的 timeRange 语义
+是「近期过滤」：历史回放场次带上它会把目标日期内容全部滤掉（E2E 中模型自选了
+timeRange=2mo，恰是第三个致垃圾因素）。
+
+**修复（三件套，2026-09-04）**：
+
+1. profile 配置：`fa-agent-enh/cordis.patch.yml` 用户层覆写 `web-search-free.provider:
+   bing → tavily`（tavily keyless 匿名额度、质量实测可用；统一回退链保留，tavily 失败
+   仍自动轮下一引擎）。`web` seam 的 `searchProvider: ddg` 是插件 provider id，不动。
+2. prompt（`runner.py` `_ENH_SUFFIX`）：「可以检索」→「必须至少发起一次检索」；
+   禁用 timeRange 近期过滤（历史回放会被滤空）；钉住诚实降级条款（检索不可用 →
+   sources 留空且 digest 注明「检索无可用结果」，严禁编造来源）。
+3. compare 告警措辞：改引用口径（「sources 全空」）并指向本节，不再断言「未触发」。
+
+**修复后单场验证**（Crystal Palace vs Sheffield United 2024-01-30，2026-09-04）：6 次
+`advanced_search` 全部无 timeRange、英文全名+日期检索词，**6/6 由 tavily 服务**；
+`sources` 2 条真实引用（Evening Standard 阵容/伤停、Yorkshire Post 伤情），日期均早于
+比赛日；`reasoning_digest` 明示「检索确认 Olise/Ayew 回归与 Sheff 严重伤情」——检索
+不仅触发且被采纳进预测依据。
+
+**残留**：final message 前缀 prose 仍偶发（A.9 已知，解析器可恢复，非本次回归）；
+tavily keyless 匿名额度上限未压测（扩批时观察，超限则评估 TAVILY_API_KEY 付费档——
+属负责人裁定）。
+
 ## 14. 按构建勘误（as-built notes）
 
 实现与计划的四处偏差，以本节为准（正文不再回改，保持设计阶段的原始决策可追溯）：
