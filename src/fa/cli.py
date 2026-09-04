@@ -904,6 +904,28 @@ def ops_watchdog_cmd() -> None:
         raise typer.Exit(code=1)
 
 
+@ops_app.command("weekly")
+def ops_weekly_cmd() -> None:
+    """周度小结（M5 §10）：上个自然周 paper 双轨对照 → TG；空周静默"""
+    from fa.pipeline.reporting import last_error
+    from fa.pipeline.weekly import run_weekly
+
+    conn = connect()
+    try:
+        out = run_weekly(conn)
+    finally:
+        conn.close()
+
+    if out["empty"]:
+        typer.echo("周度小结：静默（上周无落注、无结算）")
+        return
+    if out["sent"]:
+        typer.echo("周度小结已发 Telegram")
+        return
+    typer.echo(f"周度小结推送失败（{last_error()}）")
+    raise typer.Exit(code=1)
+
+
 @ops_app.command("backfill-clv")
 def ops_backfill_clv_cmd() -> None:
     """补齐已结算 paper 注缺失的收盘基准（只填 NULL，损益与状态不动）"""

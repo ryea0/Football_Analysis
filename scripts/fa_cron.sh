@@ -16,8 +16,8 @@
 set -u
 
 JOB="${1:-}"
-if [[ "$JOB" != daily && "$JOB" != am && "$JOB" != pm ]]; then
-  echo "用法: $0 <daily|am|pm>" >&2
+if [[ "$JOB" != daily && "$JOB" != am && "$JOB" != pm && "$JOB" != weekly ]]; then
+  echo "用法: $0 <daily|am|pm|weekly>" >&2
   exit 64
 fi
 
@@ -31,9 +31,10 @@ mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/$(date +%F)_$JOB.log"
 
 case "$JOB" in
-  daily) CMD=(fa run daily) ;;
-  am)    CMD=(fa run matchday --phase am) ;;
-  pm)    CMD=(fa run matchday --phase pm) ;;
+  daily)  CMD=(fa run daily) ;;
+  am)     CMD=(fa run matchday --phase am) ;;
+  pm)     CMD=(fa run matchday --phase pm) ;;
+  weekly) CMD=(fa ops weekly) ;;   # 周一 07:00：daily 结算后的上周小结（空周静默）
 esac
 
 cd "$PROJECT_ROOT"

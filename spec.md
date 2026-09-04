@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | 项目名 | fa（Football Analysis） |
-| 版本 | v0.8（确认稿） |
+| 版本 | v0.9（确认稿） |
 | 日期 | 2026-09-04 |
 | 状态 | M1 完成；M2 判决 NO-GO（+3.02%，docs/m2-verdict.md）；**项目负责人批准 §12 双线并存协议——B 线（M3-M5 paper 模式）在推翻顺序关卡的前提下启动**（2026-09-03） |
 
@@ -14,6 +14,7 @@
 > v0.5 → v0.6 变更：新增本地只读看板（§7.4）——`dashboard/`（Streamlit + plotly，独立 dependency-group），B/A 线分区观察出口，只读连库、指标口径复用回测模块（设计：docs/superpowers/specs/2026-09-04-web-dashboard-design.md）。
 > v0.6 → v0.7 变更：调度载体双轨化（§9.6）——system crontab 与 hermes cron 双载体可切换（2026-09-04 负责人裁定「并行开发、实现可切换」）；job 唯一入口 `scripts/fa_cron.sh`，失败告警与漏跑看护收进 `fa ops alert` / `fa ops watchdog`（风险 #6 落地）。
 > v0.7 → v0.8 变更：CLV 收盘基准链（§3.2/§7.3）——football-data 自 2025-12 断供 Pinnacle，B 线收盘基准改为「Pinnacle 优先、缺失 fallback Betfair 交易所（`bfe_*`）」并以 `bets.closing_source` 记账（2026-09-04 负责人裁定）；matches 增 `bfe_*` 四列（schema v6——v5 已被范式对比线占用）、`fa data backfill-bfe` / `fa ops backfill-clv` 回填既有分区与台账；A 线回测基准不变。
+> v0.8 → v0.9 变更：周度小结（§9.6 weekly / §10）——`fa ops weekly` 上周双轨对照（落注/结算/ROI/CLV/bankroll）周一 07:00 推 TG，空周静默；§12.3 判据时钟裁定——6 周观察期自 cron 激活日起算，激活前数据留档不进预注册样本（2026-09-04 负责人裁定）。
 
 ---
 
@@ -395,6 +396,7 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 | daily | 每日 06:30 | `fa run daily`（数据更新 + 结算） |
 | matchday-am | 每日 11:00 | `fa run matchday --phase am`：拉盘→建模→价值→persona→**完整推荐报告**；管线内部检查当日赛程，无赛事即空跑退出，不耗额度 |
 | matchday-pm | 每日 17:00 | `fa run matchday --phase pm`：**更新版报告（已确认）**——与 11:00 对比只推差异：已推候选的盘口移动（CLV 预览）、新增/消失候选，去重不重发全量；persona 不重跑（沿用 11:00 判决），仅对新增候选场次补跑一次 |
+| weekly | 每周一 07:00 | `fa ops weekly`（M5 §10「周度小结」，v0.9）：上个自然周（北京时间）paper **双轨对照**（落注/结算/ROI/CLV 中位/bankroll）→ TG；空周（双落注且零结算）静默——daily 结算后、am 拉盘前的槽位 |
 
 **载体与告警（2026-09-04 负责人裁定：双载体并行开发、实现可切换）**：三条 job 的
 唯一入口是 `scripts/fa_cron.sh <daily|am|pm>`——环境补齐（PATH 补 uv 所在、导出
@@ -503,6 +505,7 @@ LLM，gateway 亦无须配 TG 代理，告警走 fa 自己的推送路径）。�
 
 - **B 线胜出**：模拟盘累计 ≥300 注 且（a）model_persona 轨 CLV > 0，或（b）model_persona 轨 ROI 显著优于 model_only 轨——则 persona/运营假设成立，再议实盘
 - **B 线归档**：6 周后未达胜出条件 → B 线停跑归档，结论记档（「persona 未能拯救负选择池」或「样本不足」如实记录）
+- **判据时钟裁定（2026-09-04 负责人）**：6 周观察期自 **cron 激活日**（集成分支合并 + `cron_install.sh` 装配之日——无人值守跑批、M4 双轨、CLV 基准链同时就位）起算；model_persona 轨的 A/B 对比样本同日起算。激活前的 09-03~09-04 首跑数据留档但不进预注册判据样本（机械栈未齐的样本质量参差）
 - **A 线判据不变**：任何新建模想法仍须样本外劣化 ≤1% 才具转正资格
 - 两线结论**不得互相冒充**：A 线的历史判决不因 B 线前向波动修改；B 线不引用回测数字充当前向证据
 
