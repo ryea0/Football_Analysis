@@ -10,6 +10,9 @@ CLV，价「走低」（2.10→2.30）给负 CLV。
 import json
 from datetime import datetime, timezone
 
+
+
+
 import pytest
 
 from fa.db import connect, init_db
@@ -23,6 +26,16 @@ from fa.report.render import (
 
 LG = "E0"
 SUMMARY = {"train_n": 1234, "half_life": 100.0}
+# D2 分轨 bankroll 键（与 fa.pipeline.paper.bankroll_key("model_only") 同形；
+# 字面量书写以维持本文件「不 import 管线模块」的隔离约定）
+BANKROLL_MO = "paper_bankroll:model_only"
+
+
+def _persona_summary(degraded=()):
+    """matchday 落 runs.summary 的 persona 块（T13 形状）：degraded 全列表。"""
+    return {"train_n": 1234, "half_life": 100.0,
+            "persona": {"called": 3, "ok": 3, "veto": 0,
+                        "degraded": list(degraded)}}
 
 # 「现在」冻结在北京 2026-09-05 14:00（UTC 06:00）：_kickoff_cn 的当日/跨日分支
 # 用注入时刻判定，测试不依赖墙钟，也不会踩到周边界。
@@ -85,7 +98,7 @@ def _am_with_two(conn):
     _pending_bet(conn, r1)
     _pending_bet(conn, r2)
     conn.execute(
-        "INSERT INTO meta (key, value) VALUES ('paper_bankroll', '1000.0')")
+        "INSERT INTO meta (key, value) VALUES (?, '1000.0')", (BANKROLL_MO,))
     conn.commit()
     return rid
 
@@ -122,11 +135,12 @@ def test_am_report_renders_all_spec_elements(conn):
     assert "半衰期" in out
     assert "额度" in out and "450" in out
     assert "降级" in out
-    # §7.1 第 4 条：bankroll 快照 + 未结注
+    # §7.1 第 4 条：bankroll 快照（D2 分轨）+ 未结注
     assert "bankroll" in out and "1000.00" in out
     assert "未结" in out and "2" in out
-    # §7.1 第 2 条：M3 无 persona → 占位一行
-    assert "persona 未接入（M4）" in out
+    # §7.1 第 2 条：M4 persona 段——无判决时显式一行，不再有占位文本
+    assert "本相位无 persona 判决" in out
+    assert "persona 未接入" not in out
 
 
 def test_am_report_markdown_structure(conn):
@@ -154,17 +168,18 @@ def test_am_report_empty_candidates(conn):
     assert "无候选" in out
     assert "| 联赛 | 场次 | 开赛 |" not in out
     assert "### 英超" not in out
-    assert "persona 未接入（M4）" in out
+    assert "本相位无 persona 判决" in out
     assert "bankroll" in out
     assert "未结" in out
 
 
 def test_am_report_bankroll_uninitialized(conn):
     rid = _am_with_two(conn)
-    conn.execute("DELETE FROM meta WHERE key='paper_bankroll'")
+    conn.execute("DELETE FROM meta WHERE key=?", (BANKROLL_MO,))
     conn.commit()
     out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
-    assert "bankroll" in out and "未初始化" in out
+    assert "- model_only：未初始化" in out
+    assert "- model_persona：未初始化" in out
 
 
 def test_am_report_scoped_to_run(conn):
@@ -186,7 +201,7 @@ def test_am_report_sample_size_missing_degrades_neutral(conn):
     rid = _am_with_two(conn)
     out = render_matchday_report(conn, rid, "am", {}, 450, False)
     assert "样本量" in out and "未提供" in out
-    assert "persona 未接入（M4）" in out
+    assert "本相位无 persona 判决" in out
 
 
 def test_am_report_quota_unknown(conn):
@@ -326,7 +341,7 @@ def test_pm_update_does_not_resend_full_list(conn):
     assert out.count("Arsenal vs Chelsea") == 0   # 未变候选不成行
     assert "未变" in out and "2" in out
     assert "## 盘口移动（0）" in out
-    assert "persona 未接入（M4）" in out
+    assert "本相位无 persona 判决" in out
 
 
 def test_pm_update_all_three_cases_together(conn):
@@ -425,13 +440,17 @@ def test_pm_update_survives_unreadable_am_summary(conn):
 # ------------------------------------------------- A/B 双轨（M4 前向）
 
 
-def _persona_rec(conn, run_id, fixture_id, market, phase, best_odds):
+def _persona_rec(conn, run_id, fixture_id, market, phase, best_odds, *,
+                 verdict=None, delta=None, factors=None, report_md=None):
+    """model_persona 行；带 verdict/delta/factors/report_md 即为已判行（T8 产物）。"""
     conn.execute(
         "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
         " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
-        " created_at) VALUES (?,?,'model_persona',?,?,?,?,?,'pinnacle',0.07,0.10,"
-        "0.020,'2026-09-03T03:00:00Z')",
-        (run_id, fixture_id, market, phase, 0.550, 0.460, best_odds))
+        " verdict, confidence_delta, key_factors, report_md, created_at)"
+        " VALUES (?,?,'model_persona',?,?,?,?,?,'pinnacle',0.07,0.10,"
+        "0.020,?,?,?,?, '2026-09-03T03:00:00Z')",
+        (run_id, fixture_id, market, phase, 0.550, 0.460, best_odds,
+         verdict, delta, factors, report_md))
 
 
 def test_am_report_two_strategies_same_market_render_distinctly(conn):
@@ -482,21 +501,21 @@ def test_am_report_unaligned_fixture_never_renders_none(conn):
 
 
 def test_am_report_non_numeric_bankroll_renders_neutral(conn):
-    """meta.paper_bankroll 非数字（脏数据）→ 中性占位，不崩也不渲染原值。"""
+    """分轨 meta 值非数字（脏数据）→ 中性占位，不崩也不渲染原值。"""
     rid = _am_with_two(conn)
-    conn.execute("UPDATE meta SET value='abc' WHERE key='paper_bankroll'")
+    conn.execute("UPDATE meta SET value='abc' WHERE key=?", (BANKROLL_MO,))
     conn.commit()
     out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
-    assert "bankroll" in out and "未初始化" in out
+    assert "- model_only：未初始化" in out
     assert "abc" not in out
 
 
 def test_am_report_empty_string_bankroll_renders_neutral(conn):
     rid = _am_with_two(conn)
-    conn.execute("UPDATE meta SET value='' WHERE key='paper_bankroll'")
+    conn.execute("UPDATE meta SET value='' WHERE key=?", (BANKROLL_MO,))
     conn.commit()
     out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
-    assert "未初始化" in out
+    assert "- model_only：未初始化" in out
 
 
 # ------------------------------------------------- pm diff 数值守卫
@@ -661,3 +680,150 @@ def test_pm_update_sections_grouped_by_league_with_kickoff(conn):
     gone = out.split("## 已消失")[1]
     assert "### 英超（1）" in gone
     assert "Bayern vs Dortmund" in gone
+
+
+# ------------------------------------------------- persona 段（M4 T14 真渲染）
+
+
+def test_am_report_persona_block_renders_all_verdicts_and_degraded(conn):
+    """§7.1 第 2 条：判决按场次成行（✅/⚠️（delta）/⛔）+ key_factors 逐条 +
+    report_md 引用行；降级场给 ⚪ 行并标中文原因；段尾给汇总行。"""
+    rid = _run(conn, "am")
+    f3 = _fixture(conn, "ev-3", _team(conn, "Newc"), _team(conn, "Everton"))
+    f4 = _fixture(conn, "ev-4", _team(conn, "Leeds"), _team(conn, "Burnley"))
+    conn.commit()
+    _persona_rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 2.05, verdict="agree",
+                 delta=0.05, factors=json.dumps(["主队中卫伤停确认"],
+                                                ensure_ascii=False),
+                 report_md="模型对主胜的信心略保守。")
+    _persona_rec(conn, rid, _fid(conn, "ev-2"), "O2.5", "am", 1.85,
+                 verdict="downweight", delta=-0.05,
+                 factors=json.dumps(["客队周中欧战"], ensure_ascii=False),
+                 report_md="该市场仓位应下调。")
+    _persona_rec(conn, rid, f3, "A", "am", 3.60, verdict="veto", delta=0.0,
+                 factors="[]", report_md="放弃该市场。")
+    conn.commit()
+    text = render_matchday_report(conn, rid, "am", _persona_summary(
+        [{"fixture_id": f4, "reason": "timeout"}]), 480, False)
+    assert "✅" in text and "⚠️" in text and "⛔" in text and "⚪" in text
+    assert "persona 4 场：✅1 ⚠️1 ⛔1 · 未生效 1" in text
+    assert "persona 未生效（超时）" in text
+    assert "downweight（-0.05）" in text                  # 降权必须带 delta
+    assert "  - 主队中卫伤停确认" in text                # key_factors 缩进逐条
+    assert len([l for l in text.splitlines()
+                if l.strip().startswith("> ")]) >= 1     # report_md 引用行
+
+
+def test_am_report_truncates_report_md_to_200(conn):
+    """report_md（契约 ≤500 字）截 200 字引用——TG 推送不留长文。"""
+    rid = _run(conn, "am")
+    _persona_rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 2.05, verdict="agree",
+                 delta=0.0, factors="[]", report_md="字" * 300)
+    conn.commit()
+    text = render_matchday_report(conn, rid, "am", {}, 480, False)
+    md_lines = [l for l in text.splitlines() if l.startswith("  > ")]
+    assert md_lines and len(md_lines[0]) <= 4 + 200       # 「  > 」+ 200 字
+
+
+def test_bankroll_block_lists_both_tracks(conn):
+    """D2 分轨：bankroll 块两轨各一行，model_persona 未初始化不冒充 0。"""
+    rid = _am_with_two(conn)
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 480, False)
+    assert "- model_only：1000.00" in out
+    assert "- model_persona：未初始化" in out
+
+
+def test_am_report_persona_degraded_only(conn):
+    """只有降级、无判决 → 汇总行零判决三格 + ⚪ 行，不出现占位文本。"""
+    rid = _am_with_two(conn)
+    out = render_matchday_report(conn, rid, "am", _persona_summary(
+        [{"fixture_id": _fid(conn, "ev-1"), "reason": "extract"}]), 450, False)
+    assert "persona 1 场：✅0 ⚠️0 ⛔0 · 未生效 1" in out
+    assert "persona 未生效（输出无法解析为 JSON）" in out
+
+
+def test_am_report_persona_degraded_unknown_reason_passthrough(conn):
+    """词表外的原因原样透出（不静默吞，也不渲染成 None）。"""
+    rid = _am_with_two(conn)
+    out = render_matchday_report(conn, rid, "am", _persona_summary(
+        [{"fixture_id": _fid(conn, "ev-1"), "reason": "warp_core_breach"}]),
+        450, False)
+    assert "persona 未生效（warp_core_breach）" in out
+
+
+def test_am_report_persona_block_scoped_to_run(conn):
+    """别的 run 的判决不得混入本相位的 persona 段。"""
+    rid = _am_with_two(conn)
+    other = _run(conn, "am")
+    _persona_rec(conn, other, _fid(conn, "ev-1"), "H", "am", 2.05,
+                 verdict="veto", delta=0.0, factors="[]", report_md="x")
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "⛔" not in out
+    assert "本相位无 persona 判决" in out
+
+
+def test_pm_update_persona_block_reads_pm_run_summary(conn):
+    """render_pm_update 签名不变：persona 段从 pm run 自身 summary 读降级。"""
+    am = _am_with_two(conn)
+    pm = _run(conn, "pm")
+    _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", 2.10)
+    conn.commit()
+    conn.execute("UPDATE runs SET summary=? WHERE id=?", (json.dumps(
+        {"persona": {"called": 1, "ok": 0, "veto": 0, "degraded": [
+            {"fixture_id": _fid(conn, "ev-2"), "reason": "exit"}]}}), pm))
+    conn.commit()
+    out = render_pm_update(conn, am, pm, 430, False)
+    assert "persona 未生效（hermes 异常退出）" in out
+    assert "persona 1 场：✅0 ⚠️0 ⛔0 · 未生效 1" in out
+
+
+def test_pm_update_added_candidate_carries_verdict_icon(conn):
+    """pm 新增候选行尾附判决标识——**只挂 model_persona 行**（处理效应标记，
+    不得污染 persona 盲视的对照轨，§6.6/§12.3）；盘口移动行不带点评。"""
+    am = _am_with_two(conn)
+    pm = _run(conn, "pm")
+    fx = _fixture(conn, "ev-3", _team(conn, "Newc"), _team(conn, "Everton"))
+    conn.commit()
+    _rec(conn, pm, _fid(conn, "ev-1"), "H", "pm", 1.90)   # 移动（am 2.10 → 1.90）
+    _rec(conn, pm, fx, "A", "pm", 3.60)                   # model_only 新增（同场对照轨）
+    _persona_rec(conn, pm, fx, "A", "pm", 3.55, verdict="downweight",
+                 delta=-0.05, factors="[]", report_md="x")
+    conn.commit()
+    out = render_pm_update(conn, am, pm, 430, False)
+    added = [l for l in out.splitlines() if "Newc vs Everton" in l]
+    persona_line = [l for l in added if "模型+persona" in l]
+    blind_line = [l for l in added if "纯模型" in l]
+    assert persona_line and "，persona ⚠️" in persona_line[0]   # persona 轨行带判决标识
+    assert blind_line and "，persona" not in blind_line[0]      # 对照轨不带：该轨仓位未下调
+    moved = [l for l in out.splitlines() if "2.10 → 1.90" in l]
+    assert moved and "persona" not in moved[0]            # 移动行不带点评
+
+
+def test_pm_update_added_candidate_without_verdict_has_no_icon(conn):
+    """pm 新增但 persona 未判（如降级）→ 行尾无标识，不渲染空括号。"""
+    am = _am_with_two(conn)
+    pm = _run(conn, "pm")
+    fx = _fixture(conn, "ev-3", _team(conn, "Newc"), _team(conn, "Everton"))
+    conn.commit()
+    _persona_rec(conn, pm, fx, "A", "pm", 3.60)           # verdict 仍 NULL
+    conn.commit()
+    out = render_pm_update(conn, am, pm, 430, False)
+    added = [l for l in out.splitlines() if "Newc vs Everton" in l]
+    # 「，persona ⚠️」标识不出现（注意别和策略标签「模型+persona」混淆）
+    assert added and "，persona" not in added[0] and "None" not in added[0]
+
+
+def test_am_report_ignores_non_persona_verdict_and_bad_json_factors(conn):
+    """防御：model_only 轨的判决不进 persona 段；key_factors 非 JSON → 当空。"""
+    rid = _run(conn, "am")
+    fx = _fid(conn, "ev-1")
+    _rec(conn, rid, fx, "H", "am", 2.10)
+    _persona_rec(conn, rid, fx, "H", "am", 2.05, verdict="agree", delta=0.0,
+                 factors="not-json{", report_md="x")
+    _persona_rec(conn, rid, _fid(conn, "ev-2"), "O2.5", "am", 1.85,
+                 verdict="agree", delta=0.0, factors=None, report_md=None)
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    assert "persona 2 场：✅2 ⚠️0 ⛔0 · 未生效 0" in out
+    assert "not-json" not in out                          # 脏 factors 不透出

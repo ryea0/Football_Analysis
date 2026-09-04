@@ -1,0 +1,3 @@
+#!/bin/sh
+# hermes_timeout——挂死等超时
+sleep 30

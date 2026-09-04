@@ -59,6 +59,20 @@ def _set_version(path, version: int, drop: tuple = ()) -> None:
     c.close()
 
 
+def _strip_persona_columns(path) -> None:
+    """把库退到 v3 形状：摘掉 v4 新增两列并置版本号=3——模拟 M3 上线库。
+
+    两列是普通可空列（无索引/CHECK/外键引用），SQLite ≥3.35 的
+    DROP COLUMN 可直接摘除，摘完 recommendations 与 v3 逐列等价。
+    """
+    c = connect(path)
+    c.execute("ALTER TABLE recommendations DROP COLUMN key_factors")
+    c.execute("ALTER TABLE recommendations DROP COLUMN report_md")
+    c.execute("UPDATE schema_version SET version=3")
+    c.commit()
+    c.close()
+
+
 def test_init_creates_tables(conn):
     names = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -93,6 +107,13 @@ def test_fresh_db_is_current(tmp_path):
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
+    cols = _table_cols(c, "recommendations")
+    assert cols["key_factors"] == ("TEXT", 0, 0)      # 可空、非主键
+    assert cols["report_md"] == ("TEXT", 0, 0)
+    order = list(cols)
+    # 紧跟 final_stake_frac 之后（brief Step 3 的列位），v3 既有列序不动
+    assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
+        ["key_factors", "report_md"]
     c.close()
 
 
@@ -145,6 +166,7 @@ def test_v2_upgrades_to_current(tmp_path):
     for t in (*_BLINE_TABLES, "retro_runs", "retro_attributions", *_AGENTLINE_TABLES):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c)
+    assert {"key_factors", "report_md"} <= set(_table_cols(c, "recommendations"))
     c.close()
 
 
@@ -168,6 +190,7 @@ def test_v1_upgrades_to_current(tmp_path):
               *_AGENTLINE_TABLES):
         assert c.execute(f"SELECT COUNT(*) c FROM {t}").fetchone()["c"] == 0
     _assert_legacy_rows_intact(c, bp_count=0)
+    assert {"key_factors", "report_md"} <= set(_table_cols(c, "recommendations"))
     c.close()
 
 
@@ -301,6 +324,9 @@ def test_bline_vocab_accepts_all_legal_values(conn, bline_ids):
 
 def test_migrate_up_v1_adds_everything(tmp_path):
     """_migrate_up 单独跑就能把 v1 库补齐到当前版本（不依赖 _SCHEMA 兜底）。"""
+
+
+    """_migrate_up 单独跑就能把 v1 库补齐到 v4（不依赖 _SCHEMA 兜底）。"""
     p = tmp_path / "v1.db"
     _legacy_db(p, version=1, with_bp=False)
     c = connect(p)
@@ -308,13 +334,14 @@ def test_migrate_up_v1_adds_everything(tmp_path):
     names = {r["name"] for r in c.execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"backtest_predictions", *_BLINE_TABLES} <= names
+    assert {"key_factors", "report_md"} <= set(_table_cols(c, "recommendations"))
     assert c.execute(
         "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     c.close()
 
 
-def test_migrate_up_v2_adds_bline_and_retro(tmp_path):
-    """v2 库走 _migrate_up 补 B 线五表与 retro 两表，不动 backtest_predictions。"""
+def test_migrate_up_v2_adds_bline_retro_and_persona(tmp_path):
+    """v2 库走 _migrate_up 补 B 线五表、retro 两表与 persona 两列，不动 backtest_predictions。"""
     p = tmp_path / "v2.db"
     _legacy_db(p, version=2, with_bp=True)
     c = connect(p)
@@ -328,18 +355,26 @@ def test_migrate_up_v2_adds_bline_and_retro(tmp_path):
     assert c.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' "
         "AND name='backtest_predictions'").fetchone()["sql"] == bp_before
+    assert {"key_factors", "report_md"} <= set(_table_cols(c, "recommendations"))
     assert c.execute(
         "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     c.close()
 
 
-def test_migrate_and_fresh_schemas_match(tmp_path):
-    """新建与迁移两条路径产出的全部表/索引 DDL 必须逐字一致（M2 教训的推广）。"""
-    init_db(tmp_path / "a.db")                      # 全新库
-    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回当前版本
-    _set_version(tmp_path / "b.db", 1,
-                 drop=("backtest_predictions", *_BLINE_TABLES,
-                       "retro_runs", "retro_attributions", *_AGENTLINE_TABLES))
+@pytest.mark.parametrize("from_v,drop", [
+    (1, ("backtest_predictions", *_BLINE_TABLES)),   # v1 跨级升级
+    (3, ()),                                         # v3 就地升级（M3 真库路径）
+], ids=["from_v1", "from_v3"])
+def test_migrate_and_fresh_schemas_match(tmp_path, from_v, drop):
+    """新建与迁移两条路径产出的表形状必须一致（M2 教训的推广）。
+
+    from_v=3 腿先摘掉 v4 两列再升，等价于真实 M3 库的 v3 形状。
+    """
+    init_db(tmp_path / "a.db")                      # 全新 v4
+    init_db(tmp_path / "b.db")                      # 降到 from_v 再升级回 v4
+    if from_v == 3:
+        _strip_persona_columns(tmp_path / "b.db")
+    _set_version(tmp_path / "b.db", from_v, drop=drop)
     init_db(tmp_path / "b.db")
 
     tables = ("backtest_predictions", *_BLINE_TABLES,
@@ -347,16 +382,22 @@ def test_migrate_and_fresh_schemas_match(tmp_path):
     a = connect(tmp_path / "a.db")
     b = connect(tmp_path / "b.db")
     for t in tables:
-        sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
-        assert a.execute(sql, (t,)).fetchone()["sql"] == \
-            b.execute(sql, (t,)).fetchone()["sql"], t
+        # 列级形状（名/类型/非空/主键）逐列一致
+        assert _table_cols(a, t) == _table_cols(b, t), t
+        # 唯一约束同样一致（recommendations 的四元组 UNIQUE 不因迁移丢失）
+        assert _unique_columns(a, t) == _unique_columns(b, t), t
         # 索引（含 UNIQUE 自动索引之外的命名索引）也须一致
         sql = "SELECT name, sql FROM sqlite_master " \
               "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name"
         assert a.execute(sql, (t,)).fetchall() == \
             b.execute(sql, (t,)).fetchall(), t
-        # 列级形状（名/类型/非空/主键）逐列一致
-        assert _table_cols(a, t) == _table_cols(b, t), t
+        # DDL 文本逐字一致——唯一例外是走过列级迁移的表：ALTER TABLE ADD COLUMN
+        # 会把新列缀在表尾并重写建表语句文本，列序与文本天然不同于新建路径
+        # （语义形状由上面三重断言钉住）。
+        if not (from_v == 3 and t == "recommendations"):
+            sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
+            assert a.execute(sql, (t,)).fetchone()["sql"] == \
+                b.execute(sql, (t,)).fetchone()["sql"], t
     a.close(); b.close()
 
 
@@ -410,7 +451,8 @@ def test_bline_nullability(conn):
     nullable = {
         "fixtures": ("home_team_id", "away_team_id"),
         "odds_snapshots": ("fixture_id",),
-        "recommendations": ("verdict", "confidence_delta", "final_stake_frac"),
+        "recommendations": ("verdict", "confidence_delta", "final_stake_frac",
+                            "key_factors", "report_md"),
         "bets": ("settled_at", "return_amt", "closing_odds", "clv"),
         "runs": ("phase", "finished_at", "credits_before", "credits_after",
                  "summary"),

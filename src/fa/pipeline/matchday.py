@@ -1,7 +1,17 @@
 """比赛日 run 编排（T9，spec §3.4 / §7.1 / §9.5 / §9.6）：``fa run matchday``。
 
-一次 run = 记录（runs）→ 同步（T5）→ 推荐（T6）→ 落注（T7）→ 渲染 → 推送 → 收尾。
-编排层只做**流程与降级判断**，业务语义都在被调方（sync / value / paper / report）：
+一次 run = 记录（runs）→ 同步（T5）→ 推荐（T6）→ **persona（T13，§6）** →
+落注（T7）→ 渲染 → 推送 → 收尾。
+编排层只做**流程与降级判断**，业务语义都在被调方（sync / value / persona /
+paper / report）：
+
+- **persona**（am 全量 / pm 只补新增场次，§6.2）：排在落注**之前**——veto 判决
+  若迟到，注已按中性 kelly 落下，落注去重在 ``(fixture, market, strategy, mode)``
+  级只挡重下、不撤旧注。pm 的 ``attempted`` 名单读当日 am run 的
+  ``runs.summary.persona.attempted``；无 am 对照（``am_run_id`` None）则全跑。
+  persona 降级只记 :func:`run_persona_phase` 的返回值进 ``summary["persona"]``
+  （§6.5 该场回退纯模型、报告标注归 render 层），**不**计入本模块的数据降级
+  ``degraded``——那一份语义是「非实时盘」，两路标注互不污染。
 
 - **am**（11:00 全量）：key 缺失 → ``no_key`` 早退（不触网）；照常拉盘；无当日赛事
   → ``skipped`` 空跑（不渲染不推送）；额度低于 :data:`QUOTA_FLOOR` 只**标注**降级
@@ -36,6 +46,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
@@ -53,6 +64,7 @@ from fa.pipeline.runs import (RUN_MATCHDAY, STATUS_DEGRADED, STATUS_FAILED,
                               begin_run, finish_run)
 from fa.pipeline.value import (MIN_TRAIN_ROWS, WINDOW_HOURS,
                                _parse_kickoff, generate_recommendations)
+from fa.persona.apply import run_persona_phase
 
 QUOTA_FLOOR = 100        # spec §3.4「低于阈值（如 100）」
 # 额度节流第二档（spec §3.4「合并 region」）：500/月档 · 双区全扫≈20/次 →
@@ -69,7 +81,8 @@ def run_matchday(conn: sqlite3.Connection, phase: str,
     返回键：``status``（ok / degraded_ok / skipped / no_key）、``run_id``、
     ``phase``、``fixtures`` / ``aligned`` / ``unknown``、``recs`` / ``bets``、
     ``quota_left``、``degraded``、``sent``（None = 本次未推送）、``am_run_id``
-    （仅 pm 有对照对象）。``phase`` 非法上抛 :class:`ValueError`。
+    （仅 pm 有对照对象）、``persona``（``{"called","ok","veto","degraded"}``，
+    未走到 persona 阶段为 None）。``phase`` 非法上抛 :class:`ValueError`。
     额度告急收窄 region（``quota_before < QUOTA_MERGE_FLOOR``）时 ``runs.summary``
     另记 ``region_merged=True`` 与理由串；返回 dict 另带 ``region_merged`` /
     ``snapshot_reused`` 两个布尔（降级三态的本窗事实，CLI 选文案用，均为加键不破契约）。
@@ -171,6 +184,13 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
                   (probe_quota if probe == "found" else quota_before))
 
     rec_ids = generate_recommendations(conn, leagues, phase, run_id)
+    # persona 必须在落注之前（§6.2 顺序裁定）：veto 判决先落库，paper 才不会按
+    # 中性 kelly 给被否场下单——落注去重只挡重下、不撤旧注，倒置即无法挽回。
+    # pm 只补新增场次：attempted = 当日 am run 的名单（§6.2「不重跑沿用判决」）；
+    # am 全量；无 am 对照则全跑。名单解析失败回退空集＝多跑无害、漏跑有害。
+    attempted = (_am_attempted(conn, am_run_id)
+                 if phase == "pm" and am_run_id is not None else None)
+    persona_summary = run_persona_phase(conn, run_id, leagues, attempted)
     placed = place_paper_bets(conn, run_id)
     summary = {
         "phase": phase,
@@ -184,6 +204,7 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         "quota_left": quota_left,
         "degraded": bool(reasons),
         "degraded_reasons": reasons,
+        "persona": persona_summary,
         "train_n": _train_n(conn, leagues),
         "half_life": FitConfig().half_life_days,
         "window_hours": WINDOW_HOURS,
@@ -218,7 +239,11 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
                    unknown=summary["unknown"], recs=len(rec_ids), bets=placed,
                    quota_left=quota_left, degraded=bool(reasons), sent=sent,
                    am_run_id=am_run_id, region_merged=merge,
-                   snapshot_reused=reused)
+                   snapshot_reused=reused,
+                   persona={"called": persona_summary["called"],
+                            "ok": persona_summary["ok"],
+                            "veto": persona_summary["veto"],
+                            "degraded": persona_summary["degraded"]})
 
 
 def _result(status: str, run_id: int, phase: str, *, fixtures: int = 0,
@@ -226,19 +251,22 @@ def _result(status: str, run_id: int, phase: str, *, fixtures: int = 0,
             bets: int = 0, quota_left: int | None = None,
             degraded: bool = False, sent: bool | None = None,
             am_run_id: int | None = None, region_merged: bool = False,
-            snapshot_reused: bool = False) -> dict:
+            snapshot_reused: bool = False,
+            persona: dict | None = None) -> dict:
     """统一的返回形状：CLI / 测试只认这一份契约。
 
     ``region_merged`` / ``snapshot_reused`` 是降级三态的**本窗**事实（与 runs.summary
     同源）：CLI 据此选降级文案——只给 ``degraded`` 布尔，文案就得猜「是缩了范围还是
     没拉盘」，而猜错一句就是向用户谎报价格新鲜度。``degraded`` 仍只表示「有降级」。
-    """
+    ``persona`` 只带四个结果键；``attempted`` 名单只进 ``runs.summary``（pm 的
+    沿用依据），不进调用方返回。"""
+
     return {"status": status, "run_id": run_id, "phase": phase,
             "fixtures": fixtures, "aligned": aligned,
             "unknown": list(unknown or []), "recs": recs, "bets": bets,
             "quota_left": quota_left, "degraded": degraded, "sent": sent,
             "am_run_id": am_run_id, "region_merged": region_merged,
-            "snapshot_reused": snapshot_reused}
+            "snapshot_reused": snapshot_reused, "persona": persona}
 
 
 def _finish_skipped(conn: sqlite3.Connection, run_id: int, phase: str,
@@ -349,6 +377,24 @@ def _latest_am_run(conn: sqlite3.Connection, day: date) -> int | None:
         " AND substr(started_at, 1, 10)=? ORDER BY id DESC LIMIT 1",
         (RUN_MATCHDAY, STATUS_OK, STATUS_DEGRADED, day.isoformat())).fetchone()
     return None if row is None else int(row["id"])
+
+
+def _am_attempted(conn: sqlite3.Connection, am_run_id: int) -> set[int]:
+    """am run summary 里的 ``persona.attempted``（pm 沿用判决的依据，§6.2）。
+
+    解析失败/缺键 → 空 set：fail-open（pm 多跑一次无害，漏判有害）。候选 fixture
+    只增不减，故名单缺项的唯一代价是 pm 对该场**补跑**一次 persona——与「无 am
+    对照全跑」同一语义，不会出现「该判未判」。
+    """
+    row = conn.execute("SELECT summary FROM runs WHERE id=?",
+                       (am_run_id,)).fetchone()
+    if row is None or not row["summary"]:
+        return set()
+    try:
+        parsed = json.loads(row["summary"])
+        return set(parsed.get("persona", {}).get("attempted", []))
+    except (ValueError, AttributeError, TypeError):
+        return set()
 
 
 def _train_n(conn: sqlite3.Connection, leagues: list[str]) -> int:

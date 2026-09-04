@@ -30,7 +30,8 @@ CREATE INDEX IF NOT EXISTS idx_bp_league_season
 # B 线（paper 运营）五表：spec §3.2 / §12.1。表边界硬约束——B 线只写这五张
 # （外加 meta），绝不写 backtest_predictions / matches。与 _BP_TABLE 同理，
 # 新建与迁移共用同一常量，两条路径的表结构由构造即一致。
-# M4 persona 才落的位（verdict / confidence_delta / final_stake_frac）建库即可空。
+# M4 persona 才落的位（verdict / confidence_delta / final_stake_frac /
+# key_factors / report_md）建库即可空。
 # 词表用 CHECK 钉死（mode/status/strategy/market/phase/type）——SQLite 无法
 # ALTER ADD CHECK，须趁表空时一次到位；fixtures.status 词表仍在演进，暂不加。
 _BLINE_TABLE = """
@@ -96,6 +97,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     verdict          TEXT,                   -- M4 persona 填写
     confidence_delta REAL,                   -- M4
     final_stake_frac REAL,                   -- M4
+    key_factors      TEXT,                   -- M4 persona：JSON 数组串（§6.3，1–5 条）
+    report_md        TEXT,                   -- M4 persona：点评 ≤500 字（§6.3）
     created_at       TEXT NOT NULL,
     UNIQUE (fixture_id, market, strategy, phase)
 );
@@ -305,7 +308,9 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     retro_attributions 加 attributor 列——v5 分层由 2026-09-04 并行分支合并产生
     （retro ensemble 与 agentline 同日各自 bump v4，合并时统一为单一 v5）；
     v5->v6 纯加列——matches 增 BFE 收盘四列、bets 增 closing_source（Pinnacle
-    断供应对，spec §7.3，2026-09-04）。"""
+    断供应对，spec §7.3）；recommendations 补 persona 两列 key_factors /
+    report_md（§6.3；M4 分支基于旧 main 原占 v4，集成时并入 v6——第三个
+    并行撞号位，2026-09-04）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -338,6 +343,19 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
         bcols = {r["name"] for r in conn.execute("PRAGMA table_info(bets)")}
         if bcols and "closing_source" not in bcols:
             conn.execute("ALTER TABLE bets ADD COLUMN closing_source TEXT")
+        # persona 两列（M4，§6.3）：列级加法只能 ALTER——老库已有数据不得重建
+        # 表；按列存在性判定只补真缺的，半途断掉的迁移可续跑（ADD COLUMN 非事务
+        # 原子）。与 _BLINE_TABLE 同名列同语义，形状一致性由
+        # test_migrate_and_fresh_schemas_match 钉住。
+        rcols = {r["name"] for r in
+                 conn.execute("PRAGMA table_info(recommendations)")}
+        if rcols:
+            if "key_factors" not in rcols:
+                conn.execute(
+                    "ALTER TABLE recommendations ADD COLUMN key_factors TEXT")
+            if "report_md" not in rcols:
+                conn.execute(
+                    "ALTER TABLE recommendations ADD COLUMN report_md TEXT")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
