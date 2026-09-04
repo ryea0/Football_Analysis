@@ -113,8 +113,13 @@ def _label(rec):
 
 
 def _pending_count(conn):
+    """未结注计数——TG 双轨口径（§12.7）：bets 经 recommendations join 过滤到
+    ``_TG_STRATEGIES``（nokb 对照轨不进 TG 正文，也不进这个计数；M6 终审 F5）。"""
+    placeholders = ",".join("?" * len(_TG_STRATEGIES))
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM bets WHERE status='pending'").fetchone()
+        "SELECT COUNT(*) AS n FROM bets b JOIN recommendations r"
+        f" ON r.id = b.recommendation_id WHERE b.status='pending'"
+        f" AND r.strategy IN ({placeholders})", list(_TG_STRATEGIES)).fetchone()
     return row["n"]
 
 

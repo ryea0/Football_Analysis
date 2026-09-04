@@ -183,6 +183,25 @@ def test_am_report_bankroll_uninitialized(conn):
     assert "- model_persona：未初始化" in out
 
 
+def test_pending_count_excludes_nokb_track(conn):
+    """M6 终审 F5：未结注走 TG 双轨口径——nokb 对照轨（model_persona_nokb）的
+    pending 注不进计数（nokb 不进 TG 正文，计数口径与正文一致）。"""
+    rid = _am_with_two(conn)                       # 2 笔 model_only pending
+    nokb = _rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 2.10,
+                strategy="model_persona_nokb")
+    _pending_bet(conn, nokb)
+    mo_settled = _rec(conn, rid, _fid(conn, "ev-2"), "D", "am", 3.10)
+    conn.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker,"
+        " odds_taken, stake, status) VALUES (?,'paper','2026-09-03T03:05:00Z',"
+        "'pinnacle',3.10,10.0,'lost')", (mo_settled,))
+    conn.commit()
+    out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
+    line = next(l for l in out.splitlines() if "未结注" in l)
+    assert "2 注" in line                       # nokb pending 与已结算注都不计
+    assert "3 注" not in line
+
+
 def test_am_report_scoped_to_run(conn):
     """只渲染该 run_id 的行——别的 run 的候选不得混入。"""
     rid = _am_with_two(conn)
