@@ -297,6 +297,52 @@ def test_phase_degrades_unmapped_league_as_persona_file(conn_seeded, monkeypatch
     assert out["attempted"] == sorted([fx, other])
 
 
+def test_phase_degrades_all_when_snapshot_unbuildable(conn_seeded, monkeypatch,
+                                                      fix, persona_files):
+    """M6 终审 F3（相级缝）：``ensure_current_snapshot`` 抛 OSError → 该相全部
+    待判场两轨同降 reason='kb_snapshot'，verdict 保持 NULL、零调用、不抛——
+    matchday phase 不被一个知识快照 IO 故障炸掉（§6.5 降级语义）。"""
+    conn, fx, run_id = conn_seeded
+    _seed_nokb(conn, run_id, fx)
+
+    def boom():
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(apply_mod, "ensure_current_snapshot", boom)
+    monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
+    out = run_persona_phase(conn, run_id, ["D1"])
+    assert out["called"] == 0 and out["nokb_called"] == 0     # 未触达调用
+    assert out["degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
+    assert out["nokb_degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
+    assert out["attempted"] == [fx]                            # 记账契约不变
+    assert all(r["verdict"] is None for r in recs(conn, fx))
+    assert all(r["verdict"] is None for r in conn.execute(
+        "SELECT verdict FROM recommendations"
+        " WHERE strategy='model_persona_nokb'").fetchall())
+
+
+def test_phase_degrades_fixture_when_snapshot_unreadable(conn_seeded, monkeypatch,
+                                                         fix, persona_files):
+    """M6 终审 F3（场级缝）：``window_kb_text`` 抛 OSError → 该场两轨同降
+    reason='kb_snapshot'，其余逻辑照走、不抛（快照目录被外力动过的真实形态）。"""
+    conn, fx, run_id = conn_seeded
+    _seed_nokb(conn, run_id, fx)
+
+    def boom(idx, league):
+        raise OSError("snapshot vanished")
+
+    monkeypatch.setattr(apply_mod, "window_kb_text", boom)
+    monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
+    out = run_persona_phase(conn, run_id, ["D1"])
+    assert out["called"] == 0 and out["nokb_called"] == 0
+    assert out["degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
+    assert out["nokb_degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
+    assert all(r["verdict"] is None for r in recs(conn, fx))
+    assert all(r["verdict"] is None for r in conn.execute(
+        "SELECT verdict FROM recommendations"
+        " WHERE strategy='model_persona_nokb'").fetchall())
+
+
 def test_phase_degradation_isolates_fixtures(conn_seeded, tmp_path, monkeypatch,
                                              persona_files):
     """§6.5 粒度裁定：一场失败不撤销同联赛已成功判决——按 prompt 分流，主 fixture

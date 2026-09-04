@@ -108,7 +108,8 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
     写 model_persona 行；nokb 轨（纯 persona）写 model_persona_nokb 行，顺序固定
     kb→nokb。降级按轨分别记账（degraded = kb 轨、nokb_degraded = nokb 轨），
     persona 文件缺失 / 本场输入组装失败（§6.3 契约缺口）两轨同降（未触达调用
-    不计入 called）。
+    不计入 called）；知识快照建不起（相级）/ 读不了（场级）也两轨同降，
+    reason='kb_snapshot'（M6 终审 F3：IO 缝不炸 phase，§6.5 降级语义）。
     ``attempted`` 里的场跳过且零调用，改做判决传播（pm 沿用 am，§6.2）——按轨
     各自传播。恰一次 ``conn.commit()``。
 
@@ -119,7 +120,16 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
     seen = set(attempted or ())
     counts = {t: {"called": 0, "ok": 0, "veto": 0, "degraded": []}
               for t in _TRACKS}
-    kb_idx = ensure_current_snapshot()      # 快照自足（幂等；B 线唯一读取口）
+    # M6 终审 F3（B 线 §6.5 回归修补）：本相两个知识 IO 缝（快照建立 / 快照读取）
+    # 都不允许炸掉整个 matchday phase——失败一律按 §6.5 降级记账
+    # （reason='kb_snapshot'，两轨同降、verdict 保持 NULL、不触达调用）。
+    try:
+        kb_idx = ensure_current_snapshot()  # 快照自足（幂等；B 线唯一读取口）
+    except OSError:
+        # 相级缝（只调一次）：失败 = 本相所有**待判**场两轨同降。取「逐场降级」
+        # 而非「整相提前 return」——summary 契约（attempted 名单 + 候选可见性）
+        # 不变，attempted 已判场照常传播判决（传播不读快照），commit 照走。
+        kb_idx = None
     rows = conn.execute(
         "SELECT DISTINCT r.fixture_id, f.league FROM recommendations r"
         " JOIN fixtures f ON f.id = r.fixture_id"
@@ -136,6 +146,11 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
         seen.add(fid)                        # 见过即记（无论调没调、成没成）
         if league not in league_set:
             continue
+        if kb_idx is None:                   # 相级快照失败：两轨同降（见上）
+            for t in _TRACKS:
+                counts[t]["degraded"].append({"fixture_id": fid,
+                                              "reason": "kb_snapshot"})
+            continue
         try:
             persona_md = persona_path(league).read_text(encoding="utf-8")
         except (FileNotFoundError, ValueError):
@@ -145,7 +160,15 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                 counts[t]["degraded"].append({"fixture_id": fid,
                                               "reason": "persona_file"})
             continue
-        kb_md = window_kb_text(kb_idx, league)
+        try:
+            kb_md = window_kb_text(kb_idx, league)
+        except OSError:
+            # 场级缝：快照目录被外力动过 / 读失败——只降该场两轨（§6.5 场次级），
+            # 不让一个读盘故障截断本相余下场
+            for t in _TRACKS:
+                counts[t]["degraded"].append({"fixture_id": fid,
+                                              "reason": "kb_snapshot"})
+            continue
         try:
             input_obj = build_input(conn, fid, run_id)
         except PersonaError as exc:
