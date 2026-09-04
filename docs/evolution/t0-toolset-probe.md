@@ -16,4 +16,4 @@
 
 - **「空工具集」形态不存在**：不带 `-t` 是全量而非空集；无效 toolset 名静默产出空输出。
 - **`REFLECT_TOOLSET = "search"`**（计划预设的 stopgap 路径）：`-t search` 将工具面缩到 {web_search} 单工具，prompt 内禁工具条款常驻兜底（「不得使用任何工具或网络检索；证据只来自下方 JSON」）——M4 persona 同款双层围栏。
-- 副作用面披露：`-t search` 下理论上 web_search 仍可被模型自主调用（禁工具条款是 prompt 级围栏）；反思输出经契约六校验（evidence.fixtures 必须命中台账真实场次 id），外部信息混入在关卡人审还会被抽查证据链——三层防线。
+- 副作用面披露：`-t search` 下理论上 web_search 仍可被模型自主调用（禁工具条款是 prompt 级围栏）；反思输出经契约六校验（evidence.fixtures 强制非空整数列表——**不校验 id 是否命中台账**，命中性由关卡人审抽查证据链兜底），外部信息混入还有滚动报告的场次披露可对照——三层防线。
