@@ -6,7 +6,8 @@
 """
 import json
 
-from fa.agentline.runner import build_prompt  # noqa: F401  (Task 4 引擎复用)
+from fa.agentline.contract import parse_attack, parse_prediction
+from fa.agentline.runner import build_prompt
 
 ATTACK_ENUM_HELP = ("overconfidence|missing_context|alt_explanation"
                     "|internal_inconsistency|evidence_weak")
@@ -51,3 +52,77 @@ def build_revision_prompt(info_set: dict, prev_pred: str, attack: str) -> str:
 def max_abs_delta(a: dict, b: dict) -> float:
     """相邻版本胜平负 max-abs（取绝对值故方向无关；入参均须 status='ok'）。"""
     return max(abs(a[k] - b[k]) for k in ("p_home", "p_draw", "p_away"))
+
+
+_MAX_ROUNDS = 2
+_EPS = 0.02
+_PROB_KEYS = ("p_home", "p_draw", "p_away")
+
+
+def _status_of(parsed: dict, run_err: str | None) -> dict:
+    """dsh 层失败 → timeout/error（与 orchestrate._status_of 同式，返回 dict）。"""
+    if run_err is not None:
+        return {**parsed, "status": "timeout" if "超时" in run_err else "error",
+                "reasoning_digest": f"dsh 失败：{run_err}"}
+    return parsed
+
+
+def run_match_debate(call, info: dict) -> dict:
+    """单场辩论（纯编排；call 注入，与 runner.run_headless 同签名）。
+
+    预注册语义（设计 §2.2）：批评者失败→本轮不发起修订、budget_exhausted=1；
+    修订失败→取上一 ok 版、budget_exhausted=1；ε 提前终止→early_stop=1。
+    轮 r 批评者输入含 r-1 轮攻击原文（设计 §2.1，勿重复出题；初版轮为 None）。
+    """
+    rounds: list[dict] = []
+    n_calls = 0
+    budget_exhausted = 0
+    early_stop = 0
+
+    def _record(round_no: int, role: str, parsed: dict, raw: str,
+                dur: float) -> None:
+        rounds.append({"round": round_no, "role": role,
+                       "payload": json.dumps(parsed, ensure_ascii=False),
+                       "raw": raw, "status": parsed["status"], "dur": dur})
+
+    out, err, dur = call(build_prompt(info, "A_base"))
+    n_calls += 1
+    v0 = _status_of(parse_prediction(out or ""), err)
+    _record(0, "generator", v0, out or "", dur)
+    last_ok = v0 if v0["status"] == "ok" else None
+    last_ok_raw = (out or "") if last_ok else None
+    last_attack_raw: str | None = None
+
+    for r in range(1, _MAX_ROUNDS + 1):
+        if last_ok is None:
+            break                        # v0 失败：无版可辩
+        out, err, dur = call(build_critic_prompt(info, last_ok_raw,
+                                                 last_attack_raw))
+        n_calls += 1
+        atk = parse_attack(out or "")
+        if err is not None:
+            atk = {**atk, "status": "timeout" if "超时" in err else "error"}
+        _record(r, "critic", atk, out or "", dur)
+        if atk["status"] != "ok":
+            budget_exhausted = 1
+            break
+        prev_ok = last_ok
+        # 本轮攻击原文留给下轮批评者（设计 §2.1：轮 r 批评者输入含 r-1 轮攻击，
+        # 勿重复出题；初版轮为 None）。brief 原稿此行误写为清空，与设计档矛盾。
+        last_attack_raw = out or ""
+        out, err, dur = call(build_revision_prompt(info, last_ok_raw,
+                                                   last_attack_raw))
+        n_calls += 1
+        parsed = _status_of(parse_prediction(out or ""), err)
+        _record(r, "generator", parsed, out or "", dur)
+        if parsed["status"] != "ok":
+            budget_exhausted = 1
+            break
+        if max_abs_delta(prev_ok, parsed) < _EPS:
+            early_stop = 1
+        last_ok, last_ok_raw = parsed, out or ""
+        if early_stop:
+            break
+    final = last_ok if last_ok is not None else v0
+    return {"final": final, "rounds": rounds, "n_calls": n_calls,
+            "budget_exhausted": budget_exhausted, "early_stop": early_stop}
