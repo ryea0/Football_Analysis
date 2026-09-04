@@ -30,6 +30,8 @@ def _status_of(parsed: dict, run_err: str | None) -> tuple[dict, str]:
 
 def run_line(conn: sqlite3.Connection, line: str, info_dir: Path,
              limit: int | None = None) -> dict:
+    from fa.agentline.store import _now
+    t0 = _now()                       # 台账起点＝批次起点，非批尾落库时刻
     profile = _PROFILE_LINE[line]
     done = {r["match_id"] for r in conn.execute(
         "SELECT match_id FROM agentline_predictions"
@@ -41,14 +43,23 @@ def run_line(conn: sqlite3.Connection, line: str, info_dir: Path,
     if limit is not None:
         todo = todo[:limit]
     counts = {"ok": 0, "parse_fail": 0, "timeout": 0, "error": 0}
-    for mid in todo:
-        info = json.loads((info_dir / f"{mid}.json").read_text(encoding="utf-8"))
-        out, err, dur = runner_mod.run_headless(
-            build_prompt(info, line), profile)
-        parsed, status = _status_of(parse_prediction(out or ""), err)
-        save_prediction(conn, mid, line, parsed, out or "", _HARNESS,
-                        MODEL, dur)
-        counts[status] += 1
-    save_run(conn, line, profile, MODEL, counts,
-             {"n_todo": len(todo), "info_dir": str(info_dir)})
+    summary = {"n_todo": len(todo), "info_dir": str(info_dir)}
+    try:
+        for mid in todo:
+            info = json.loads((info_dir / f"{mid}.json").read_text(
+                encoding="utf-8"))
+            out, err, dur = runner_mod.run_headless(
+                build_prompt(info, line), profile)
+            parsed, status = _status_of(parse_prediction(out or ""), err)
+            save_prediction(conn, mid, line, parsed, out or "", _HARNESS,
+                            MODEL, dur)
+            counts[status] += 1
+    except Exception:
+        # 批中崩溃也必须留台账（已累计计数 + 中断位）再抛——否则留下
+        # 「predictions>0 且 runs=0」的无痕中断，与正常批中观察无法区分
+        # （先例 4a8b05a，retro 同型修复；幂等续跑凭 ok 行集合 + 中断位定位）。
+        save_run(conn, line, profile, MODEL, counts,
+                 {**summary, "interrupted_match_id": mid}, started_at=t0)
+        raise
+    save_run(conn, line, profile, MODEL, counts, summary, started_at=t0)
     return counts

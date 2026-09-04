@@ -30,6 +30,24 @@ def test_save_prediction_upsert(db):
     assert len(rows) == 1 and rows[0]["raw_output"] == "raw2"
 
 
+def test_save_prediction_attributor_members_coexist(db):
+    """v7 三元组 UNIQUE + attributor 参数（A_multi 计划 Task 1 接口）：同 match
+    同 line 下聚合 0 与成员 1..3 四行共存，幂等覆盖按 attributor 分道。"""
+    for a in (1, 2, 3, 0):
+        assert save_prediction(db, 10, "A_multi", _parsed(), f"raw{a}",
+                               "dsh 0.1.2", "flash", 1.5, attributor=a) > 0
+    rows = db.execute("SELECT attributor, raw_output FROM agentline_predictions"
+                      " ORDER BY attributor").fetchall()
+    assert [(r["attributor"], r["raw_output"]) for r in rows] == \
+        [(0, "raw0"), (1, "raw1"), (2, "raw2"), (3, "raw3")]
+    # 幂等覆盖只动自己 attributor 道上的行
+    save_prediction(db, 10, "A_multi", _parsed(), "raw1b", "dsh 0.1.2",
+                    "flash", 1.6, attributor=1)
+    rows = db.execute("SELECT attributor, raw_output FROM agentline_predictions"
+                      " ORDER BY attributor").fetchall()
+    assert len(rows) == 4 and rows[1]["raw_output"] == "raw1b"
+
+
 def test_save_run_counts(db):
     rid = save_run(db, "A_base", "fa-agent-base", "flash",
                    {"ok": 3, "parse_fail": 1, "timeout": 0, "error": 0},

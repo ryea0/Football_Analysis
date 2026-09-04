@@ -92,9 +92,12 @@ def render_report(cmp: dict, out_path: Path) -> None:
     lines += ["", "> ⚠️ A_enh（增强层）为历史回放检索，可能受赛后信息泄漏污染"
               "（缓解措施与抽查见设计 §5.2）——其结论不与 A_base 混排。"]
     # 审计数字要渲染出来才算审计：sources 计数为 0 而 A_enh 有样本时，说明增强层
-    # 的检索从未触发——两线差异只能是采样噪声，必须自己说破（E2E 实证 10/10 全空）。
+    # 无任何被采纳的检索引用——可能是检索未发生，也可能是检索发生了但结果不可用
+    # （首批 E2E 即后者：检索实际发生、引擎返回垃圾，附录 A.6）。两线差异只能是
+    # 采样噪声，必须自己说破。
     if cmp.get("audit", {}).get("enh_sources") == 0 and cmp["A_enh"].get("n"):
-        lines += ["", "> ⚠️ 增强层检索未触发（sources 全空）——"
+        lines += ["", "> ⚠️ 增强层 sources 全空（无被采纳的检索引用）——检索未发生"
+                     "或检索结果不可用（判定方法与首例复盘见附录 A.6）；"
                      "A_enh 与 A_base 差异为采样噪声，非检索增量。"]
     lines += ["", _FOOTNOTE, ""]
     out_path.parent.mkdir(parents=True, exist_ok=True)

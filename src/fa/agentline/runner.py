@@ -21,10 +21,12 @@ _PROFILE_LINE = {"A_base": "fa-agent-base", "A_enh": "fa-agent-enh"}
 
 _ENH_SUFFIX = """
 
-# 网络检索（仅增强层）
-你可以检索网络获取伤停 / 新闻 / 动机信息。
-严禁使用任何比赛开始后产生的信息；检索词必须限定赛前日期（before:{date}）；
-sources 中每条的 date 必须早于比赛日 {date}。
+# 网络检索（仅增强层，必须执行）
+先用 web_search / advanced_search 检索这场比赛的伤停、停赛、近况与动机信息（至少发起一次检索），再完成预测：
+- 检索词用英文，包含双方球队全名与比赛日期，可带 before:{date} 限定；
+- 不要使用 timeRange 等近期时间过滤——目标信息在 {date}，近期过滤会把它全部滤掉；
+- 严禁使用任何比赛开始后产生的信息；sources 中每条的 date 必须早于比赛日 {date}；
+- 检索结果被采纳进预测依据时，sources 必须逐条列出；检索了但结果不可用时，sources 保持 [] 并在 reasoning_digest 注明「检索无可用结果」——严禁编造来源。
 """
 
 
