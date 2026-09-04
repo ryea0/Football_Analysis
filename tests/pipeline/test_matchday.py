@@ -18,8 +18,13 @@ D 被 edge 剔除、A 落带外）——测试内用**与实现同一条拟合�
 persona（T13）：``HERMES_BIN`` 默认指向 tests/persona/fixtures 的脚本（真子进程，
 C1 同一代码路径），人格文件用仓库真件（``personas/epl.md``，config 同一映射）——
 若不钉，matchday 一旦接入 persona 阶段就会在既有用例里真调 PATH 上的 hermes。
+
+M6（§12.7）：``matchday._run`` 一开跑就写本窗知识快照（``evolution/snapshots/``，
+定位走 ``config.project_root()``）——:func:`_isolate_root` 把仓库 ``personas/``
+拷进 tmp 并把 project_root 指过去（内容同源），测试产物不落真仓库。
 """
 import json
+import shutil
 import types
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -53,6 +58,20 @@ TOTALS_DELTA = 0.05
 
 def _boom(*args, **kwargs):
     raise AssertionError("比赛日 run 不得绕过 fetch_odds 触网")
+
+
+def _isolate_root(tmp_path, monkeypatch):
+    """project_root → tmp_path（personas 真件拷入，内容与生产同源）。
+
+    M6 起 ``matchday._run`` 在 run 开始就写本窗知识快照
+    （``evolution/snapshots/wN``，config.project_root() 定位）——不隔离会把测试
+    产物落进真仓库。knowledge 的 seams 全走 ``config.project_root()`` 属性访问，
+    打这一个点即可（evolve 模块 docstring 钉死的 monkeypatch 缝）。
+    """
+    from fa import config
+    shutil.copytree(Path(__file__).resolve().parents[2] / "personas",
+                    tmp_path / "personas")
+    monkeypatch.setattr(config, "project_root", lambda: tmp_path)
 
 
 def _model_probs(c, home=HOME, away=AWAY):
@@ -130,6 +149,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(value, "_now", lambda: _NOW)
     monkeypatch.setattr(runs, "_now", lambda: _NOW)   # started_at/finished_at 同源
     monkeypatch.setattr(urllib.request, "urlopen", _boom)
+    _isolate_root(tmp_path, monkeypatch)   # M6：知识快照写 tmp，不碰真仓库
 
     init_db(tmp_path / "t.db")
     c = connect(tmp_path / "t.db")
@@ -961,6 +981,24 @@ def test_invalid_phase_is_rejected(env):
         "SELECT COUNT(*) c FROM runs").fetchone()["c"] == 0
 
 
+# ---------------------------------------------------------------- M6 版本戳（§12.7）
+
+
+def test_run_summary_carries_personas_hash_and_window(env):
+    """run 开始快照 personas 树内容 hash + 本窗知识快照：三键入 runs.summary，
+    且本 run 推荐行带同一戳（版本戳可归因，设计档 §3.1）。"""
+    c = env.conn
+    out = matchday.run_matchday(c, "am", [LEAGUE])
+    summary = json.loads(c.execute(
+        "SELECT summary FROM runs WHERE id=?", (out["run_id"],)).fetchone()["summary"])
+    assert isinstance(summary["personas_hash"], str) and len(summary["personas_hash"]) == 64
+    assert isinstance(summary["kb_window"], int) and summary["kb_window"] >= 1
+    assert set(summary["git"]) == {"git_rev", "git_dirty"}
+    assert (c.execute("SELECT DISTINCT personas_hash FROM recommendations"
+                      " WHERE run_id=?", (out["run_id"],)).fetchone()
+            is not None)
+
+
 # ---------------------------------------------------------------- 报告接缝
 
 
@@ -1049,6 +1087,7 @@ def test_cli_skipped_and_degraded_prints_empty_run_reason(tmp_path, monkeypatch)
     monkeypatch.setattr(fixtures_mod, "fetch_odds",
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("触网")))
     monkeypatch.setattr(matchday, "list_events", lambda *a, **k: ([], None))
+    _isolate_root(tmp_path, monkeypatch)   # M6：_run 开头即写知识快照
     result = CliRunner().invoke(
         app, ["run", "matchday", "--phase", "pm", "--leagues", LEAGUE])
 
@@ -1133,6 +1172,7 @@ def test_cli_matchday_reports_counts_and_push(tmp_path, monkeypatch):
         monkeypatch.setattr(
             matchday, "render_matchday_report",
             lambda conn, run_id, phase, summary, ql, dg: f"报告 run={run_id}")
+        _isolate_root(tmp_path, monkeypatch)   # M6：_run 开头即写知识快照
 
         result = CliRunner().invoke(app, ["run", "matchday", "--phase", "am"])
 
@@ -1184,6 +1224,7 @@ def test_cli_degraded_wording_matches_actual_fetch_state(tmp_path, monkeypatch):
         monkeypatch.setattr(
             matchday, "render_matchday_report",
             lambda conn, run_id, phase, summary, ql, dg: f"报告 run={run_id}")
+        _isolate_root(tmp_path, monkeypatch)   # M6：_run 开头即写知识快照
 
         result = CliRunner().invoke(
             app, ["run", "matchday", "--phase", "am", "--leagues", LEAGUE])

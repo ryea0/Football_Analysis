@@ -568,3 +568,63 @@ def test_empty_league_list_yields_nothing(conn):
     assert generate_recommendations(conn, [], "am", add_run(conn)) == []
     assert conn.execute(
         "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 0
+
+
+# ---------------------------------------------------------------- M6 三轨 + hash
+
+
+def test_three_tracks_same_numbers_and_nokb_kelly_init(priced):
+    """同刻三落数字全同；nokb final 中性初始 = kelly（同 model_persona 语义）。"""
+    c, fx, probs = priced
+    generate_recommendations(c, [LEAGUE], "am", add_run(c))
+    fid = fx["in"]
+    rows = c.execute(
+        "SELECT strategy, model_p, best_odds, edge, ev, kelly_stake_frac,"
+        " final_stake_frac FROM recommendations WHERE fixture_id=? AND market='H'",
+        (fid,)).fetchall()
+    by = {r["strategy"]: r for r in rows}
+    assert set(by) == {"model_only", "model_persona", "model_persona_nokb"}
+    nums = ("model_p", "best_odds", "edge", "ev", "kelly_stake_frac")
+    assert all(by["model_persona"][k] == by["model_persona_nokb"][k] == by["model_only"][k]
+               for k in nums)
+    assert by["model_persona"]["final_stake_frac"] == by["model_persona"]["kelly_stake_frac"]
+    assert by["model_persona_nokb"]["final_stake_frac"] == by["model_persona_nokb"]["kelly_stake_frac"]
+    assert by["model_only"]["final_stake_frac"] is None
+
+
+def test_personas_hash_stamped_on_all_rows(priced):
+    c, fx, probs = priced
+    run = add_run(c)
+    ids = generate_recommendations(c, [LEAGUE], "am", run, personas_hash="a" * 64)
+    rows = c.execute("SELECT DISTINCT personas_hash, strategy FROM recommendations"
+                     " WHERE run_id=?", (run,)).fetchall()
+    assert {r["personas_hash"] for r in rows} == {"a" * 64}
+    assert len(rows) == 3   # 三轨都带戳
+
+
+def test_personas_hash_not_stamped_by_default(priced):
+    c, fx, probs = priced
+    run = add_run(c)
+    generate_recommendations(c, [LEAGUE], "am", run)   # 无 hash（默认）
+    row = c.execute("SELECT DISTINCT personas_hash FROM recommendations"
+                    " WHERE run_id=?", (run,)).fetchone()
+    assert row["personas_hash"] is None
+
+
+def test_upsert_refresh_keeps_personas_hash(priced):
+    """DO UPDATE 刷新价格字段时不动 personas_hash——判决与判决语境同源
+    （run A 判的决，hash 留 A 的；新 run 刷价不冒充新语境，设计档 §3.1）。"""
+    c, fx, probs = priced
+    fid = fx["in"]
+    run1 = add_run(c)
+    generate_recommendations(c, [LEAGUE], "am", run1, personas_hash="a" * 64)
+    # 同 fixture/market/phase 再跑一个 run（新价格、不同 hash）
+    seed_h2h(c, fid, probs, {"H": 0.08, "D": -0.02, "A": -0.02},
+             fetched_at=LATER, bookmaker="betfair")
+    run2 = add_run(c)
+    generate_recommendations(c, [LEAGUE], "am", run2, personas_hash="b" * 64)
+    rows = c.execute(
+        "SELECT personas_hash, run_id FROM recommendations WHERE fixture_id=?"
+        " AND market='H' AND strategy='model_persona'", (fid,)).fetchall()
+    assert len(rows) == 1 and rows[0]["personas_hash"] == "a" * 64
+    assert rows[0]["run_id"] == run2

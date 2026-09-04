@@ -50,8 +50,11 @@ import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
+from fa import config as _config
 from fa.config import odds_api_key
 from fa.db import get_meta, set_meta
+from fa.evolve.knowledge import (ensure_current_snapshot, git_aux,
+                                 personas_tree_hash)
 from fa.model.fit import FitConfig, training_rows
 from fa.pipeline.fixtures import (DEFAULT_REGIONS, QUOTA_META_KEY,
                                   sync_fixtures)
@@ -107,6 +110,10 @@ def run_matchday(conn: sqlite3.Connection, phase: str,
 def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
          run_id: int) -> dict:
     now = _now()
+    # M6（§12.7）：run 开始快照 personas 树内容 hash（版本戳，可归因命根）；
+    # 确保本窗知识快照存在（幂等；persona 阶段的唯一 KB 读取口）
+    personas_hash = personas_tree_hash(_config.project_root() / "personas")
+    kb_window = ensure_current_snapshot()
     quota_before = _quota_left(conn)
     if odds_api_key() is None:
         # 无 key：一行不拉、一场不落，runs 记 no_key（CLI exit 0，§12 冒烟口径）
@@ -183,7 +190,8 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
     quota_left = (sync["quota_left"] if sync else
                   (probe_quota if probe == "found" else quota_before))
 
-    rec_ids = generate_recommendations(conn, leagues, phase, run_id)
+    rec_ids = generate_recommendations(conn, leagues, phase, run_id,
+                                       personas_hash=personas_hash)
     # persona 必须在落注之前（§6.2 顺序裁定）：veto 判决先落库，paper 才不会按
     # 中性 kelly 给被否场下单——落注去重只挡重下、不撤旧注，倒置即无法挽回。
     # pm 只补新增场次：attempted = 当日 am run 的名单（§6.2「不重跑沿用判决」）；
@@ -208,6 +216,9 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         "degraded": bool(reasons),
         "degraded_reasons": reasons,
         "persona": persona_summary,
+        "personas_hash": personas_hash,       # M6 版本戳（recommendations 同值落行）
+        "kb_window": kb_window,               # 本窗快照序号（冻结钉版语境）
+        "git": git_aux(),                     # 辅助信息（尽力而为）
         "train_n": _train_n(conn, leagues),
         "half_life": FitConfig().half_life_days,
         "window_hours": WINDOW_HOURS,
