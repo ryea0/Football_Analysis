@@ -15,6 +15,10 @@ FLOAT_COLS = {
     "PSCH": "psc_home", "PSCD": "psc_draw", "PSCA": "psc_away",
     "P>2.5": "over25_ps", "P<2.5": "under25_ps",
     "PC>2.5": "over25_psc", "PC<2.5": "under25_psc",
+    # Betfair 交易所收盘（2024-25 起的 CSV 才有）：Pinnacle 断供（2025-12）后的
+    # B 线 CLV fallback 基准，spec §7.3——老赛季无此列 → 全 None，结算自然跳过
+    "BFECH": "bfe_home", "BFECD": "bfe_draw", "BFECA": "bfe_away",
+    "BFEC>2.5": "over25_bfe",
 }
 
 
@@ -43,6 +47,10 @@ class MatchRow:
     under25_ps: float | None = None
     over25_psc: float | None = None
     under25_psc: float | None = None
+    bfe_home: float | None = None
+    bfe_draw: float | None = None
+    bfe_away: float | None = None
+    over25_bfe: float | None = None
     raw: dict = field(default_factory=dict)
 
 

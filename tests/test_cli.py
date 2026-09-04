@@ -557,3 +557,15 @@ def test_bet_help_documents_live_flag_and_bankroll_rule(tmp_path, monkeypatch):
     settle_help = runner.invoke(app, ["bet", "settle", "--help"])
     assert settle_help.exit_code == 0, settle_help.output
     assert "bankroll" in settle_help.output                # 手工结算不记账，写在帮助里
+
+
+def test_main_callback_runs_init_db(monkeypatch):
+    """cron 无人值守契约：任何 CLI 调用前先 init_db——生产库 schema 落后时自迁移
+    （如 v3 库遇 v5 代码：ALTER 在跑批前完成，而不是在结算写到一半时炸掉）。"""
+    import fa.cli
+
+    calls = []
+    monkeypatch.setattr(fa.cli, "init_db", lambda *a, **k: calls.append(1))
+    result = runner.invoke(app, ["version"])
+    assert result.exit_code == 0
+    assert calls == [1]

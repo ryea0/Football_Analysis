@@ -11,7 +11,7 @@
 - **M2（模型 + 回测评估）完成，判决 NO-GO**（2026-09-03）：劣化 +3.02%（判据 ≤1%），四重稳健性证据全部 NO-GO——`docs/m2-verdict.md`
 - **spec v0.5 双线并存协议（2026-09-03 启用）**：A 线（研究评测，已建成）与 B 线（M3-M5 paper 运营）同程序并存、结论分账（§12）；项目负责人显式推翻「M2 止步」的顺序约束（决策记录 §12.4），**真实下注依然禁止**；B 线预注册判据见 §12.3
 - **M3（B 线运营栈）完成**（2026-09-04，docs/m3-report.md）：真跑实测 102 fixtures→14 推荐→14 paper 注、/events 探测实证免费；**额度节流梯子已落地**（quota<200 单 eu / <100 pm 跳拉盘，月耗推算 ~300——`.superpowers/sdd/quota-throttle-report.md`）；**别名对齐已完成**（oddsapi 侧 44 条确认、隔离表清零）
-- **M5 运营基建完成**（2026-09-04）：cron **双载体可切换**（§9.6，负责人裁定）——`scripts/fa_cron.sh` 为三 job 唯一入口（失败→`fa ops alert` TG 告警、daily 后 `fa ops watchdog` 查漏跑，风险 #6 落地），装配用 `scripts/cron_install.sh`（system crontab，**当前激活**）或 `scripts/hermes_cron_install.sh`（hermes cron，互斥切换）；「连续跑通一周」观察期进行中
+- **M5 运营基建完成**（2026-09-04）：cron **双载体可切换**（§9.6，负责人裁定）——`scripts/fa_cron.sh` 为三 job 唯一入口（失败→`fa ops alert` TG 告警、daily 后 `fa ops watchdog` 查漏跑，风险 #6 落地），装配用 `scripts/cron_install.sh`（system crontab，**当前激活**）或 `scripts/hermes_cron_install.sh`（hermes cron，互斥切换）；「连续跑通一周」观察期进行中。**CLV 基准链修复**（spec v0.8，schema v6）：football-data 2025-12 起断供 Pinnacle → Betfair 交易所收盘 fallback（`closing_source` 记账），`fa data backfill-bfe` 回填 3,492 行、`fa ops backfill-clv` 补齐首批 4 注（CLV 中位 +2.9%）
 - **范式对比线（§12.5）立项**（2026-09-04）：线 A（dsh headless agent 当大脑）与线 P 长期并行滚动对比，不设样本上限；设计 `docs/superpowers/specs/2026-09-04-agentline-dual-track-design.md`，首批 E2E 完成（10 场×双线全 ok，快照库），滚动扩批中
 - **v0.6 本地只读看板**（§7.4，`dashboard/`，Streamlit）与 **retro 复盘归因子线**（`src/fa/retro/` + `fa retro`，设计 docs/superpowers/specs/2026-09-04-retro-attribution-design.md）已进主线
 - **M4（persona 接入）未实施**：设计分支 `worktree-m4-persona-design` 已存在；B 线 §12.3 的 model_persona 轨依赖 M4 落地后起算
@@ -19,7 +19,7 @@
 ## 关键约束（详见 spec 对应章节）
 
 - agent（persona）只消费/产出结构化 JSON，不碰数据库与核心数字（§1.4 / §2.2 / §6）
-- 回测基准用 Pinnacle 收盘价；市场是所有评估的对照线（§3.1 / §8.2）
+- 回测基准用 Pinnacle 收盘价；市场是所有评估的对照线（§3.1 / §8.2）。**B 线 CLV 收盘基准链（spec v0.8）**：Pinnacle 优先、缺失 fallback Betfair 交易所收盘（`bfe_*`），`bets.closing_source` 记账实际所用——football-data 自 2025-12 断供 Pinnacle
 - 模拟盘（paper）自 M3 起每日自动落注；真实下单一期不做（§7.2 / §9.8）
 - 球员级建模与进球时间不进一期模型，边界与触发条件见 §4.5 / §9.8 / §11
 

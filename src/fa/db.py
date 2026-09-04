@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -114,7 +114,9 @@ CREATE TABLE IF NOT EXISTS bets (
         CHECK (status IN ('pending', 'won', 'lost', 'void')),
     settled_at        TEXT,
     return_amt        REAL,
-    closing_odds      REAL,                  -- CLV 基准（Pinnacle 收盘）
+    closing_odds      REAL,                  -- CLV 基准（psc 优先，缺失 fallback bfe）
+    -- closing_source 诚实记账用了哪个基准：'pinnacle' / 'betfair'；NULL=无基准
+    closing_source    TEXT,
     clv               REAL,
     UNIQUE (recommendation_id, mode)
 );
@@ -256,6 +258,9 @@ CREATE TABLE IF NOT EXISTS matches (
     psc_home REAL, psc_draw REAL, psc_away REAL,   -- Pinnacle 收盘（回测基准）
     over25_ps REAL, under25_ps REAL,
     over25_psc REAL, under25_psc REAL,
+    -- Betfair 交易所收盘（BFECH/BFECD/BFECA/BFEC>2.5）：Pinnacle 断供
+    -- （football-data 2025-12 起）后的 CLV fallback 基准，spec §7.3
+    bfe_home REAL, bfe_draw REAL, bfe_away REAL, over25_bfe REAL,
     raw_line TEXT NOT NULL,                         -- 原始 CSV 行 JSON 留档
     UNIQUE (league, season, date, home_team_id, away_team_id)
 );
@@ -298,7 +303,9 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     retro 两表（retro_runs / retro_attributions，A 线复盘归因子线）；
     v4->v5 新增范式对比线两表（agentline_predictions / agentline_runs）并给
     retro_attributions 加 attributor 列——v5 分层由 2026-09-04 并行分支合并产生
-    （retro ensemble 与 agentline 同日各自 bump v4，合并时统一为单一 v5）。"""
+    （retro ensemble 与 agentline 同日各自 bump v4，合并时统一为单一 v5）；
+    v5->v6 纯加列——matches 增 BFE 收盘四列、bets 增 closing_source（Pinnacle
+    断供应对，spec §7.3，2026-09-04）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -318,6 +325,16 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
             conn.execute(
                 "ALTER TABLE retro_attributions ADD COLUMN"
                 " attributor INTEGER NOT NULL DEFAULT 1")
+    if from_v < 6:
+        # 防重入：版本号与表形状在历史上出现过错位（is_control 先例——加列未
+        # bump 版本），列已存在就跳过，别让 ALTER 炸在「旧版本号 × 新形状表」上
+        mcols = {r["name"] for r in conn.execute("PRAGMA table_info(matches)")}
+        for col in ("bfe_home", "bfe_draw", "bfe_away", "over25_bfe"):
+            if col not in mcols:
+                conn.execute(f"ALTER TABLE matches ADD COLUMN {col} REAL")
+        bcols = {r["name"] for r in conn.execute("PRAGMA table_info(bets)")}
+        if "closing_source" not in bcols:
+            conn.execute("ALTER TABLE bets ADD COLUMN closing_source TEXT")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 

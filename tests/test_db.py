@@ -730,7 +730,7 @@ def test_v4_migrates_to_v5(tmp_path):
     conn = connect(db)
     try:
         assert conn.execute("SELECT version FROM schema_version"
-                            ).fetchone()["version"] == 5
+                            ).fetchone()["version"] == SCHEMA_VERSION
         cols = {c["name"] for c in conn.execute(
             "PRAGMA table_info(retro_attributions)")}
         assert "attributor" in cols
@@ -738,3 +738,89 @@ def test_v4_migrates_to_v5(tmp_path):
                             ).fetchone()["attributor"] == 1
     finally:
         conn.close()
+
+
+# ------------------------------------------------- v5：BFE 收盘列 + closing_source
+# Pinnacle 断供应对（2026-09-04 裁定 Betfair 交易所为 fallback 基准，spec §7.3）
+
+_V4_MATCHES = """
+CREATE TABLE matches (
+    id INTEGER PRIMARY KEY,
+    league TEXT NOT NULL,
+    season INTEGER NOT NULL,
+    date TEXT NOT NULL,
+    home_team_id INTEGER NOT NULL REFERENCES teams(id),
+    away_team_id INTEGER NOT NULL REFERENCES teams(id),
+    fthg INTEGER, ftag INTEGER,
+    psc_home REAL, psc_draw REAL, psc_away REAL,
+    over25_psc REAL, under25_psc REAL, raw_line TEXT,
+    UNIQUE (league, season, date, home_team_id, away_team_id)
+);
+"""
+
+_V4_BETS = """
+CREATE TABLE bets (
+    id INTEGER PRIMARY KEY,
+    recommendation_id INTEGER NOT NULL REFERENCES recommendations(id),
+    mode TEXT NOT NULL CHECK (mode IN ('paper','live')),
+    placed_at TEXT NOT NULL,
+    bookmaker TEXT NOT NULL,
+    odds_taken REAL NOT NULL,
+    stake REAL NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending','won','lost','void')),
+    settled_at TEXT, return_amt REAL, closing_odds REAL, clv REAL,
+    UNIQUE (recommendation_id, mode)
+);
+"""
+
+
+def _v4_db(path):
+    """v4 形状老库：matches/bets 无 BFE 列与 closing_source，带一行种子。"""
+    init_db(path)
+    c = connect(path)
+    c.execute("DROP TABLE matches")
+    c.execute("DROP TABLE bets")
+    c.executescript(_V4_MATCHES)
+    c.executescript(_V4_BETS)
+    c.execute("INSERT INTO teams (league, name) VALUES ('E0', 'Chelsea')")
+    tid = c.execute("SELECT id FROM teams").fetchone()["id"]
+    c.execute("INSERT INTO matches (league, season, date, home_team_id,"
+              " away_team_id, fthg, ftag, psc_home)"
+              " VALUES ('E0', 2026, '2026-09-03', ?, ?, 2, 1, 1.6)", (tid, tid))
+    c.execute("UPDATE schema_version SET version=4")
+    c.commit()
+    c.close()
+
+
+def test_v4_migrates_to_v5_adds_bfe_and_closing_source(tmp_path):
+    db = tmp_path / "v4.db"
+    _v4_db(db)
+    init_db(db)                     # 触发 _migrate_up(4 -> 5)
+    c = connect(db)
+    try:
+        assert c.execute(
+            "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+        mcols = {r["name"] for r in c.execute("PRAGMA table_info(matches)")}
+        assert {"bfe_home", "bfe_draw", "bfe_away", "over25_bfe"} <= mcols
+        bcols = {r["name"] for r in c.execute("PRAGMA table_info(bets)")}
+        assert "closing_source" in bcols
+        # 数据保留：既有 psc 不动、bfe 为 NULL
+        row = c.execute("SELECT psc_home, bfe_home, fthg FROM matches").fetchone()
+        assert (row["psc_home"], row["bfe_home"], row["fthg"]) == (1.6, None, 2)
+    finally:
+        c.close()
+
+
+def test_fresh_db_has_bfe_columns_at_v5(tmp_path):
+    db = tmp_path / "fresh.db"
+    init_db(db)
+    c = connect(db)
+    try:
+        assert c.execute(
+            "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+        mcols = {r["name"] for r in c.execute("PRAGMA table_info(matches)")}
+        assert {"bfe_home", "bfe_draw", "bfe_away", "over25_bfe"} <= mcols
+        assert "closing_source" in {
+            r["name"] for r in c.execute("PRAGMA table_info(bets)")}
+    finally:
+        c.close()

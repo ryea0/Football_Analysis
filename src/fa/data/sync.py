@@ -4,7 +4,7 @@ from datetime import date
 
 from fa.config import LEAGUES, SEASONS_FROM
 from fa.data.download import download_csv
-from fa.data.ingest import ingest_rows
+from fa.data.ingest import backfill_bfe_rows, ingest_rows
 from fa.data.parse import parse_csv
 from fa.data.reader import read_csv_text
 
@@ -58,4 +58,44 @@ def sync_history(conn: sqlite3.Connection, seasons_from: int = SEASONS_FROM,
                 rep.inserted += n
             else:
                 rep.skipped_seasons += 1
+    return rep
+
+
+@dataclass
+class BackfillReport:
+    filled: int = 0                    # 实际回填的 matches 行数
+    files_ok: int = 0
+    missing: list[tuple[str, int]] = field(default_factory=list)
+    file_errors: list[tuple[str, int, str]] = field(default_factory=list)
+
+
+def backfill_bfe(conn: sqlite3.Connection, seasons_from: int = 2024,
+                 refresh: bool = False) -> BackfillReport:
+    """把 BFE 收盘列回填进已入库分区（Pinnacle 断供应对，spec §7.3）。
+
+    只扫 ``seasons_from`` 起的赛季——BFE 列 2024-25 才出现在 CSV 里，更老的
+    分区回填必然全空。管线与 :func:`sync_history` 同构（download/parse 复用，
+    单文件失败只记账）；入库语义换成 :func:`backfill_bfe_rows` 的**纯 UPDATE**
+    （不重建分区——matches.id 有外键引用）。幂等：只填 NULL，重跑零变化。
+    """
+    rep = BackfillReport()
+    to_year = _current_season_start()
+    for league in LEAGUES:
+        for year in range(seasons_from, to_year + 1):
+            try:
+                path = download_csv(league, year, refresh=refresh)
+                if path is None:
+                    rep.missing.append((league, year))
+                    continue
+                content = read_csv_text(path)
+                if not content.strip():
+                    rep.file_errors.append((league, year, "空文件"))
+                    continue
+                rows = parse_csv(content, league, year)
+                dated = [r for r in rows if r.date]
+                rep.filled += backfill_bfe_rows(conn, league, year, dated)
+            except Exception as e:   # 只记账：单赛季失败不中断（同 sync 纪律）
+                rep.file_errors.append((league, year, f"{type(e).__name__}: {e}"))
+                continue
+            rep.files_ok += 1
     return rep

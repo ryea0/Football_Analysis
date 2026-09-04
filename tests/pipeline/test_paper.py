@@ -56,16 +56,20 @@ def team_id(c, name, league=LEAGUE):
 
 
 def add_match(c, home, away, date, fthg, ftag, league=LEAGUE, season=2026, **closing):
-    """M1 口径完赛行；closing 以 psc_home/psc_draw/psc_away/over25_psc 传入。"""
-    cols = {"psc_home": None, "psc_draw": None, "psc_away": None, "over25_psc": None}
+    """M1 口径完赛行；closing 以 psc_home/.../over25_psc 与 bfe_home/.../over25_bfe 传入。"""
+    cols = {"psc_home": None, "psc_draw": None, "psc_away": None,
+            "over25_psc": None, "bfe_home": None, "bfe_draw": None,
+            "bfe_away": None, "over25_bfe": None}
     cols.update(closing)
     return c.execute(
         "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
-        " fthg, ftag, psc_home, psc_draw, psc_away, over25_psc, raw_line)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?, '{}')",
+        " fthg, ftag, psc_home, psc_draw, psc_away, over25_psc,"
+        " bfe_home, bfe_draw, bfe_away, over25_bfe, raw_line)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, '{}')",
         (league, season, date, team_id(c, home, league), team_id(c, away, league),
          fthg, ftag, cols["psc_home"], cols["psc_draw"], cols["psc_away"],
-         cols["over25_psc"])).lastrowid
+         cols["over25_psc"], cols["bfe_home"], cols["bfe_draw"],
+         cols["bfe_away"], cols["over25_bfe"])).lastrowid
 
 
 def add_fixture(c, event_key, home, away, kickoff="2026-09-02T14:00:00Z",
@@ -564,3 +568,105 @@ def test_summary_is_scoped_to_paper_mode(conn):
     place_paper_bets(conn, run)
     s = paper_summary(conn)
     assert s["n"] == 1 and s["staked"] == 0.0                 # live 的 500 不入 paper 账
+
+
+# ------------------------------------------------- 收盘基准 fallback 链（§7.3）
+# Pinnacle 断供（football-data 2025-12 起）后：psc 优先，缺失 fallback BFE，
+# 并以 bets.closing_source 诚实记账用了哪个基准（'pinnacle' / 'betfair' / NULL）
+
+def test_closing_prefers_pinnacle_over_betfair(conn):
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-02", 2, 1,
+              psc_home=1.6, bfe_home=2.2)
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", best_odds=2.0)
+    place_paper_bets(conn, run)
+    settle_paper_bets(conn)
+    row = bet_by_market(conn, "H")
+    assert row["closing_odds"] == 1.6
+    assert row["closing_source"] == "pinnacle"
+    assert row["clv"] == pytest.approx(2.0 / 1.6 - 1)
+
+
+def test_closing_falls_back_to_betfair_when_pinnacle_missing(conn):
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-02", 2, 1, bfe_home=2.2)
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", best_odds=2.0)
+    place_paper_bets(conn, run)
+    settle_paper_bets(conn)
+    row = bet_by_market(conn, "H")
+    assert row["closing_odds"] == 2.2
+    assert row["closing_source"] == "betfair"
+    assert row["clv"] == pytest.approx(2.0 / 2.2 - 1)
+
+
+def test_both_benchmarks_missing_leaves_null_closing_and_source(conn):
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-02", 2, 1)   # 双基准皆缺
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", best_odds=2.0)
+    place_paper_bets(conn, run)
+    out = settle_paper_bets(conn)
+    row = bet_by_market(conn, "H")
+    assert row["closing_odds"] is None
+    assert row["closing_source"] is None
+    assert row["clv"] is None
+    assert out["clv_median"] is None
+
+
+def test_o25_closing_falls_back_to_over25_bfe(conn):
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-02", 2, 1, over25_bfe=1.7)
+    run = add_run(conn)
+    add_rec(conn, run, fx, "O2.5", best_odds=1.9)
+    place_paper_bets(conn, run)
+    settle_paper_bets(conn)
+    row = bet_by_market(conn, "O2.5")
+    assert row["closing_odds"] == 1.7
+    assert row["closing_source"] == "betfair"
+    assert row["clv"] == pytest.approx(1.9 / 1.7 - 1)
+
+
+# ------------------------------------------------- backfill_clv（台账回填）
+
+def test_backfill_clv_fills_settled_bets_after_bfe_arrives(conn):
+    """结算时无基准（双缺）→ 注已 settled、closing NULL；BFE 落库后回填补上。"""
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    mid = add_match(conn, "Chelsea", "Arsenal", "2026-09-02", 2, 1)
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", best_odds=2.0)
+    place_paper_bets(conn, run)
+    settle_paper_bets(conn)
+    assert bet_by_market(conn, "H")["closing_odds"] is None
+
+    conn.execute("UPDATE matches SET bfe_home=2.2 WHERE id=?", (mid,))
+    conn.commit()
+    out = paper.backfill_clv(conn)
+    assert out["filled"] == 1
+    row = bet_by_market(conn, "H")
+    assert row["closing_odds"] == 2.2
+    assert row["closing_source"] == "betfair"
+    assert row["clv"] == pytest.approx(2.0 / 2.2 - 1)
+
+
+def test_backfill_clv_is_idempotent_and_never_overwrites(conn):
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-02", 2, 1, psc_home=1.6)
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", best_odds=2.0)
+    place_paper_bets(conn, run)
+    settle_paper_bets(conn)                     # 结算即有 pinnacle 收盘
+    assert paper.backfill_clv(conn)["filled"] == 0   # 已有收盘：不碰
+    row = bet_by_market(conn, "H")
+    assert row["closing_source"] == "pinnacle"
+
+
+def test_backfill_clv_ignores_pending_bets(conn):
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")   # 无完赛行 → 注停留 pending
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-10", 2, 1, bfe_home=2.2)
+    run = add_run(conn)
+    add_rec(conn, run, fx, "H", best_odds=2.0)
+    place_paper_bets(conn, run)
+    assert paper.backfill_clv(conn)["filled"] == 0
+    assert bet_by_market(conn, "H")["status"] == "pending"
