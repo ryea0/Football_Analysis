@@ -665,6 +665,9 @@ def retro_consistency(
                f"  一致率 {rep['agreement_rate']:.0%}（全同+多数）")
     typer.echo(f"成员失败行：{rep['member_failures']}（成员级明细见"
                " fa retro runs 台账与成员行 status）")
+    if rep["n_k1"] > 0:
+        typer.echo(f"  ⚠ 含 k=1 场 {rep['n_k1']}（每场仅 1 成员、恒计全同"
+                   "——读全同率前先看批 params 的 attributors）")
     typer.echo("解读规则：全同率 <50% → 归因线维持「假设生成器」降格"
                "（spec §5 预写）")
 

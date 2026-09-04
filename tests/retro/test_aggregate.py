@@ -70,11 +70,19 @@ def test_median_confidence():
     assert m["tags_confidence"] == pytest.approx(0.7)
 
 
+def test_median_confidence_even_member_count():
+    """偶数可用成员（k=2）：中位数取两值均值（statistics.median 语义）。"""
+    m = aggregate_members([_ok("injury", conf=0.6), _ok("injury", conf=0.7)])
+    assert m["status"] == "ok" and m["primary_tag"] == "injury"
+    assert m["tags_confidence"] == pytest.approx(0.65)
+
+
 def test_k0_all_failed_is_error():
     m = aggregate_members([_fail("timeout"), _fail("parse_fail"),
                            _fail("timeout")])
     assert m["status"] == "error" and m["primary_tag"] is None
     assert m["evidence"] is None
+    assert "k=0" in m["digest"]                    # 诊断文案，非 NULL（spec §4）
 
 
 def test_partial_members_still_aggregate():

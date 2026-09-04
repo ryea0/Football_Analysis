@@ -50,6 +50,7 @@ ALTER TABLE retro_attributions ADD COLUMN attributor INTEGER NOT NULL DEFAULT 1;
 - 三档计数：全同（N/N 同 primary）/ 多数（≥2 同）/ 无多数
 - primary_tag 一致率（全同率 + 多数率分开报，不合并成单数字）
 - 输出与 `retro_runs` 台账联动（批内一致性）
+- k=1 场披露：输出报 `n_k1`（恰 1 个 ok 成员的场数——单成员恒计全同，会把一致率虚高）；n_k1 > 0 时 CLI 追加 ⚠ 行，提示读全同率前先看批 params 的 attributors（终审裁定 2026-09-04）
 
 **预写解读规则**（承袭 retro spec §8-2 与总纲 §2）：
 

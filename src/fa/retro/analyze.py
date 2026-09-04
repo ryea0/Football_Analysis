@@ -67,6 +67,9 @@ def consistency_report(conn: sqlite3.Connection, batch_id=None) -> dict:
 
     只统计成员行（attributor≥1）中 status='ok' 者；一场全失败不计入
     三档（该场聚合 status='error' 已在台账），但失败成员计入 member_failures。
+    n_k1 = 恰 1 个 ok 成员的场数：单成员恒计「全同」，会把一致率虚高
+    （k=1 批与 ensemble 批并存时默认读数被推高）——如实披露，不剔除
+    （剔除属解读策略，由读数人对照批 params 的 attributors 判断）。
     """
     sql = ("SELECT batch_id, match_id, attributor, primary_tag, status"
            " FROM retro_attributions WHERE attributor >= 1")
@@ -83,9 +86,12 @@ def consistency_report(conn: sqlite3.Connection, batch_id=None) -> dict:
         else:
             failures += 1
     tiers = {"unanimous": 0, "majority": 0, "none": 0}
+    n_k1 = 0
     for votes in by_match.values():
         if not votes:
             continue                               # 全失败场不入三档
+        if len(votes) == 1:
+            n_k1 += 1
         top = max(set(votes), key=votes.count)
         if votes.count(top) == len(votes):
             tiers["unanimous"] += 1
@@ -94,6 +100,7 @@ def consistency_report(conn: sqlite3.Connection, batch_id=None) -> dict:
         else:
             tiers["none"] += 1
     n = sum(tiers.values())
-    return {"n_matches": n, **tiers, "member_failures": failures,
+    return {"n_matches": n, **tiers, "n_k1": n_k1,
+            "member_failures": failures,
             "agreement_rate": (tiers["unanimous"] + tiers["majority"]) / n
             if n else 0.0}

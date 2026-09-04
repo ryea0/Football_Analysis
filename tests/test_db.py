@@ -327,8 +327,8 @@ def test_migrate_up_v2_adds_bline_and_retro(tmp_path):
 
 def test_migrate_and_fresh_schemas_match(tmp_path):
     """新建与迁移两条路径产出的全部表/索引 DDL 必须逐字一致（M2 教训的推广）。"""
-    init_db(tmp_path / "a.db")                      # 全新 v4
-    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回 v4
+    init_db(tmp_path / "a.db")                      # 全新（当前 v5）
+    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回最新
     _set_version(tmp_path / "b.db", 1,
                  drop=("backtest_predictions", *_BLINE_TABLES,
                        "retro_runs", "retro_attributions"))
