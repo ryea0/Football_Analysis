@@ -38,7 +38,7 @@
 | p_over25 | 成员值中位数（单值无归一需求，口径与一期单 agent 一致） |
 | confidence | 中位数 |
 | sources | URL 去重并集 |
-| reasoning_digest | 与聚合概率向量 **KL 距离最小**的成员的 digest（确定性平票取 attributor 序最小） |
+| reasoning_digest | 与聚合概率向量 **KL 距离最小**的成员的 digest（确定性平票取 attributor 序最小）。**KL 零质量规则（预注册 2026-09-04 AM-T2 审查）**：聚合向量某分量为 0 而成员该分量 >0 时 KL=∞（该成员永不当选最近）；三中位全 0（聚合退化）→ 聚合行 status='error'，digest「聚合退化（k>0，中位和为 0）」——聚合层镜像契约侧对零和的拒绝语义，绝不抛异常 |
 | status | 可用成员 k=0 → 'error'（或成员失败多数态）；k≥1 → 'ok' |
 | parse_fail | 任一成员 parse_fail 不影响聚合（k≥1 即可聚），成员行如实记 |
 
