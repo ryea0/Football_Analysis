@@ -13,6 +13,7 @@ from typer.testing import CliRunner
 from fa import config
 from fa.cli import app
 from fa.db import connect, init_db
+from fa.evolve import EvolutionError
 
 CONTRACT = {"league": "E0",
             "appends": [{"section": "时效",
@@ -91,3 +92,42 @@ def test_evolve_tick_command_wires_runner(conn, monkeypatch):
     monkeypatch.setattr("fa.evolve.runner.run_tick", lambda c: "tick 摘要")
     result = CliRunner().invoke(app, ["evolve", "tick"])
     assert result.exit_code == 0 and "tick 摘要" in result.output
+
+
+def test_evolve_tick_evolution_error_is_exit_1(conn, monkeypatch):
+    """M6 终审 F1：tick 的确定性失败（EvolutionError）→ 人读一行 + Exit(1)，
+    cron 告警靠退出码（§9.6），不裸抛 traceback。"""
+
+    def boom(c):
+        raise EvolutionError("w2 关卡状态矛盾（注入）")
+
+    monkeypatch.setattr("fa.evolve.runner.run_tick", boom)
+    result = CliRunner().invoke(app, ["evolve", "tick"])
+    assert result.exit_code == 1
+    assert "tick 失败" in result.output and "w2 关卡状态矛盾" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_evolve_merge_missing_staged_proposed_is_exit_1(conn_with_proposal, root):
+    """M6 终审 F6：暂存 .proposed.md 缺失（proposal_path 在）→ 关卡拒绝走
+    EvolutionError 人读出口，Exit(1) 且无 traceback。夹具只暂存了 E0.json，
+    ``.proposed.md`` 本就不在盘上——正是护栏失效关闭要拦的形态。"""
+    assert not (root / "evolution" / "proposals" / "w1" / "E0.proposed.md").exists()
+    result = CliRunner().invoke(
+        app, ["evolve", "merge", "--window", "1", "--league", "E0",
+              "--note", "裁定通过"])
+    assert result.exit_code == 1
+    assert "失效关闭" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_evolve_merge_missing_staged_json_is_exit_1(conn_with_proposal, root):
+    """M6 终审 F6：proposal_path 指着的 json 被外力删除 → FileNotFoundError
+    不再裸抛——人读一行 + Exit(1)。"""
+    (root / "evolution" / "proposals" / "w1" / "E0.json").unlink()
+    result = CliRunner().invoke(
+        app, ["evolve", "merge", "--window", "1", "--league", "E0",
+              "--note", "裁定通过"])
+    assert result.exit_code == 1
+    assert "暂存工件不可读" in result.output
+    assert "Traceback" not in result.output

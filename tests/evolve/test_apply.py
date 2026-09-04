@@ -118,6 +118,21 @@ def test_merge_rejects_live_drift_since_stage(conn, tmp_root, kbfile):
         "SELECT COUNT(*) FROM evolution_rulings").fetchone()[0] == 0
 
 
+def test_merge_fails_closed_when_staged_proposed_missing(conn, tmp_root, kbfile):
+    """M6 终审 F6：run 有 proposal_path（json 在）而暂存 ``.proposed.md`` 缺失
+    → EvolutionError 失效关闭，绝不静默跳过比对放行合并；零副作用（无 Ruling、
+    活文件未动）。"""
+    wid = _mk_window(conn, 1)
+    _mk_run(conn, wid, "E0", path="evolution/proposals/w1/E0.json")
+    A.stage_proposal(1, "E0", CONTRACT, {"league": "E0"})
+    (tmp_root / "evolution" / "proposals" / "w1" / "E0.proposed.md").unlink()
+    with pytest.raises(EvolutionError, match="失效关闭"):
+        A.merge_proposal(conn, wid, "E0", note="裁定通过")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM evolution_rulings").fetchone()[0] == 0
+    assert "新教训" not in K.kb_path("E0").read_text(encoding="utf-8")
+
+
 def test_merge_ignores_header_only_staged_drift(conn, tmp_root, kbfile):
     """暂存 proposed.md 头部（generated= 日期是机械字段）与 merge 日不同不算
     漂移——人审关卡天然跨日，护栏只比解析后的条目内容。"""

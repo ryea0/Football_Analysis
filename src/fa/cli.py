@@ -1,4 +1,6 @@
+import json
 import sqlite3
+from typing import TYPE_CHECKING
 
 import typer
 
@@ -7,6 +9,9 @@ from fa.data.sync import sync_history
 from fa.config import load_env
 from fa.db import connect, init_db
 from fa.pipeline.align import rank_candidates
+
+if TYPE_CHECKING:                    # 仅注解用——运行时导入留在 _fit_config 内（延迟加载）
+    from fa.model.fit import FitConfig
 
 app = typer.Typer(help="fa — 足球量化分析与投注推荐（设计见 spec.md）")
 
@@ -834,10 +839,16 @@ def evolve_status_cmd() -> None:
 @evolve_app.command("tick")
 def evolve_tick_cmd() -> None:
     """周检：窗口收口触发反思，否则空转（cron 入口）"""
+    from fa.evolve import EvolutionError
     from fa.evolve.runner import run_tick
     conn = connect()
     try:
         typer.echo(run_tick(conn))
+    except EvolutionError as exc:
+        # M6 终审 F1：进化侧的确定性失败（如窗口/关卡状态矛盾）走人读一行 +
+        # Exit(1)——cron 告警仍靠退出码（§9.6），不裸抛 traceback
+        typer.echo(f"tick 失败：{exc}")
+        raise typer.Exit(code=1)
     finally:
         conn.close()
 
@@ -913,6 +924,11 @@ def _evolve_ruled_action(ruling: str, window: int, league: str, note: str) -> No
             typer.echo(f"已裁定 {ruling}：{league}（note 已入 Ruling 台账）")
     except EvolutionError as exc:      # 关卡拒绝类失败也走人读出口（不留 traceback）
         typer.echo(f"错误：{exc}")
+        raise typer.Exit(code=1)
+    except (OSError, json.JSONDecodeError) as exc:
+        # M6 终审 F6：暂存工件缺失/坏 JSON（proposal_path 指着、盘上没有或解析
+        # 不了）属环境意外而非关卡拒绝——人读一行 + Exit(1)，不裸抛
+        typer.echo(f"暂存工件不可读：{type(exc).__name__}: {exc}")
         raise typer.Exit(code=1)
     finally:
         conn.close()

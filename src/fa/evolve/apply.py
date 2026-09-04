@@ -140,12 +140,19 @@ def merge_proposal(conn: sqlite3.Connection, window_id: int, league: str,
     # 人审关卡天然跨日（tick 反思日暂存、人隔日合并），裸文本比对会误伤。
     staged = ((config.project_root() / run["proposal_path"]).parent
               / f"{league}.proposed.md")
-    if staged.is_file():
-        staged_kb = K.parse_kb(staged.read_text(encoding="utf-8"), league)
-        if staged_kb.entries != K.parse_kb(new_text, league).entries:
-            raise EvolutionError(
-                f"{league} 活文件在反思后已变更——TTL 修剪或人工改动；"
-                "请核查后重新走关卡")
+    if not staged.is_file():
+        # M6 终审 F6：run 有 proposal_path（json 在）而人审唯一读物 .proposed.md
+        # 缺失 = 暂存区被人动过——护栏没有可比对象，**失效关闭**拒绝合并，
+        # 绝不静默放行（跳过比对 = 护栏形同虚设）。proposal_path 本身为 None
+        # 的场合上面已拒，不归这里管。
+        raise EvolutionError(
+            f"{league} 暂存提案缺 {staged.name}（proposal_path 在而 proposed.md"
+            " 无）——暂存区疑似被改动，护栏失效关闭；请核查后重新走关卡")
+    staged_kb = K.parse_kb(staged.read_text(encoding="utf-8"), league)
+    if staged_kb.entries != K.parse_kb(new_text, league).entries:
+        raise EvolutionError(
+            f"{league} 活文件在反思后已变更——TTL 修剪或人工改动；"
+            "请核查后重新走关卡")
     live.write_text(new_text, encoding="utf-8")       # 先写文件
     hash_after = K.personas_tree_hash(config.project_root() / "personas")
     with conn:                                        # 后原子落账（单事务）
