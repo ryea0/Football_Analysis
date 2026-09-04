@@ -2,8 +2,10 @@
 
 与并行落地的管线（T5 fixtures / T6 推荐生成 / T9 matchday）解耦：这里只消费表
 （recommendations join fixtures join teams、runs、meta、bets）和入参字典。唯一
-的跨模块依赖是两个**纯常量**——T7 paper 的 :func:`bankroll_key`（D2 分轨键名）
-与 T11 value 的 :data:`STRATEGIES`（双轨词表），不带任何 IO / 子进程进来。
+的跨模块依赖是一个**纯常量**——T7 paper 的 :func:`bankroll_key`（D2 分轨键名），
+不带任何 IO / 子进程进来。TG 正文口径 :data:`_TG_STRATEGIES` 是**本地字面量**、
+刻意不派生自 value.STRATEGIES 单源：单源扩轨（M6 的 nokb 对照轨）自动进
+``fa status`` / weekly / dashboard，但**不**自动进 TG 正文（设计档 R1）。
 
 persona 段（§7.1 第 2 条，M4 T14 真渲染）：model_persona 轨判决按**场次**成行
 （✅ agree / ⚠️ downweight（delta）/ ⛔ veto + key_factors 缩进逐条 + report_md
@@ -20,7 +22,6 @@ from datetime import datetime, timedelta, timezone
 from fa.db import get_meta
 from fa.model.fit import FitConfig
 from fa.pipeline.paper import bankroll_key
-from fa.pipeline.value import STRATEGIES
 
 # 半衰期缺省取 FitConfig 单源（M2 模型层），报告不再自造常量
 _DEFAULT_HALF_LIFE = FitConfig.half_life_days
@@ -30,8 +31,13 @@ _MARKET = {"H": "主胜", "D": "平局", "A": "客胜", "O2.5": "大2.5"}
 # §6.6 A/B 双轨：recommendations 的 UNIQUE(fixture_id, market, strategy, phase)
 # 允许两套 strategy 对同一 (fixture, market) 并存——键与展示都必须区分，
 # 否则 M4 上线后 am 全量报告丢行、pm diff 跨轨配价。
-_STRATEGY = {"model_only": "纯模型", "model_persona": "模型+persona"}
+_STRATEGY = {"model_only": "纯模型", "model_persona": "模型+persona",
+             "model_persona_nokb": "模型+persona·无知识库"}
 _PERSONA_STRATEGY = "model_persona"     # persona 判决只落此轨（§6.6 的 B 侧）
+
+# M6（§12.7）：nokb 是 C 线测量对照轨，不进 TG 推送正文（R1）——TG 保持
+# §6.6 双轨口径；`fa status` / weekly / dashboard 走 STRATEGIES 单源自动三轨。
+_TG_STRATEGIES = ("model_only", "model_persona")
 
 # §6.4 判决词表 → 图标（§7.1 第 2 条）；词表外值不崩，给 ❔ 并不进汇总计数
 _VERDICT_ICON = {"agree": "✅", "downweight": "⚠️", "veto": "⛔"}
@@ -71,7 +77,7 @@ FROM recommendations r
 JOIN fixtures f ON f.id = r.fixture_id
 LEFT JOIN teams th ON th.id = f.home_team_id
 LEFT JOIN teams ta ON ta.id = f.away_team_id
-WHERE r.run_id = ?
+WHERE r.run_id = ? AND r.strategy IN ('model_only', 'model_persona')
 ORDER BY f.kickoff_utc, f.id, r.market
 """
 
@@ -107,19 +113,25 @@ def _label(rec):
 
 
 def _pending_count(conn):
+    """未结注计数——TG 双轨口径（§12.7）：bets 经 recommendations join 过滤到
+    ``_TG_STRATEGIES``（nokb 对照轨不进 TG 正文，也不进这个计数；M6 终审 F5）。"""
+    placeholders = ",".join("?" * len(_TG_STRATEGIES))
     row = conn.execute(
-        "SELECT COUNT(*) AS n FROM bets WHERE status='pending'").fetchone()
+        "SELECT COUNT(*) AS n FROM bets b JOIN recommendations r"
+        f" ON r.id = b.recommendation_id WHERE b.status='pending'"
+        f" AND r.strategy IN ({placeholders})", list(_TG_STRATEGIES)).fetchone()
     return row["n"]
 
 
 def _bankroll_lines(conn):
     """bankroll 快照（§7.3 D2 分轨）：两轨各一行，键名随行回显可对账。
 
-    未初始化 / meta 值非数字（脏数据）都给「未初始化」——余额缺失不冒充 0，
-    脏值也不原样透出。
+    TG 双轨口径（nokb 不进正文，§12.7）——遍历 :data:`_TG_STRATEGIES` 而非
+    value.STRATEGIES 单源。未初始化 / meta 值非数字（脏数据）都给「未初始化」
+    ——余额缺失不冒充 0，脏值也不原样透出。
     """
     out = []
-    for strategy in STRATEGIES:
+    for strategy in _TG_STRATEGIES:
         raw = get_meta(conn, bankroll_key(strategy))
         try:
             value = "未初始化" if raw is None else f"{float(raw):.2f}"

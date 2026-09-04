@@ -1,4 +1,6 @@
+import json
 import sqlite3
+from typing import TYPE_CHECKING
 
 import typer
 
@@ -7,6 +9,9 @@ from fa.data.sync import sync_history
 from fa.config import load_env
 from fa.db import connect, init_db
 from fa.pipeline.align import rank_candidates
+
+if TYPE_CHECKING:                    # 仅注解用——运行时导入留在 _fit_config 内（延迟加载）
+    from fa.model.fit import FitConfig
 
 app = typer.Typer(help="fa — 足球量化分析与投注推荐（设计见 spec.md）")
 
@@ -813,6 +818,151 @@ def retro_analyze(
     finally:
         conn.close()
     typer.echo(render_analysis_report(res))
+
+# ---- C 线进化（M6，spec §12.7）----
+
+evolve_app = typer.Typer(help="C 线进化线（M6，spec §12.7）")
+app.add_typer(evolve_app, name="evolve")
+
+
+@evolve_app.command("status")
+def evolve_status_cmd() -> None:
+    """当前窗/知识库版本/待裁提案"""
+    from fa.evolve.runner import evolve_status_text
+    conn = connect()
+    try:
+        typer.echo(evolve_status_text(conn))
+    finally:
+        conn.close()
+
+
+@evolve_app.command("tick")
+def evolve_tick_cmd() -> None:
+    """周检：窗口收口触发反思，否则空转（cron 入口）"""
+    from fa.evolve import EvolutionError
+    from fa.evolve.runner import run_tick
+    conn = connect()
+    try:
+        typer.echo(run_tick(conn))
+    except EvolutionError as exc:
+        # M6 终审 F1：进化侧的确定性失败（如窗口/关卡状态矛盾）走人读一行 +
+        # Exit(1)——cron 告警仍靠退出码（§9.6），不裸抛 traceback
+        typer.echo(f"tick 失败：{exc}")
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+
+@evolve_app.command("reflect")
+def evolve_reflect_cmd(
+    window: int = typer.Option(None, "--window", help="窗口序号；缺省=最新到期窗"),
+    league: str = typer.Option(None, "--league", help="联赛码；缺省=五联赛全跑"),
+    calibrate: bool = typer.Option(False, "--calibrate",
+                                    help="校准模式：不落库、产物进 calibration 目录"),
+) -> None:
+    """手动反思一个窗口"""
+    from fa.evolve import EvolutionError
+    from fa.evolve.runner import run_reflect
+    conn = connect()
+    try:
+        out = run_reflect(conn, window, league, calibrate=calibrate)
+    except (ValueError, EvolutionError) as exc:
+        typer.echo(f"参数错误：{exc}")
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+    if out["calibrate"]:
+        typer.echo(f"校准反思完成：w{out['window']} {out['leagues']}——产物在"
+                   " evolution/proposals/calibration-*/，未落任何 DB 行")
+    else:
+        for r in out["results"]:
+            reason = r.get("no_change_reason")   # already 跳过行无该键
+            typer.echo(f"w{out['window']} {r['league']}：{r['status']}"
+                       + (f"（{reason}）" if reason else ""))
+        typer.echo("fa evolve review 人审 → merge/reject/shelve 裁定")
+
+
+@evolve_app.command("review")
+def evolve_review_cmd(
+    window: int = typer.Option(None, "--window"),
+    league: str = typer.Option(None, "--league"),
+) -> None:
+    """人审视图：状态 + diff + 证据摘要"""
+    from fa.evolve.runner import run_review
+    conn = connect()
+    try:
+        typer.echo(run_review(conn, window, league))
+    finally:
+        conn.close()
+
+
+def _evolve_ruled_action(ruling: str, window: int, league: str, note: str) -> None:
+    from fa.evolve import EvolutionError
+    from fa.evolve import apply as A
+    if not note.strip():
+        typer.echo("裁定必须留理由（note 强制非空）")
+        raise typer.Exit(code=1)
+    conn = connect()
+    try:
+        wrow = conn.execute("SELECT id FROM evolution_windows WHERE idx=?",
+                            (window,)).fetchone()
+        if wrow is None:
+            typer.echo(f"窗口 w{window} 无反思记录")
+            raise typer.Exit(code=1)
+        if ruling == "merged":
+            msg = A.merge_proposal(conn, wrow["id"], league, note)
+            typer.echo(f"已合并：{league}（快照钉版——下一窗口生效）")
+            typer.echo(f"建议 commit message：{msg}")
+        else:
+            run_id = conn.execute(
+                "SELECT id FROM evolution_runs WHERE window_id=? AND league=?",
+                (wrow["id"], league)).fetchone()
+            if run_id is None:
+                typer.echo(f"{league} 无反思记录")
+                raise typer.Exit(code=1)
+            A.record_ruling(conn, run_id["id"], ruling, note)
+            typer.echo(f"已裁定 {ruling}：{league}（note 已入 Ruling 台账）")
+    except EvolutionError as exc:      # 关卡拒绝类失败也走人读出口（不留 traceback）
+        typer.echo(f"错误：{exc}")
+        raise typer.Exit(code=1)
+    except (OSError, json.JSONDecodeError) as exc:
+        # M6 终审 F6：暂存工件缺失/坏 JSON（proposal_path 指着、盘上没有或解析
+        # 不了）属环境意外而非关卡拒绝——人读一行 + Exit(1)，不裸抛
+        typer.echo(f"暂存工件不可读：{type(exc).__name__}: {exc}")
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+
+@evolve_app.command("merge")
+def evolve_merge_cmd(
+    window: int = typer.Option(..., "--window"),
+    league: str = typer.Option(..., "--league"),
+    note: str = typer.Option(..., "--note", help="裁定理由（强制）"),
+) -> None:
+    """合并提案：写知识文件 + Ruling 原子一步（下一窗口生效）"""
+    _evolve_ruled_action("merged", window, league, note)
+
+
+@evolve_app.command("reject")
+def evolve_reject_cmd(
+    window: int = typer.Option(..., "--window"),
+    league: str = typer.Option(..., "--league"),
+    note: str = typer.Option(..., "--note", help="裁定理由（强制）"),
+) -> None:
+    """拒绝提案（只记 Ruling）"""
+    _evolve_ruled_action("rejected", window, league, note)
+
+
+@evolve_app.command("shelve")
+def evolve_shelve_cmd(
+    window: int = typer.Option(..., "--window"),
+    league: str = typer.Option(..., "--league"),
+    note: str = typer.Option(..., "--note", help="裁定理由（强制）"),
+) -> None:
+    """搁置提案（记 Ruling，提案留暂存区供复看）"""
+    _evolve_ruled_action("shelved", window, league, note)
+
 
 # ---- B 线 run 命令（T9/T10）----
 

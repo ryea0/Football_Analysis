@@ -110,10 +110,11 @@ def test_fresh_db_is_current(tmp_path):
     cols = _table_cols(c, "recommendations")
     assert cols["key_factors"] == ("TEXT", 0, 0)      # 可空、非主键
     assert cols["report_md"] == ("TEXT", 0, 0)
+    assert cols["personas_hash"] == ("TEXT", 0, 0)    # v8：M6 hash 位，可空
     order = list(cols)
-    # 紧跟 final_stake_frac 之后（brief Step 3 的列位），v3 既有列序不动
+    # 紧跟 final_stake_frac 之后（v6 brief 的列位 + v8 的 personas_hash），v3 既有列序不动
     assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
-        ["key_factors", "report_md"]
+        ["key_factors", "report_md", "personas_hash"]
     c.close()
 
 
@@ -453,7 +454,7 @@ def test_bline_nullability(conn):
         "fixtures": ("home_team_id", "away_team_id"),
         "odds_snapshots": ("fixture_id",),
         "recommendations": ("verdict", "confidence_delta", "final_stake_frac",
-                            "key_factors", "report_md"),
+                            "key_factors", "report_md", "personas_hash"),
         "bets": ("settled_at", "return_amt", "closing_odds", "clv"),
         "runs": ("phase", "finished_at", "credits_before", "credits_after",
                  "summary"),
@@ -884,8 +885,9 @@ def test_fresh_recommendations_has_persona_columns(tmp_path):
     assert cols["key_factors"] == ("TEXT", 0, 0)
     assert cols["report_md"] == ("TEXT", 0, 0)
     order = list(cols)
+    # v8 起 created_at 前还有 personas_hash（M6），列序一并钉住
     assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
-        ["key_factors", "report_md"]
+        ["key_factors", "report_md", "personas_hash"]
     c.close()
 
 
@@ -1091,3 +1093,203 @@ def test_v7_migration_guard_skips_rebuilt_table(tmp_path):
                             ).fetchone()["version"] == SCHEMA_VERSION
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------- M6 v8
+
+
+def _make_v7_db(path):
+    """手搭 v7 形状的库：recommendations 无 nokb 枚举、无 personas_hash。"""
+    from fa import db as dbmod
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    INSERT INTO schema_version (version) VALUES (7);
+    CREATE TABLE runs (id INTEGER PRIMARY KEY, type TEXT NOT NULL, phase TEXT,
+      started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+      credits_before INTEGER, credits_after INTEGER, summary TEXT);
+    CREATE TABLE fixtures (id INTEGER PRIMARY KEY);
+    CREATE TABLE recommendations (
+      id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES runs(id),
+      fixture_id INTEGER NOT NULL REFERENCES fixtures(id),
+      strategy TEXT NOT NULL CHECK (strategy IN ('model_only','model_persona')),
+      market TEXT NOT NULL, phase TEXT NOT NULL, model_p REAL NOT NULL,
+      market_p REAL NOT NULL, best_odds REAL NOT NULL, bookmaker TEXT NOT NULL,
+      edge REAL NOT NULL, ev REAL NOT NULL, kelly_stake_frac REAL NOT NULL,
+      verdict TEXT, confidence_delta REAL, final_stake_frac REAL,
+      key_factors TEXT, report_md TEXT, created_at TEXT NOT NULL,
+      UNIQUE (fixture_id, market, strategy, phase));
+    CREATE INDEX idx_recs_run ON recommendations (run_id);
+    """)
+    # 父行先备（v7 真库必然有）：迁移的 INSERT..SELECT 与用例新增行都在外键
+    # 开启（connect 的 PRAGMA foreign_keys=ON）下校验，没父行就是必炸；
+    # rec 用显式非连续 id 钉住「重建不重排 id」——bets.recommendation_id 挂在它上面。
+    conn.execute(
+        "INSERT INTO runs (id, type, phase, started_at, status)"
+        " VALUES (1, 'matchday', 'am', '2026-09-05T03:00:00Z', 'ok')")
+    conn.execute("INSERT INTO fixtures (id) VALUES (1), (2)")
+    conn.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy, market,"
+        " phase, model_p, market_p, best_odds, bookmaker, edge, ev,"
+        " kelly_stake_frac, final_stake_frac, verdict, confidence_delta,"
+        " key_factors, report_md, created_at)"
+        " VALUES (42, 1, 1, 'model_persona', 'H', 'am', 0.5, 0.4, 2.2,"
+        " 'b', 0.1, 0.1, 0.05, 0.05, 'agree', 0.0, '[]', 'r',"
+        " '2026-09-05T03:00:00Z')")
+    conn.commit()
+    conn.close()
+    assert dbmod.SCHEMA_VERSION == 8
+
+
+def test_migrate_v7_to_v8(tmp_path):
+    from fa import db as dbmod
+    p = tmp_path / "fa.db"
+    _make_v7_db(p)
+    dbmod.init_db(p)
+    conn = dbmod.connect(p)
+    # 存量行保全 + personas_hash 为 NULL（知识库纪元前）
+    row = conn.execute(
+        "SELECT strategy, verdict, personas_hash FROM recommendations").fetchone()
+    assert row["strategy"] == "model_persona" and row["verdict"] == "agree"
+    assert row["personas_hash"] is None
+    # 新枚举可插入
+    conn.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " final_stake_frac, created_at, personas_hash)"
+        " VALUES (1, 2, 'model_persona_nokb', 'H', 'am', 0.5, 0.4, 2.2, 'b', 0.1,"
+        " 0.1, 0.05, 0.05, '2026-09-05T03:00:00Z', 'deadbeef')")
+    # evolution 三表就位
+    for t in ("evolution_windows", "evolution_runs", "evolution_rulings"):
+        conn.execute(f"SELECT COUNT(*) FROM {t}")
+    # 索引重建
+    idx = conn.execute("SELECT name FROM sqlite_master WHERE type='index'"
+                       " AND name='idx_recs_run'").fetchone()
+    assert idx is not None
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 8
+    conn.close()
+
+
+def test_migrate_v8_backup_created(tmp_path):
+    from fa import db as dbmod
+    p = tmp_path / "fa.db"
+    _make_v7_db(p)
+    dbmod.init_db(p)
+    assert (tmp_path / "fa.db.bak-v8").exists()
+    dbmod.init_db(p)   # 幂等：二次 init 不重复备份、不重复迁移
+    conn = dbmod.connect(p)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 8
+    conn.close()
+
+
+def test_migrate_shadow_recovery_v8(tmp_path):
+    """半途失败困在影子表：重试弃半建活动表、从影子重放（v7 先例同款）。"""
+    from fa import db as dbmod
+    p = tmp_path / "fa.db"
+    _make_v7_db(p)
+    conn = sqlite3.connect(p)
+    conn.executescript("DROP INDEX idx_recs_run;"
+                       "ALTER TABLE recommendations RENAME TO recommendations_v7;")
+    conn.commit()
+    conn.close()
+    dbmod.init_db(p)
+    conn = dbmod.connect(p)
+    assert conn.execute("SELECT COUNT(*) FROM recommendations").fetchone()[0] == 1
+    shadow = conn.execute("SELECT 1 FROM sqlite_master WHERE name="
+                          "'recommendations_v7'").fetchone()
+    assert shadow is None
+    conn.close()
+
+
+def test_v8_migration_guard_skips_rebuilt_table(tmp_path):
+    """护栏：recommendations 已是 v8 形状而版本号仍是 7（重建已完成、版本号
+    UPDATE 前中断重跑）——不得重复重建报错，数据无损（v7 先例同款护栏）。"""
+    from fa import db as dbmod
+    p = tmp_path / "half.db"
+    _make_v7_db(p)
+    dbmod.init_db(p)                       # 升到 v8
+    conn = sqlite3.connect(p)
+    conn.execute("UPDATE schema_version SET version=7")
+    conn.commit()
+    conn.close()
+    dbmod.init_db(p)                       # 表已新形状，护栏应跳过重建
+    conn = dbmod.connect(p)
+    try:
+        assert conn.execute("SELECT COUNT(*) c FROM recommendations"
+                            ).fetchone()["c"] == 1
+        assert conn.execute("SELECT id, personas_hash FROM recommendations"
+                            ).fetchone()["id"] == 42
+        assert conn.execute("SELECT version FROM schema_version"
+                            ).fetchone()["version"] == 8
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name="
+                            "'recommendations_v7'").fetchone() is None
+    finally:
+        conn.close()
+
+
+def test_fresh_db_has_evolution_tables(tmp_path):
+    from fa import db as dbmod
+    p = tmp_path / "fresh.db"
+    dbmod.init_db(p)
+    conn = dbmod.connect(p)
+    for t in ("evolution_windows", "evolution_runs", "evolution_rulings"):
+        conn.execute(f"SELECT COUNT(*) FROM {t}")
+    ddl = conn.execute("SELECT sql FROM sqlite_master WHERE name="
+                       "'recommendations'").fetchone()["sql"]
+    assert "model_persona_nokb" in ddl and "personas_hash" in ddl
+    conn.close()
+
+
+def test_migrate_v7_to_v8_keeps_bets_ledger_intact(tmp_path):
+    """重建路径的两条生产红线（brief 代码未覆盖，2026-09-04 实测踩中后补的钉）：
+    1. RENAME 不得改写引用方——bets.recommendation_id 的 REFERENCES 若被改写到
+       recommendations_v7，收尾 DROP 影子表时子表有行就炸 FOREIGN KEY constraint
+       failed（生产 paper 台账 14+ 行，迁移永久卡死）；子表空则引用悬空，此后
+       每笔落注 no such table；
+    2. recommendations.id 不得重排——注台账挂在推荐 id 上，重排 = 静默错账。
+    顺带钉形状一致性口径：迁移库与 fresh 库的 recommendations 列序一致。"""
+    p = tmp_path / "fa.db"
+    _make_v7_db(p)
+    conn = sqlite3.connect(p)          # 真库形态：一条挂在 rec id=42 上的存量注
+    conn.executescript("""
+    CREATE TABLE bets (
+      id INTEGER PRIMARY KEY,
+      recommendation_id INTEGER NOT NULL REFERENCES recommendations(id),
+      mode TEXT NOT NULL CHECK (mode IN ('paper','live')),
+      placed_at TEXT NOT NULL, bookmaker TEXT NOT NULL, odds_taken REAL NOT NULL,
+      stake REAL NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending','won','lost','void')),
+      settled_at TEXT, return_amt REAL, closing_odds REAL, closing_source TEXT,
+      clv REAL, UNIQUE (recommendation_id, mode));
+    """)
+    conn.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker,"
+        " odds_taken, stake, status) VALUES"
+        " (42, 'paper', '2026-09-05T03:00:05Z', 'Pinnacle', 2.2, 10.0, 'pending')")
+    conn.commit()
+    conn.close()
+    init_db(p)
+
+    conn = connect(p)
+    # 台账不断链：注还挂在同一条推荐上（id 原值保全）
+    j = conn.execute(
+        "SELECT b.mode m, r.strategy s, r.personas_hash h FROM bets b"
+        " JOIN recommendations r ON r.id = b.recommendation_id").fetchone()
+    assert (j["m"], j["s"], j["h"]) == ("paper", "model_persona", None)
+    # 引用方未被 rename 动过刀：bets 仍指 recommendations、不指影子表
+    bets_ddl = conn.execute("SELECT sql FROM sqlite_master WHERE type='table'"
+                            " AND name='bets'").fetchone()["sql"]
+    assert "REFERENCES recommendations(id)" in bets_ddl
+    assert "recommendations_v7" not in bets_ddl
+    # 影子表收尾干净
+    assert conn.execute("SELECT 1 FROM sqlite_master WHERE name="
+                        "'recommendations_v7'").fetchone() is None
+    # 形状一致性：迁移库与 fresh 库列序逐位一致
+    init_db(tmp_path / "fresh.db")
+    fc = connect(tmp_path / "fresh.db")
+    assert [r["name"] for r in conn.execute("PRAGMA table_info(recommendations)")] == \
+        [r["name"] for r in fc.execute("PRAGMA table_info(recommendations)")]
+    fc.close()
+    conn.close()
+
+

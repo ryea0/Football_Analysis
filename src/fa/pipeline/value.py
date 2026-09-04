@@ -14,9 +14,9 @@
 UNIQUE ``(fixture_id, market, strategy, phase)`` 冲突 → ``DO UPDATE`` 刷新
 run_id 与全部价格类字段，**不触碰** persona 位（verdict / confidence_delta /
 final_stake_frac / key_factors / report_md）——这是不用「先 DELETE 再 INSERT」
-的原因。同刻双落（A1，§6.6）：每个过门槛候选写 model_only 与 model_persona
-两行（数字全同）；model_persona 的 ``final_stake_frac`` 以 kelly **中性初始**
-（am 判决前照 kelly 落注的语义），model_only 落 NULL（M3「退回 kelly」）。
+的原因。同刻三落（A1 §6.6 + §12.7 对照轨）：每个过门槛候选写三行（数字全同）；
+model_persona 与 model_persona_nokb 的 ``final_stake_frac`` 以 kelly **中性初始**
+（判决前照 kelly 落注语义），model_only 落 NULL（M3「退回 kelly」）。
 
 时间：所有「现在」都经 :func:`_now`（唯一注入缝，测试 monkeypatch 它）。
 本模块**不触网**（价格来自 T5 已落库的 ``odds_snapshots``）。
@@ -37,7 +37,9 @@ from fa.value.devig import devig_ou, devig_proportional
 from fa.value.gates import (EDGE_MIN, EV_MIN, ODDS_MAX, ODDS_MIN, ev_of,
                             kelly_fraction)
 
-STRATEGIES = ("model_only", "model_persona")   # §6.6 A/B 双轨（单源，paper/render 引用）
+STRATEGIES = ("model_only", "model_persona", "model_persona_nokb")
+# §6.6 A/B 双轨 + M6 C 线对照轨（nokb：人格无知识库，spec §12.7）——
+# paper/render/weekly 全部经此单源引用，三轨自动生效。
 WINDOW_HOURS = 52                   # 比赛日窗口（spec §9.6 两窗之间）
 MIN_TRAIN_ROWS = 30                 # 与 fit_league 的下限一致（数据不足 → 跳过该联赛）
 _H2H_SLOTS = (("H", "home"), ("D", "draw"), ("A", "away"))
@@ -51,11 +53,13 @@ def _now() -> datetime:
 
 def generate_recommendations(conn: sqlite3.Connection, leagues: list[str],
                              phase: str, run_id: int,
-                             cfg: FitConfig = FitConfig()) -> list[int]:
+                             cfg: FitConfig = FitConfig(),
+                             personas_hash: str | None = None) -> list[int]:
     """对窗口内已对齐 fixture 生成/刷新推荐，返回受影响 ``recommendations.id``。
 
     无训练样本的联赛跳过（不中断 run）；无盘口/未对齐/出窗的 fixture 无推荐。
-    全程单 ``conn.commit()``。
+    ``personas_hash``（M6 版本戳）只在 INSERT 生效——DO UPDATE 刷新价格不动它
+    （见 :func:`_upsert_recommendation`）。全程单 ``conn.commit()``。
     """
     if phase not in ("am", "pm"):
         raise ValueError(f"phase 须为 am/pm，收到 {phase!r}")
@@ -86,13 +90,14 @@ def generate_recommendations(conn: sqlite3.Connection, leagues: list[str],
             if ev < EV_MIN or edge < EDGE_MIN:
                 continue
             kelly = kelly_fraction(p, odds)
-            for strategy in STRATEGIES:                 # §6.6 同刻双落（数字全同）
+            for strategy in STRATEGIES:                 # §6.6 同刻三落（数字全同）
                 ids.append(_upsert_recommendation(
                     conn, run_id=run_id, fixture_id=fixture["id"], market=market,
                     phase=phase, strategy=strategy, model_p=p, market_p=market_p,
                     best_odds=odds, bookmaker=bookmaker, edge=edge, ev=ev,
                     kelly=kelly, created_at=_iso(now),
-                    final=kelly if strategy == "model_persona" else None))
+                    final=kelly if strategy != "model_only" else None,
+                    personas_hash=personas_hash))
     conn.commit()
     return ids
 
@@ -219,25 +224,27 @@ def _upsert_recommendation(conn: sqlite3.Connection, *, run_id: int, fixture_id:
                            market: str, phase: str, strategy: str, model_p: float,
                            market_p: float, best_odds: float, bookmaker: str,
                            edge: float, ev: float, kelly: float, created_at: str,
-                           final: float | None) -> int:
+                           final: float | None,
+                           personas_hash: str | None) -> int:
     """UNIQUE 冲突 → DO UPDATE 刷新价格类字段（persona 位不清，含 final）。
 
     ``final`` 只在 INSERT 生效：model_persona 中性初始为 kelly，model_only 落
     NULL（M3「退回 kelly」）；重跑经 DO UPDATE 时**不含**该列——am 判决落下的
-    final 不被 pm 的价格刷新抹掉。
+    final 不被 pm 的价格刷新抹掉。``personas_hash`` 同样只在 INSERT 生效——判决
+    与判决语境同源，价格刷新不冒充新语境（M6 §12.7）。
     """
     conn.execute(
         "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
         " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
-        " final_stake_frac, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " final_stake_frac, personas_hash, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(fixture_id, market, strategy, phase) DO UPDATE SET"
         "   run_id=excluded.run_id, model_p=excluded.model_p,"
         "   market_p=excluded.market_p, best_odds=excluded.best_odds,"
         "   bookmaker=excluded.bookmaker, edge=excluded.edge, ev=excluded.ev,"
         "   kelly_stake_frac=excluded.kelly_stake_frac, created_at=excluded.created_at",
         (run_id, fixture_id, strategy, market, phase, model_p, market_p, best_odds,
-         bookmaker, edge, ev, kelly, final, created_at),
+         bookmaker, edge, ev, kelly, final, personas_hash, created_at),
     )
     row = conn.execute(
         "SELECT id FROM recommendations WHERE fixture_id=? AND market=? AND strategy=?"

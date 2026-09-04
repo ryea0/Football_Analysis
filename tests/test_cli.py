@@ -258,10 +258,11 @@ def test_status_empty_db_renders_both_sections(tmp_path, monkeypatch):
     from fa.db import get_meta
     conn = connect(db)
     try:
-        # status 只读：三把 bankroll 键（legacy + 两轨）一个都不写
+        # status 只读：四把 bankroll 键（legacy + 三轨）一个都不写
         assert get_meta(conn, "paper_bankroll") is None
         assert get_meta(conn, bankroll_key("model_only")) is None
         assert get_meta(conn, bankroll_key("model_persona")) is None
+        assert get_meta(conn, bankroll_key("model_persona_nokb")) is None
     finally:
         conn.close()
 
@@ -307,11 +308,12 @@ def test_status_b_line_shows_ledger_quota_runs_unknown(tmp_path, monkeypatch):
     assert "未对齐队名（隔离表）：1 条" in result.output
 
 
-def test_status_b_line_two_track_lines(tmp_path, monkeypatch):
-    """T14 正式版式：B 线台账双轨各一行 `[model_only]` / `[model_persona]`。
+def test_status_b_line_three_track_lines(tmp_path, monkeypatch):
+    """B 线台账三轨各一行 `[model_only]` / `[model_persona]` / `[…_nokb]`。
 
-    只 model_only 轨有注 → 该轨 bankroll 已惰性初始化、另一轨保持「未初始化」，
-    两行绝不互相冒充（D2 分账）。
+    M6 §12.7：status 走 STRATEGIES 单源自动三轨（设计 R1——只有 TG 正文双轨）。
+    只 model_only 轨有注 → 该轨 bankroll 已惰性初始化、另两轨保持「未初始化」，
+    各行绝不互相冒充（D2 分账）。
     """
     db = _use_tmp_db(tmp_path, monkeypatch)
     conn = connect(db)
@@ -325,11 +327,13 @@ def test_status_b_line_two_track_lines(tmp_path, monkeypatch):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     tracks = [l for l in result.output.splitlines() if l.startswith("[model_")]
-    assert len(tracks) == 2, result.output
+    assert len(tracks) == 3, result.output
     assert tracks[0].startswith("[model_only]")
     assert tracks[1].startswith("[model_persona]")
+    assert tracks[2].startswith("[model_persona_nokb]")
     assert "注数=1" in tracks[0] and "bankroll=1000.00" in tracks[0]
     assert "注数=0" in tracks[1] and "bankroll=未初始化" in tracks[1]
+    assert "注数=0" in tracks[2] and "bankroll=未初始化" in tracks[2]
 
 
 def test_status_pct_scales_fraction_values(tmp_path, monkeypatch):

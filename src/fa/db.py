@@ -1,9 +1,10 @@
+import shutil
 import sqlite3
 from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -82,7 +83,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     run_id           INTEGER NOT NULL REFERENCES runs(id),
     fixture_id       INTEGER NOT NULL REFERENCES fixtures(id),
     strategy         TEXT NOT NULL
-        CHECK (strategy IN ('model_only', 'model_persona')),   -- §6.6 A/B 双轨
+        CHECK (strategy IN ('model_only', 'model_persona',
+                            'model_persona_nokb')),       -- §6.6 双轨 + M6 C 线对照轨
     market           TEXT NOT NULL
         CHECK (market IN ('H', 'D', 'A', 'O2.5')),             -- 每个结果一行
     phase            TEXT NOT NULL
@@ -99,6 +101,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     final_stake_frac REAL,                   -- M4
     key_factors      TEXT,                   -- M4 persona：JSON 数组串（§6.3，1–5 条）
     report_md        TEXT,                   -- M4 persona：点评 ≤500 字（§6.3）
+    personas_hash    TEXT,             -- M6：本 run 读取的 personas 树内容 hash（§12.7）
     created_at       TEXT NOT NULL,
     UNIQUE (fixture_id, market, strategy, phase)
 );
@@ -182,6 +185,46 @@ CREATE TABLE IF NOT EXISTS retro_attributions (
 );
 CREATE INDEX IF NOT EXISTS idx_retro_attr_batch ON retro_attributions (batch_id);
 CREATE INDEX IF NOT EXISTS idx_retro_attr_match ON retro_attributions (match_id);
+"""
+
+# M6 C 线进化栈三表（spec §12.7，设计档 §2.2）。物理隔离：evolve 对
+# recommendations/bets 只读；自家事件与关卡 Ruling 落此三表。UNIQUE(window_id,
+# league) = 防重跑（一次窗口一联赛一次反思）；ruling 的 note 强制非空——裁定
+# 必须留理由（人审关卡全量记 Ruling）。
+_EVOLUTION_TABLE = """
+CREATE TABLE IF NOT EXISTS evolution_windows (
+    id           INTEGER PRIMARY KEY,
+    idx          INTEGER NOT NULL UNIQUE,
+    opened_at    TEXT NOT NULL,
+    closes_at    TEXT NOT NULL,
+    reflected_at TEXT,
+    closed_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS evolution_runs (
+    id               INTEGER PRIMARY KEY,
+    window_id        INTEGER NOT NULL REFERENCES evolution_windows(id),
+    league           TEXT NOT NULL,
+    kb_hash_before   TEXT NOT NULL,
+    status           TEXT NOT NULL
+        CHECK (status IN ('ok', 'no_change', 'timeout', 'exit',
+                          'extract', 'contract', 'error')),
+    no_change_reason TEXT,
+    proposal_path    TEXT,
+    duration_s       REAL NOT NULL,
+    created_at       TEXT NOT NULL,
+    UNIQUE (window_id, league)
+);
+
+CREATE TABLE IF NOT EXISTS evolution_rulings (
+    id            INTEGER PRIMARY KEY,
+    run_id        INTEGER NOT NULL REFERENCES evolution_runs(id),
+    ruling        TEXT NOT NULL
+        CHECK (ruling IN ('merged', 'rejected', 'shelved')),
+    kb_hash_after TEXT,
+    note          TEXT NOT NULL,
+    decided_at    TEXT NOT NULL
+);
 """
 
 # 范式对比线两表（spec §12.5 / 设计 §6）：线 A 专用，与 B 线表物理隔离——
@@ -274,7 +317,7 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-""" + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE + _AL_TABLE
+""" + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE + _AL_TABLE + _EVOLUTION_TABLE
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -295,6 +338,10 @@ def init_db(path: Path | None = None) -> None:
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
     elif row["version"] < SCHEMA_VERSION:
+        if row["version"] < 8:
+            bak = p.with_name(p.name + ".bak-v8")
+            if not bak.exists():
+                shutil.copy2(p, bak)   # 表重建类迁移的保守护栏（设计档 §14）
         _migrate_up(conn, row["version"])
     elif row["version"] > SCHEMA_VERSION:
         raise RuntimeError(
@@ -320,7 +367,9 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     rename-copy-drop（存量行全列保全、attributor 回填 DEFAULT 1，A_multi 计划
     T1，2026-09-04）。重建各步被 executescript 隐式提交逐个落盘，半途失败留下
     影子表 agentline_predictions_v6 时，重试弃掉半建活动表、从影子重放恢复
-    （影子恢复优先于幂等跳过）。"""
+    （影子恢复优先于幂等跳过）；
+    v7->v8 重建 recommendations——strategy 扩三轨枚举、加 personas_hash 列（M6）；
+    evolution 三表就位；init_db 在 v8 升级前自动备份 fa.db.bak-v8。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -406,6 +455,57 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
             # 全经 save_prediction（FK ON）写入、必然有效；真有脏行就在这里
             # fail-fast——影子表原样保留，重试复现同一错误，不丢数据。
             conn.execute("DROP TABLE agentline_predictions_v6;")
+    if from_v < 8:
+        # v8：recommendations 重建（CHECK 无法后补，rename-copy-drop 唯一路径，
+        # v7 agentline 重建同款）：strategy 扩 model_persona_nokb + personas_hash
+        # 列。影子恢复优先于一切跳过判定；INSERT..SELECT 全列显式（新列补 NULL）。
+        has_shadow = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table'"
+            " AND name='recommendations_v7'").fetchone() is not None
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table'"
+            " AND name='recommendations'").fetchone()
+        stale = ddl is not None and "model_persona_nokb" not in ddl["sql"]
+        if has_shadow or stale:
+            # 前置：idx_recs_run 占名——rename 后随旧表改名继续占名，建新表前摘掉
+            conn.execute("DROP INDEX IF EXISTS idx_recs_run")
+            # 与 v7 先例的关键差异：recommendations 有引用方（bets.recommendation_id），
+            # agentline_predictions 没有。SQLite ≥3.26 的 RENAME 在 foreign_keys=ON 时
+            # **无条件**把引用方的 REFERENCES 改写到 recommendations_v7——实测
+            # legacy_alter_table=ON 关不掉；即便 FK=OFF、legacy=OFF 也仍改写，只是
+            # DROP 不当场炸，留下悬空引用、此后每笔落注 no such table。唯一干净的
+            # 组合是 FK=OFF + legacy_alter_table=ON：bets 引用原封不动、影子表收尾
+            # DROP 顺滑。两个 pragma 只圈住这一个 rename，用完即还原（连接级，不
+            # 外泄）；foreign_keys 在事务内是静默 no-op，故先落盘保它真生效。
+            if conn.in_transaction:
+                conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("PRAGMA legacy_alter_table=ON")
+            try:
+                if has_shadow:
+                    conn.execute("DROP TABLE IF EXISTS recommendations")
+                else:
+                    conn.executescript(
+                        "ALTER TABLE recommendations RENAME TO recommendations_v7;")
+            finally:
+                conn.execute("PRAGMA legacy_alter_table=OFF")
+                conn.execute("PRAGMA foreign_keys=ON")
+            conn.executescript(_BLINE_TABLE)   # 新形状（三轨枚举 + personas_hash）
+            # id 显式随行搬：bets.recommendation_id 挂在推荐 id 上，重建若让
+            # id 重排，存量注就静默错账（挂到别的推荐上）——这列必须原值保全。
+            # FK 已还原为 ON：本句照 v7 先例在外键开启下逐行校验 run_id/fixture_id，
+            # 真有脏行就地 fail-fast、影子表原样保留可重试。
+            conn.execute(
+                "INSERT INTO recommendations (id, run_id, fixture_id, strategy,"
+                " market, phase, model_p, market_p, best_odds, bookmaker, edge,"
+                " ev, kelly_stake_frac, final_stake_frac, verdict,"
+                " confidence_delta, key_factors, report_md, created_at)"
+                " SELECT id, run_id, fixture_id, strategy, market, phase, model_p,"
+                " market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+                " final_stake_frac, verdict, confidence_delta, key_factors,"
+                " report_md, created_at FROM recommendations_v7;")
+            conn.execute("DROP TABLE recommendations_v7;")
+        conn.executescript(_EVOLUTION_TABLE)
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
