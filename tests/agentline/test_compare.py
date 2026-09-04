@@ -44,7 +44,7 @@ def db_three(tmp_path):
 
 def _fake_cmp(enh_rows=None, enh_sources=0):
     """compare_lines 返回形态的最小替身：A_enh 行与 audit.enh_sources 可调，
-    用于钉住报告的「子集市场 ll」列与「检索未触发」警告的两个分支。"""
+    用于钉住报告的「子集市场 ll」列与「sources 全空」警告的两个分支。"""
     from fa.backtest.metrics import evaluate
     rows = [_bp(1), _bp(2)]
     e = evaluate(rows)
@@ -94,28 +94,30 @@ def test_render_report_subset_market_ll_and_footnote(tmp_path):
     # 固定脚注：跨线直比无效 + 小样本免责，必须逐字在报告里
     assert "各行比值在其自身 n 场子集内计算，跨线直比无效" in text
     assert "n<100 的行为链路验证样本，数字无统计意义" in text
-    # sources 非空（enh_sources>0）→ 不出「检索未触发」警告
-    assert "检索未触发" not in text
+    # sources 非空（enh_sources>0）→ 不出「sources 全空」警告
+    assert "sources 全空" not in text
     # 泄漏提示保留
     assert "泄漏" in text and "A_base" in text and "A_enh" in text
 
 
-def test_render_report_warns_when_enh_retrieval_never_fired(tmp_path):
-    # E2E 实证：dsh-free-search 在本机从未触发（sources 10/10 全空）——此时
-    # A_enh vs A_base 的差异是采样噪声，报告必须自己说破，不能让人读成检索增量。
+def test_render_report_warns_when_enh_sources_all_empty(tmp_path):
+    # sources 全空 ≠ 检索未发生（附录 A.6：首批 E2E 检索实际发生了，是引擎
+    # 返回垃圾致无可引用项）——警告须按「引用口径」措辞并指向两种可能；
+    # 此时 A_enh vs A_base 的差异是采样噪声，报告必须自己说破。
     out = tmp_path / "r.md"
     render_report(_fake_cmp(enh_rows=[_bp(3, ph=0.5), _bp(4, ph=0.35)],
                             enh_sources=0), out)
     text = out.read_text(encoding="utf-8")
-    assert "增强层检索未触发（sources 全空）" in text
+    assert "增强层 sources 全空" in text
     assert "采样噪声" in text
+    assert "附录 A.6" in text                  # 指向判定方法
 
 
 def test_render_report_no_warning_when_enh_empty(tmp_path):
     out = tmp_path / "r.md"
     render_report(_fake_cmp(enh_sources=0), out)
     text = out.read_text(encoding="utf-8")
-    assert "增强层检索未触发" not in text          # A_enh n=0：无检索可言
+    assert "增强层 sources 全空" not in text      # A_enh n=0：无检索可言
     assert "| A_enh | 0 | — | — | — | — |" in text
 
 

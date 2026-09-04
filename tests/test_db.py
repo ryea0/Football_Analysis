@@ -935,3 +935,159 @@ def test_v3_shape_matches_fresh_on_persona_columns(tmp_path):
     ca, cb = connect(tmp_path / "a.db"), connect(tmp_path / "b.db")
     assert _table_cols(ca, "recommendations") == _table_cols(cb, "recommendations")
     ca.close(); cb.close()
+
+
+# ----------------------------- agentline A_multi 预留（二期附录 §6，v7）
+
+# v6 形状的 agentline_predictions（迁移测试用）：CHECK 两词、无 attributor、
+# UNIQUE(match_id, line)——即 A_multi 预留落地前的历史形状。
+_V6_AL_PREDICT = """
+CREATE TABLE agentline_predictions (
+    id                INTEGER PRIMARY KEY,
+    match_id          INTEGER NOT NULL REFERENCES matches(id),
+    line              TEXT NOT NULL
+        CHECK (line IN ('A_base', 'A_enh')),
+    p_home REAL, p_draw REAL, p_away REAL, p_over25 REAL,
+    confidence        REAL,
+    reasoning_digest  TEXT,
+    sources_json      TEXT,
+    raw_output        TEXT NOT NULL,
+    status            TEXT NOT NULL
+        CHECK (status IN ('ok', 'parse_fail', 'timeout', 'error')),
+    repaired          INTEGER,
+    harness           TEXT,
+    model             TEXT,
+    duration_s        REAL,
+    created_at        TEXT NOT NULL,
+    UNIQUE (match_id, line)
+);
+"""
+
+
+def _al_seed_match(conn):
+    """一场比赛 + 两个 line 的存量预测行（迁移保数据的验收对象）。"""
+    conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+    conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Chelsea')")
+    conn.execute("INSERT INTO matches (id, league, season, date,"
+        " home_team_id, away_team_id, raw_line)"
+        " VALUES (1, 'E0', 2023, '2024-02-24', 1, 2, '{}')")
+    for line in ("A_base", "A_enh"):
+        conn.execute(
+            "INSERT INTO agentline_predictions (match_id, line, p_home,"
+            " raw_output, status, created_at)"
+            " VALUES (1, ?, 0.5, 'raw', 'ok', '2026-09-04T00:00:00Z')", (line,))
+    conn.commit()
+
+
+def test_fresh_agentline_reserves_a_multi(tmp_path):
+    """新建库即含二期占位（附录 §6）：line CHECK 含 A_multi、attributor 列
+    DEFAULT 1、UNIQUE(match_id, line, attributor)——SQLite 无法后补 CHECK，
+    一次到位免二次重建。"""
+    init_db(tmp_path / "t.db")
+    conn = connect(tmp_path / "t.db")
+    try:
+        ddl = conn.execute("SELECT sql FROM sqlite_master"
+            " WHERE name='agentline_predictions'").fetchone()["sql"]
+        assert "'A_multi'" in ddl and "attributor" in ddl
+        conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+        conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Chelsea')")
+        conn.execute("INSERT INTO matches (id, league, season, date,"
+            " home_team_id, away_team_id, raw_line)"
+            " VALUES (1, 'E0', 2023, '2024-02-24', 1, 2, '{}')")
+        # 词表放行 A_multi；同场聚合 0 + 成员 1..3 四行并存（UNIQUE 三元组语义）
+        for a in (0, 1, 2, 3):
+            conn.execute(
+                "INSERT INTO agentline_predictions (match_id, line,"
+                " raw_output, status, created_at, attributor)"
+                " VALUES (1, 'A_multi', 'raw', 'ok',"
+                " '2026-09-04T00:00:00Z', ?)", (a,))
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) c FROM agentline_predictions"
+            ).fetchone()["c"] == 4
+    finally:
+        conn.close()
+
+
+def test_fresh_agentline_rejects_unknown_line(tmp_path):
+    init_db(tmp_path / "t.db")
+    conn = connect(tmp_path / "t.db")
+    try:
+        conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+        conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Chelsea')")
+        conn.execute("INSERT INTO matches (id, league, season, date,"
+            " home_team_id, away_team_id, raw_line)"
+            " VALUES (1, 'E0', 2023, '2024-02-24', 1, 2, '{}')")
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO agentline_predictions (match_id, line,"
+                " raw_output, status, created_at)"
+                " VALUES (1, 'A_wrong', 'raw', 'ok', '2026-09-04T00:00:00Z')")
+    finally:
+        conn.close()
+
+
+def test_v6_migrates_to_v7_rebuilds_agentline(tmp_path):
+    """v6 库（两词 CHECK、无 attributor、二元 UNIQUE）经 init_db 重建表升级：
+    存量行保全且 attributor 回填 1（单成员语义不变），新形状三件套齐活。"""
+    from fa.db import connect as _connect
+    db = tmp_path / "v6.db"
+    init_db(db)                                   # v7 新建
+    conn = _connect(db)
+    conn.execute("DROP TABLE agentline_predictions")
+    conn.executescript(_V6_AL_PREDICT)
+    conn.execute("CREATE INDEX idx_alp_line ON agentline_predictions (line)")
+    _al_seed_match(conn)
+    conn.execute("UPDATE schema_version SET version=6")
+    conn.commit()
+    conn.close()
+    init_db(db)                                   # v6 -> v7
+    conn = _connect(db)
+    try:
+        assert conn.execute("SELECT version FROM schema_version"
+                            ).fetchone()["version"] == SCHEMA_VERSION
+        rows = conn.execute("SELECT line, attributor FROM"
+            " agentline_predictions ORDER BY line").fetchall()
+        assert [(r["line"], r["attributor"]) for r in rows] \
+            == [("A_base", 1), ("A_enh", 1)]      # 数据保全 + 回填 1
+        ddl = conn.execute("SELECT sql FROM sqlite_master"
+            " WHERE name='agentline_predictions'").fetchone()["sql"]
+        assert "'A_multi'" in ddl
+        # 迁移后 UNIQUE 三元组生效：同 match+line+attributor 撞车、跨 attributor 合法
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO agentline_predictions (match_id, line,"
+                " raw_output, status, created_at)"
+                " VALUES (1, 'A_base', 'raw2', 'ok',"
+                " '2026-09-04T00:01:00Z')")       # attributor 默认 1 撞存量行
+        conn.execute(
+            "INSERT INTO agentline_predictions (match_id, line,"
+            " raw_output, status, created_at, attributor)"
+            " VALUES (1, 'A_base', 'raw2', 'ok', '2026-09-04T00:01:00Z', 2)")
+        conn.commit()
+        # 索引随重建恢复
+        idx = conn.execute("SELECT name FROM sqlite_master WHERE"
+            " type='index' AND tbl_name='agentline_predictions'").fetchall()
+        assert any(r["name"] == "idx_alp_line" for r in idx)
+    finally:
+        conn.close()
+
+
+def test_v7_migration_guard_skips_rebuilt_table(tmp_path):
+    """护栏：表已是 v7 形状而版本号仍是 6（迁移半途中断重跑）——不得重建报错、
+    数据无损。"""
+    db = tmp_path / "half.db"
+    init_db(db)
+    conn = connect(db)
+    _al_seed_match(conn)
+    conn.execute("UPDATE schema_version SET version=6")
+    conn.commit()
+    conn.close()
+    init_db(db)                                   # 表已新形状，护栏应跳过
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) c FROM agentline_predictions"
+            ).fetchone()["c"] == 2
+        assert conn.execute("SELECT version FROM schema_version"
+                            ).fetchone()["version"] == SCHEMA_VERSION
+    finally:
+        conn.close()

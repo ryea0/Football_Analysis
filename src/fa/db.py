@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -187,12 +187,17 @@ CREATE INDEX IF NOT EXISTS idx_retro_attr_match ON retro_attributions (match_id)
 # 范式对比线两表（spec §12.5 / 设计 §6）：线 A 专用，与 B 线表物理隔离——
 # 本模块的 B 线边界注释同样适用于这里：绝不写 recommendations / bets 等。
 # v4/v5 分层由并行分支合并产生（2026-09-04）：retro 先占 v4，本线抬 v5。
+# v7 补二期多脑预留（multi-brain 附录 §6 欠账）：line CHECK 加 'A_multi'、
+# attributor 列（成员 1..N / 聚合 0）、UNIQUE 抬三元组 (match_id, line,
+# attributor)——A_multi 同场四行并存的前提；A_base/A_enh 恒 attributor=1，
+# 语义不变。CHECK 与 UNIQUE 无法 ALTER，v7 走重建表迁移（见 _migrate_up）。
 _AL_TABLE = """
 CREATE TABLE IF NOT EXISTS agentline_predictions (
     id                INTEGER PRIMARY KEY,
     match_id          INTEGER NOT NULL REFERENCES matches(id),
     line              TEXT NOT NULL
-        CHECK (line IN ('A_base', 'A_enh')),
+        CHECK (line IN ('A_base', 'A_enh', 'A_multi')),
+    attributor        INTEGER NOT NULL DEFAULT 1,  -- 成员 1..N；聚合行 0（二期）
     p_home REAL, p_draw REAL, p_away REAL, p_over25 REAL,   -- parse_fail 时 NULL
     confidence        REAL,
     reasoning_digest  TEXT,
@@ -205,7 +210,7 @@ CREATE TABLE IF NOT EXISTS agentline_predictions (
     model             TEXT,
     duration_s        REAL,
     created_at        TEXT NOT NULL,
-    UNIQUE (match_id, line)           -- 幂等：一场一line一行
+    UNIQUE (match_id, line, attributor)   -- 幂等：一场一line一attributor一行
 );
 CREATE INDEX IF NOT EXISTS idx_alp_line ON agentline_predictions (line);
 
@@ -310,7 +315,10 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     v5->v6 纯加列——matches 增 BFE 收盘四列、bets 增 closing_source（Pinnacle
     断供应对，spec §7.3）；recommendations 补 persona 两列 key_factors /
     report_md（§6.3；M4 分支基于旧 main 原占 v4，集成时并入 v6——第三个
-    并行撞号位，2026-09-04）。"""
+    并行撞号位，2026-09-04）；
+    v6->v7 agentline_predictions 重建表补二期多脑预留（line CHECK 加
+    'A_multi' + attributor 列 + UNIQUE 三元组）——本层例外非纯加法（CHECK/
+    UNIQUE 无法 ALTER），走建新表搬数据，存量行 attributor 回填 1。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -356,6 +364,55 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
             if "report_md" not in rcols:
                 conn.execute(
                     "ALTER TABLE recommendations ADD COLUMN report_md TEXT")
+    if from_v < 7:
+        # agentline A_multi 预留（二期 multi-brain 附录 §6 欠账，v7）：CHECK 与
+        # UNIQUE 无法 ALTER → 建新表（_AL_TABLE 同一常量的形状）搬数据、改名。
+        # 幂等护栏（必要，同 v5 attributor 护卫理据）：init_db 先跑 _SCHEMA，
+        # v6 及更老的库此时表已存在 IF NOT EXISTS 不动它，照走重建；但迁移
+        # 半途断掉重跑（表已新形状、版本号未抬）时无条件重建会丢数据——按
+        # DDL 是否已含 'A_multi' 判定跳过。本表无入边 FK（叶子表），重建安全。
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table'"
+            " AND name='agentline_predictions'").fetchone()
+        if row is not None and "'A_multi'" not in row["sql"]:
+            conn.execute("DROP INDEX IF EXISTS idx_alp_line")
+            conn.execute(
+                "CREATE TABLE agentline_predictions_v7 ("
+                " id                INTEGER PRIMARY KEY,"
+                " match_id          INTEGER NOT NULL REFERENCES matches(id),"
+                " line              TEXT NOT NULL"
+                "     CHECK (line IN ('A_base', 'A_enh', 'A_multi')),"
+                " attributor        INTEGER NOT NULL DEFAULT 1,"
+                " p_home REAL, p_draw REAL, p_away REAL, p_over25 REAL,"
+                " confidence        REAL,"
+                " reasoning_digest  TEXT,"
+                " sources_json      TEXT,"
+                " raw_output        TEXT NOT NULL,"
+                " status            TEXT NOT NULL"
+                "     CHECK (status IN ('ok', 'parse_fail', 'timeout',"
+                " 'error')),"
+                " repaired          INTEGER,"
+                " harness           TEXT,"
+                " model             TEXT,"
+                " duration_s        REAL,"
+                " created_at        TEXT NOT NULL,"
+                " UNIQUE (match_id, line, attributor))")
+            conn.execute(
+                "INSERT INTO agentline_predictions_v7 (id, match_id, line,"
+                " attributor, p_home, p_draw, p_away, p_over25, confidence,"
+                " reasoning_digest, sources_json, raw_output, status,"
+                " repaired, harness, model, duration_s, created_at)"
+                " SELECT id, match_id, line, 1, p_home, p_draw, p_away,"
+                " p_over25, confidence, reasoning_digest, sources_json,"
+                " raw_output, status, repaired, harness, model, duration_s,"
+                " created_at FROM agentline_predictions")
+            conn.execute("DROP TABLE agentline_predictions")
+            conn.execute(
+                "ALTER TABLE agentline_predictions_v7"
+                " RENAME TO agentline_predictions")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alp_line"
+                " ON agentline_predictions (line)")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
