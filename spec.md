@@ -13,7 +13,7 @@
 > v0.4 → v0.5 变更：新增 **§12 双线并存协议**——A 线（研究评测，已建成）与 B 线（运营模拟 = M3-M5 paper 模式）在同一程序并存、结论分账；项目负责人显式推翻「M2 NO-GO → M3+ 不启动」的顺序约束（决策记录见 §12.4）；A 线判据不变。
 > v0.5 → v0.6 变更：新增本地只读看板（§7.4）——`dashboard/`（Streamlit + plotly，独立 dependency-group），B/A 线分区观察出口，只读连库、指标口径复用回测模块（设计：docs/superpowers/specs/2026-09-04-web-dashboard-design.md）。
 > v0.6 → v0.7 变更：调度载体双轨化（§9.6）——system crontab 与 hermes cron 双载体可切换（2026-09-04 负责人裁定「并行开发、实现可切换」）；job 唯一入口 `scripts/fa_cron.sh`，失败告警与漏跑看护收进 `fa ops alert` / `fa ops watchdog`（风险 #6 落地）。
-> v0.7 → v0.8 变更：CLV 收盘基准链（§3.2/§7.3）——football-data 自 2025-12 断供 Pinnacle，B 线收盘基准改为「Pinnacle 优先、缺失 fallback Betfair 交易所（`bfe_*`）」并以 `bets.closing_source` 记账（2026-09-04 负责人裁定）；matches 增 `bfe_*` 四列（schema v5）、`fa data backfill-bfe` / `fa ops backfill-clv` 回填既有分区与台账；A 线回测基准不变。
+> v0.7 → v0.8 变更：CLV 收盘基准链（§3.2/§7.3）——football-data 自 2025-12 断供 Pinnacle，B 线收盘基准改为「Pinnacle 优先、缺失 fallback Betfair 交易所（`bfe_*`）」并以 `bets.closing_source` 记账（2026-09-04 负责人裁定）；matches 增 `bfe_*` 四列（schema v6——v5 已被范式对比线占用）、`fa data backfill-bfe` / `fa ops backfill-clv` 回填既有分区与台账；A 线回测基准不变。
 
 ---
 

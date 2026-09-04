@@ -792,7 +792,7 @@ def _v4_db(path):
     c.close()
 
 
-def test_v4_migrates_to_v5_adds_bfe_and_closing_source(tmp_path):
+def test_v4_migrates_to_v6_adds_bfe_and_closing_source(tmp_path):
     db = tmp_path / "v4.db"
     _v4_db(db)
     init_db(db)                     # 触发 _migrate_up(4 -> 5)
@@ -811,7 +811,7 @@ def test_v4_migrates_to_v5_adds_bfe_and_closing_source(tmp_path):
         c.close()
 
 
-def test_fresh_db_has_bfe_columns_at_v5(tmp_path):
+def test_fresh_db_has_bfe_columns_at_v6(tmp_path):
     db = tmp_path / "fresh.db"
     init_db(db)
     c = connect(db)

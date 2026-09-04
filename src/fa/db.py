@@ -327,13 +327,16 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
                 " attributor INTEGER NOT NULL DEFAULT 1")
     if from_v < 6:
         # 防重入：版本号与表形状在历史上出现过错位（is_control 先例——加列未
-        # bump 版本），列已存在就跳过，别让 ALTER 炸在「旧版本号 × 新形状表」上
+        # bump 版本），列已存在就跳过，别让 ALTER 炸在「旧版本号 × 新形状表」上；
+        # 表本身缺失（极简合成库 / 分支级 _migrate_up 单测）同样跳过——真实库
+        # 自 v1 起 matches/bets 必在
         mcols = {r["name"] for r in conn.execute("PRAGMA table_info(matches)")}
-        for col in ("bfe_home", "bfe_draw", "bfe_away", "over25_bfe"):
-            if col not in mcols:
-                conn.execute(f"ALTER TABLE matches ADD COLUMN {col} REAL")
+        if mcols:
+            for col in ("bfe_home", "bfe_draw", "bfe_away", "over25_bfe"):
+                if col not in mcols:
+                    conn.execute(f"ALTER TABLE matches ADD COLUMN {col} REAL")
         bcols = {r["name"] for r in conn.execute("PRAGMA table_info(bets)")}
-        if "closing_source" not in bcols:
+        if bcols and "closing_source" not in bcols:
             conn.execute("ALTER TABLE bets ADD COLUMN closing_source TEXT")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
