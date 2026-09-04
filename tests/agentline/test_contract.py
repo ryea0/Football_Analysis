@@ -1,7 +1,7 @@
 """契约校验（设计 §4）：约束输出——ok 或 parse_fail，绝不脑补。"""
 import json
 
-from fa.agentline.contract import parse_prediction
+from fa.agentline.contract import ATTACK_LABELS, parse_attack, parse_prediction
 
 _OK = json.dumps({"p_home": 0.45, "p_draw": 0.28, "p_away": 0.27,
                   "p_over25": 0.55, "confidence": 0.6,
@@ -78,9 +78,6 @@ def test_parse_fail_carries_reason_not_numbers():
     assert "原因" in r["reasoning_digest"] or r["reasoning_digest"]
 
 
-from fa.agentline.contract import ATTACK_LABELS, parse_attack
-
-
 def test_parse_attack_ok_all_labels():
     items = [{"label": lb, "reason": "r", "severity": 0.5}
              for lb in ATTACK_LABELS]
@@ -102,12 +99,13 @@ def test_parse_attack_unknown_label_fails():
 
 
 def test_parse_attack_severity_bounds():
-    # 注：brief 原稿 f-string 中 {bad}}]}} 有未转义单 }（语法错误），且其后
-    # .replace("}}", "}") 恒为空转——此处按同一语义改写（产出串逐字符一致）。
+    # payload 须是合法 JSON（含外层收尾 }），坏值才会真正打到 severity 守卫；
+    # error 断言钉死失败原因，防止 payload 畸形时以「JSON 解析失败」空过（恒真）。
     for bad in ("-0.1", "1.1", "NaN", "Infinity"):
         got = parse_attack('{"attacks": [{"label": "overconfidence",'
-                           f' "reason": "r", "severity": {bad}}}]')
+                           ' "reason": "r", "severity": %s}]}' % bad)
         assert got["status"] == "parse_fail", bad
+        assert "severity" in got["error"], bad
 
 
 def test_parse_attack_probability_field_guard():
