@@ -31,6 +31,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
+from fa.data.teams import record_unknown
 from fa.db import set_meta
 from fa.pipeline.align import align_fixture_teams
 from fa.pipeline.odds_api import OddsApiError, OddsSnapshot, fetch_odds
@@ -46,7 +47,8 @@ def sync_fixtures(conn: sqlite3.Connection, leagues: list[str],
     """逐联赛拉实时盘，upsert fixtures 并落全部快照；返回同步摘要。
 
     返回 ``{"fixtures": 本次 upsert 的场次数, "aligned": 双侧都对齐的场次数,
-    "unknown": 未对齐队名（去重、字典序）, "quota_left": 剩余额度或 None}``。
+    "unknown": 未对齐队名（去重、字典序）, "league_mismatch": 联赛自洽校验
+    拦下的侧数（M4 §7-4）, "quota_left": 剩余额度或 None}``。
     不做 kickoff 窗口筛选——窗口归报告层（brief 明示）。
 
     **额度节流契约**（spec §3.4「合并 region」）：``regions`` 原样透传给每次
@@ -59,6 +61,7 @@ def sync_fixtures(conn: sqlite3.Connection, leagues: list[str],
     unknown: set[str] = set()
     fixtures = 0
     aligned = 0
+    league_mismatch = 0
     quotas: list[int] = []
 
     for league in leagues:
@@ -84,9 +87,21 @@ def sync_fixtures(conn: sqlite3.Connection, leagues: list[str],
             head = group[0]                          # 同一事件的队名/kickoff 全组一致
             home_id, away_id = align_fixture_teams(
                 conn, league, head.home_name, head.away_name)
-            for name, team_id in ((head.home_name, home_id), (head.away_name, away_id)):
-                if team_id is None:
-                    unknown.add(name)
+            # 联赛自洽校验（M4 §7-4 纵深防御）：align 给出的 id 若不属于本联赛
+            # → 该侧置 NULL 并进隔离表（可见），绝不落脏 id——宁可未对齐。
+            # 根治在 resolve_team 的别名收域，这里防人工确认错队与未来新路径再漏。
+            resolved: list[int | None] = []
+            for side_name, side_id in ((head.home_name, home_id),
+                                       (head.away_name, away_id)):
+                if side_id is not None and _team_league(conn, side_id) != league:
+                    record_unknown(conn, SOURCE, side_name)
+                    unknown.add(side_name)
+                    league_mismatch += 1
+                    side_id = None
+                elif side_id is None and side_name not in unknown:
+                    unknown.add(side_name)         # 常规未对齐（对齐层已记隔离表）
+                resolved.append(side_id)
+            home_id, away_id = resolved
             fixture_id = _upsert_fixture(
                 conn, league, event_key, head, home_id, away_id, fetched_at)
             fixtures += 1
@@ -100,7 +115,15 @@ def sync_fixtures(conn: sqlite3.Connection, leagues: list[str],
         set_meta(conn, QUOTA_META_KEY, str(quota_left))
     conn.commit()
     return {"fixtures": fixtures, "aligned": aligned,
-            "unknown": sorted(unknown), "quota_left": quota_left}
+            "unknown": sorted(unknown), "league_mismatch": league_mismatch,
+            "quota_left": quota_left}
+
+
+def _team_league(conn: sqlite3.Connection, team_id: int) -> str | None:
+    """team 的联赛（无此行 → None，调用方判 != league 自然拦下）。"""
+    row = conn.execute("SELECT league FROM teams WHERE id=?",
+                       (team_id,)).fetchone()
+    return None if row is None else row["league"]
 
 
 # ---------------------------------------------------------------- 内部实现

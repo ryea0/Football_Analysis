@@ -7,6 +7,8 @@ T8 已合流，**降级分支已摘除**：这里只剩模块级直引 + 透传�
 与测试 monkeypatch 点（``reporting._render`` / ``reporting._telegram``）不变。
 """
 
+import time
+
 from fa.report import render as _render
 from fa.report import telegram as _telegram
 
@@ -25,11 +27,21 @@ def render_settlement_brief(settle) -> str:
     return _render.render_settlement_brief(settle)
 
 
+# 推送重试（M4 §7-3「瞬态失败的廉价吸收」）：失败等 _RETRY_DELAY_S 秒重试
+# **恰好一次**——hermes/TG 的瞬态抖动（M4 E2E 实测遇过 1 次）就地吸收；
+# 二次仍败走既有降级（False + LAST_TELEGRAM_ERROR 记第二次原因）。
+# telegram 层保持零改动（subprocess 细节与降级测试原样），重试收在门面。
+_RETRY_DELAY_S = 1.5
+
+
 def send(text: str) -> bool:
-    """推送 Telegram。真实现自身不抛、只回 bool。"""
+    """推送 Telegram（失败重试恰好一次）。真实现自身不抛、只回 bool。"""
+    if _telegram.send_telegram(text):
+        return True
+    time.sleep(_RETRY_DELAY_S)
     return _telegram.send_telegram(text)
 
 
 def last_error() -> str | None:
-    """最近一次推送失败原因（成功后为 ``None``，可溯源进 runs.summary）。"""
+    """最近一次推送失败原因（重试成功后为 ``None``，可溯源进 runs.summary）。"""
     return _telegram.LAST_TELEGRAM_ERROR
