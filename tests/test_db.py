@@ -324,9 +324,6 @@ def test_bline_vocab_accepts_all_legal_values(conn, bline_ids):
 
 def test_migrate_up_v1_adds_everything(tmp_path):
     """_migrate_up 单独跑就能把 v1 库补齐到当前版本（不依赖 _SCHEMA 兜底）。"""
-
-
-    """_migrate_up 单独跑就能把 v1 库补齐到 v4（不依赖 _SCHEMA 兜底）。"""
     p = tmp_path / "v1.db"
     _legacy_db(p, version=1, with_bp=False)
     c = connect(p)
@@ -361,20 +358,13 @@ def test_migrate_up_v2_adds_bline_retro_and_persona(tmp_path):
     c.close()
 
 
-@pytest.mark.parametrize("from_v,drop", [
-    (1, ("backtest_predictions", *_BLINE_TABLES)),   # v1 跨级升级
-    (3, ()),                                         # v3 就地升级（M3 真库路径）
-], ids=["from_v1", "from_v3"])
-def test_migrate_and_fresh_schemas_match(tmp_path, from_v, drop):
-    """新建与迁移两条路径产出的表形状必须一致（M2 教训的推广）。
-
-    from_v=3 腿先摘掉 v4 两列再升，等价于真实 M3 库的 v3 形状。
-    """
-    init_db(tmp_path / "a.db")                      # 全新 v4
-    init_db(tmp_path / "b.db")                      # 降到 from_v 再升级回 v4
-    if from_v == 3:
-        _strip_persona_columns(tmp_path / "b.db")
-    _set_version(tmp_path / "b.db", from_v, drop=drop)
+def test_migrate_and_fresh_schemas_match(tmp_path):
+    """新建与迁移两条路径产出的全部表/索引 DDL 必须逐字一致（M2 教训的推广）。"""
+    init_db(tmp_path / "a.db")                      # 全新库
+    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回当前版本
+    _set_version(tmp_path / "b.db", 1,
+                 drop=("backtest_predictions", *_BLINE_TABLES,
+                       "retro_runs", "retro_attributions", *_AGENTLINE_TABLES))
     init_db(tmp_path / "b.db")
 
     tables = ("backtest_predictions", *_BLINE_TABLES,
@@ -391,13 +381,13 @@ def test_migrate_and_fresh_schemas_match(tmp_path, from_v, drop):
               "WHERE type='index' AND tbl_name=? AND sql IS NOT NULL ORDER BY name"
         assert a.execute(sql, (t,)).fetchall() == \
             b.execute(sql, (t,)).fetchall(), t
-        # DDL 文本逐字一致——唯一例外是走过列级迁移的表：ALTER TABLE ADD COLUMN
-        # 会把新列缀在表尾并重写建表语句文本，列序与文本天然不同于新建路径
-        # （语义形状由上面三重断言钉住）。
-        if not (from_v == 3 and t == "recommendations"):
-            sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
-            assert a.execute(sql, (t,)).fetchone()["sql"] == \
-                b.execute(sql, (t,)).fetchone()["sql"], t
+        # DDL 文本逐字一致。from_v1 腿的表全部由常量 executescript 建出，无列级
+        # ALTER，恒与新建一致；from_v3 腿（recommendations 走 ALTER 补列、列序
+        # 缀尾）的形状一致性由独立的
+        # test_v3_shape_matches_fresh_on_persona_columns 以无序形状比对覆盖。
+        sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
+        assert a.execute(sql, (t,)).fetchone()["sql"] == \
+            b.execute(sql, (t,)).fetchone()["sql"], t
     a.close(); b.close()
 
 
@@ -742,7 +732,8 @@ def test_v5_attributor_column_defaults_and_values(tmp_path):
 
 
 def test_v4_migrates_to_v5(tmp_path):
-    """v4 库（无 attributor 列）经 init_db ALTER 升 v5，存量行回填 1。"""
+    """v4 库（无 attributor 列）经 init_db ALTER 升级（v6 链下升到当前版），
+    存量行回填 1。"""
     from fa.db import connect, init_db
     db = tmp_path / "v4.db"
     init_db(db)                                   # v5 新建
@@ -866,3 +857,70 @@ def test_fresh_db_has_bfe_columns_at_v6(tmp_path):
             r["name"] for r in c.execute("PRAGMA table_info(bets)")}
     finally:
         c.close()
+
+
+# ------------------------------------- persona 两列（M4，v6 迁移链）
+
+
+
+
+
+def test_fresh_recommendations_has_persona_columns(tmp_path):
+    """全新库 recommendations 即含 persona 点评两列（可空、非主键，§6.3）。"""
+    init_db(tmp_path / "t.db")
+    c = connect(tmp_path / "t.db")
+    cols = _table_cols(c, "recommendations")
+    assert cols["key_factors"] == ("TEXT", 0, 0)
+    assert cols["report_md"] == ("TEXT", 0, 0)
+    order = list(cols)
+    assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
+        ["key_factors", "report_md"]
+    c.close()
+
+
+def test_v3_upgrades_to_current_preserves_m3_rows(tmp_path):
+    """v3→当前（经 v4/v5/v6 全链）：persona 两列补齐，M3 既有推荐行原样保留。"""
+    p = tmp_path / "t.db"
+    init_db(p)
+    c = connect(p)
+    run = c.execute(
+        "INSERT INTO runs (type, phase, started_at, status) VALUES "
+        "('matchday', 'am', '2026-09-03T11:00:00Z', 'ok')")
+    fx = c.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, status, "
+        "created_at) VALUES ('E0', 'ev-v3', 'oddsapi', '2026-09-04T14:00:00Z', "
+        "'scheduled', '2026-09-03T11:00:00Z')")
+    c.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " created_at) VALUES (?, ?, 'model_only', 'H', 'am', 0.55, 0.50, 2.10,"
+        " 'Pinnacle', 0.05, 0.155, 0.01, '2026-09-03T11:00:00Z')",
+        (run.lastrowid, fx.lastrowid))
+    c.commit(); c.close()
+
+    _strip_persona_columns(p)          # 模拟 M3 上线库：v3 形状 + 一行既有推荐
+    init_db(p)                         # 不抛异常即升级成功
+
+    c = connect(p)
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+    r = c.execute("SELECT * FROM recommendations").fetchone()
+    assert (r["strategy"], r["market"], r["phase"]) == ("model_only", "H", "am")
+    assert r["model_p"] == 0.55 and r["kelly_stake_frac"] == 0.01
+    assert r["key_factors"] is None and r["report_md"] is None
+    assert r["verdict"] is None and r["confidence_delta"] is None \
+        and r["final_stake_frac"] is None
+    c.close()
+
+
+def test_v3_shape_matches_fresh_on_persona_columns(tmp_path):
+    """v3 升级库与全新库的 recommendations 形状（含类型）一致——ALTER 列序缀尾
+    与 fresh 列序不同属已知豁免（按名形状比对，M4 分叉合并为 v6 后两路同构）。"""
+    init_db(tmp_path / "a.db")
+    init_db(tmp_path / "b.db")
+    _strip_persona_columns(tmp_path / "b.db")
+    _set_version(tmp_path / "b.db", 3, drop=())
+    init_db(tmp_path / "b.db")
+    ca, cb = connect(tmp_path / "a.db"), connect(tmp_path / "b.db")
+    assert _table_cols(ca, "recommendations") == _table_cols(cb, "recommendations")
+    ca.close(); cb.close()

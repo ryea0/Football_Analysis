@@ -293,13 +293,13 @@ hermes cron（调度）
 | 累计 P&L | 累计净额 | 绝对量 |
 | **CLV** | odds_taken / 收盘价 − 1，按注中位数。**收盘基准链（2026-09-04 裁定）**：Pinnacle 收盘（`psc_*`，与 A 线回测同源）优先；缺失 fallback Betfair 交易所收盘（`bfe_*`，含佣金前置、略偏严）；实际所用记 `bets.closing_source`。背景：football-data.co.uk 自 2025-12 起断供 Pinnacle（2026-27 赛季连列已删），B 线不 fallback 则主判据失明 | **金标准**：持续买在收盘前且价格更好 = 长期正期望的信号，比短期盈亏更早暴露真相 |
 
+paper bankroll 与上表指标按 `strategy` 分轨统计（model_only / model_persona 各一本，初始各 1000）——§12.3 预注册判据的分轨对比口径（M4 裁定，2026-09-04：分轨隔离使一轨盈余不放大另一轨仓位，A/B 对比不失真）。
 ### 7.4 本地只读看板（v0.6）
 
 - `dashboard/`（Streamlit 多页应用）：B 线运营监控 4 页 + A 线研究可视化 3 页，页面按 §12 双线分区，表边界同 §12.1（A 线页只读 `backtest_predictions`/`matches`）
 - 只读连接（`mode=ro`）+ 独立依赖组（`uv run --group dashboard streamlit run dashboard/app.py`）；指标口径单一来源——复用 `backtest/metrics` 与 `backtest/simulate`，看板不另写公式
 - 看板是**视图不是证据源**：结论仍以 runs 落库记录与 m*/判决文档为准
 
-paper bankroll 与上表指标按 `strategy` 分轨统计（model_only / model_persona 各一本，初始各 1000）——§12.3 预注册判据的分轨对比口径（M4 裁定，2026-09-04：分轨隔离使一轨盈余不放大另一轨仓位，A/B 对比不失真）。
 
 ---
 
@@ -522,3 +522,19 @@ A 线新增「agent 当大脑」对比子线（线 A）：dsh headless agent 对
 `A_enh`（+web 检索）度量定性信息增量，为 M4 persona 设计提供先导数据。
 「agent 不当大脑」由公设转为待实证命题。设计文档：
 docs/superpowers/specs/2026-09-04-agentline-dual-track-design.md。
+
+### 12.6 复盘归因子线（2026-09-04）
+
+A 线新增复盘归因子线（retro）：赛后对选定场次（分歧周批含命中对照 / paper
+T+1 / 线 A 对齐 / 手动）做定性归因（封闭标签枚举、`tag_set_version` 版本
+化），产出落 `retro_attributions` 表，永不进入推荐与落注流。验收三关卡：
+证据日期审计、重跑一致性测量（已实施为 ensemble 形态：N=3 独立归因者 +
+确定性投票聚合，`attributor` 列分账成员/聚合行；<50% 全同率降格为假设生成
+器）、按标签分层的预测效度检验（允许结论为「归因无信息量」）。多 agent
+总纲（Python 指挥官/测量纪律/混合门控）见
+docs/superpowers/specs/2026-09-04-multi-agent-charter.md。分期：统计分歧
+报告（S0）→ hermes 周批（S1）→ paper T+1（S2）→ 线 A 案例库（S3，版本
+标记供给，A_base 永不供给）。设计文档：
+docs/superpowers/specs/2026-09-04-retro-attribution-design.md 与
+2026-09-04-retro-ensemble-design.md。编号协调：C 线（M6 进化线）宪章
+原拟 §12.6，改为 §12.7（其宪章明文「不抢号、跟随」）。

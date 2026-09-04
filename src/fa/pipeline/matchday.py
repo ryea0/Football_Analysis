@@ -260,7 +260,6 @@ def _result(status: str, run_id: int, phase: str, *, fixtures: int = 0,
     没拉盘」，而猜错一句就是向用户谎报价格新鲜度。``degraded`` 仍只表示「有降级」。
     ``persona`` 只带四个结果键；``attempted`` 名单只进 ``runs.summary``（pm 的
     沿用依据），不进调用方返回。"""
-
     return {"status": status, "run_id": run_id, "phase": phase,
             "fixtures": fixtures, "aligned": aligned,
             "unknown": list(unknown or []), "recs": recs, "bets": bets,
