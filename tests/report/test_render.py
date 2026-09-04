@@ -16,6 +16,7 @@ import pytest
 from fa.db import connect, init_db
 from fa.report.render import (
     _LEAGUE_CN,
+    _STRATEGY,
     _kickoff_cn,
     render_matchday_report,
     render_pm_update,
@@ -67,13 +68,14 @@ def _run(conn, phase):
 
 
 def _rec(conn, run_id, fixture_id, market, phase, best_odds, model_p=0.520,
-         market_p=0.460, ev=0.092, kelly=0.012):
+         market_p=0.460, ev=0.092, kelly=0.012, strategy="model_only"):
     cur = conn.execute(
         "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
         " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
-        " created_at) VALUES (?,?,'model_only',?,?,?,?,?,'pinnacle',0.060,?,?,"
-        "'2026-09-03T03:00:00Z')",
-        (run_id, fixture_id, market, phase, model_p, market_p, best_odds, ev, kelly))
+        " created_at) VALUES (?,?,?,?,?,?,?,?,'pinnacle',0.060,?,?"
+        ",'2026-09-03T03:00:00Z')",
+        (run_id, fixture_id, strategy, market, phase, model_p, market_p, best_odds,
+         ev, kelly))
     return cur.lastrowid
 
 
@@ -482,6 +484,60 @@ def test_pm_diff_does_not_pair_across_strategies(conn):
     assert "已消失" in out and "Arsenal" in out      # am model_only 无 pm 对应
     assert "## 新增候选（1）" in out                  # pm model_persona 是新增
     assert "2.20" in out
+
+
+# ------------------------------------- TG 正文双轨口径（M6 §12.7，设计档 R1）
+# nokb 是 C 线测量对照轨：`fa status`/weekly/dashboard 三轨（STRATEGIES 单源），
+# TG 推送正文保持 §6.6 双轨——过滤在 render 单点（_REC_SQL + _bankroll_lines）。
+
+def test_tg_report_excludes_nokb_track(conn):
+    """TG 正文保持双轨口径：候选表、bankroll 块均不含 nokb（设计档 §5/R1）。"""
+    rid = _run(conn, "am")
+    nokb = _rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 9.99,
+                strategy="model_persona_nokb")      # 对照轨独有的价格
+    _rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 2.10)
+    _rec(conn, rid, _fid(conn, "ev-1"), "H", "am", 2.10, strategy="model_persona")
+    conn.commit()
+    _pending_bet(conn, nokb)                        # nokb 轨也落了 paper 注
+    conn.commit()
+    text = render_matchday_report(conn, rid, "am", {"train_n": 100}, 300, False)
+    assert "model_persona_nokb" not in text
+    assert "纯模型" in text and "模型+persona" in text
+    assert "候选场次（2）" in text                   # 三行只出两行：nokb 行被滤
+    assert "9.99" not in text                       # nokb 行的价格不透出
+    assert "- model_persona_nokb：" not in text     # bankroll 块同样双轨
+
+
+def test_pm_update_excludes_nokb_track(conn):
+    """pm diff 的配对/新增/消失全由 `_recs` 供给——单点过滤三处全中。"""
+    am, pm = _run(conn, "am"), _run(conn, "pm")
+    fx = _fid(conn, "ev-1")
+    for strategy in ("model_only", "model_persona"):
+        _rec(conn, am, fx, "H", "am", 2.10, strategy=strategy)
+        _rec(conn, pm, fx, "H", "pm", 1.90, strategy=strategy)   # 两轨都价变
+    _rec(conn, am, fx, "H", "am", 9.99, strategy="model_persona_nokb")
+    _rec(conn, pm, fx, "H", "pm", 8.88, strategy="model_persona_nokb")
+    conn.commit()
+    text = render_pm_update(conn, am, pm, 300, False)
+    assert "model_persona_nokb" not in text
+    assert "## 盘口移动（2）" in text               # nokb 不参与跨窗配对
+    assert "9.99" not in text and "8.88" not in text
+
+
+def test_status_shows_three_tracks(conn):
+    """fa status 的 B 线栏三轨（paper_summary 单源自动）——验证不被 render
+    过滤误伤（status 走 cli._b_line_summary，不经 render）。"""
+    from fa.pipeline.paper import paper_summary
+    assert set(paper_summary(conn)) == {"model_only", "model_persona",
+                                        "model_persona_nokb"}
+
+
+def test_strategy_label_map_still_covers_nokb():
+    """`_REC_SQL` 已把 nokb 挡在 TG 正文外，但展示标签表保持三键完整——
+    非 TG 语境（status/dashboard 复用本表）不得跌回裸英文回退。"""
+    assert _STRATEGY["model_persona_nokb"] == "模型+persona·无知识库"
+    assert set(_STRATEGY) == {"model_only", "model_persona",
+                              "model_persona_nokb"}
 
 
 # ------------------------------------------------- 降级分支（T4/T7 交互）
