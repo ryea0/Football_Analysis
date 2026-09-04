@@ -866,6 +866,11 @@ def run_daily_cmd() -> None:
              f"{out['clv_median']:+.2%}" if out["clv_median"] is not None
              else "，CLV 无收盘价基准")
     typer.echo(line)
+    if out["retro"] is not None:
+        typer.echo(f"  复盘归因：批 #{out['retro']['batch_id']}，"
+                   f"ok {out['retro']['n_ok']}/{out['retro']['n_selected']}")
+    elif out["retro_error"]:
+        typer.echo(f"  复盘归因：降级（{out['retro_error']}）")
     if out["sent"] is None:
         typer.echo("  推送：静默（无可结注）")
     elif out["sent"]:

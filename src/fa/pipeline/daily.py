@@ -22,17 +22,28 @@ from __future__ import annotations
 
 import sqlite3
 
+from fa.config import project_root
 from fa.data.sync import SyncReport, sync_history
 from fa.pipeline.paper import settle_paper_bets
 from fa.pipeline.reporting import last_error, render_settlement_brief, send
 from fa.pipeline.runs import (RUN_DAILY, STATUS_DEGRADED, STATUS_FAILED,
                               STATUS_OK, begin_run, finish_run)
+from fa.report.render import render_retro_brief
+from fa.retro.pipeline import run_retro_batch
+from fa.retro.select import select_paper_t1
+
+
+def _yesterday() -> str:
+    """昨日（kickoff 日历日）——独立函数供测试 monkeypatch（防时间炸弹）。"""
+    from datetime import date, timedelta
+    return (date.today() - timedelta(days=1)).isoformat()
 
 
 def run_daily(conn: sqlite3.Connection) -> dict:
     """跑一次日课，返回摘要 dict：``status`` / ``run_id`` / ``settled`` / ``won``
     / ``pnl`` / ``clv_median`` / ``sent``（None = 未推送）/ ``sync``（同步摘要或
-    None = 同步失败降级）。"""
+    None = 同步失败降级）/ ``retro``（昨日推荐复盘批摘要，None = 昨日无场次或
+    未跑）/ ``retro_error``（批整体异常降级原因，str 或 None）。"""
     run_id = begin_run(conn, RUN_DAILY, None)
     try:
         return _run(conn, run_id)
@@ -54,6 +65,22 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
         sync_error = f"{type(exc).__name__}: {exc}"
 
     settle = settle_paper_bets(conn)
+    # Stage 2：paper T+1 复盘（设计 §4/§10）——sync 已把完赛行入库，昨日推荐
+    # 场次可归因。选场为空则静默跳过（非事件）；批整体异常只记账不中断日课
+    # （§9——单场失败在批内逐场降级，这里兜的是编排层异常）。attributors=1
+    # （v1 单跑；ensemble 属 A_multi 侧演化，daily 不上量）。
+    retro = None
+    retro_error = None
+    try:
+        day = _yesterday()
+        t1c, t1meta = select_paper_t1(conn, day)
+        if t1c:
+            retro = run_retro_batch(
+                conn, t1c, "paper_t1", {"date": day, **t1meta},
+                project_root() / "data" / "retro" / "inputs")
+    except Exception as exc:
+        retro = None
+        retro_error = f"{type(exc).__name__}: {exc}"
     # 降级判据看 SyncReport 而非「是否抛错」：sync_history 对单文件失败自记账不外溢
     # （§3.4 容错设计），所以「抛错」几乎不发生；真用了旧数据结算是「一个文件都没成
     # 却报了错」——files_ok==0 且 file_errors>0。部分成功（files_ok>0）仍算拿到新完
@@ -70,12 +97,22 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
                   "file_errors": len(rep.file_errors)}),
         "sync_error": sync_error,
         "sync_degraded": sync_degraded,
+        "retro": retro,
+        "retro_error": retro_error,
         "telegram": None,
     }
 
     sent: bool | None = None
     if settle["settled"] > 0:
-        sent = send(render_settlement_brief(settle))
+        brief = render_settlement_brief(settle)
+        if retro is not None and retro["n_ok"]:
+            rows = conn.execute(
+                "SELECT date, league, digest, primary_tag, tags_confidence"
+                " FROM retro_attributions WHERE batch_id=? AND status='ok'"
+                " AND attributor=1 ORDER BY date, match_id",
+                (retro["batch_id"],)).fetchall()
+            brief += "\n" + render_retro_brief(rows, retro)
+        sent = send(brief)
         summary["telegram"] = ({"sent": True, "error": None} if sent else
                                {"sent": False,
                                 "error": last_error() or "推送失败（未记录原因）"})
@@ -85,4 +122,5 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
     return {"status": status, "run_id": run_id, "settled": settle["settled"],
             "won": settle["won"], "pnl": settle["pnl"],
             "clv_median": settle["clv_median"], "sent": sent,
-            "sync": summary["sync"]}
+            "sync": summary["sync"], "retro": summary["retro"],
+            "retro_error": summary["retro_error"]}
