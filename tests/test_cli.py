@@ -629,3 +629,21 @@ def test_main_callback_runs_init_db(monkeypatch):
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert calls == [1]
+
+
+def test_agentline_run_debate_dispatch(tmp_path, monkeypatch):
+    db = _use_tmp_db(tmp_path, monkeypatch)
+    called = {}
+    import fa.agentline.orchestrate as orch
+    monkeypatch.setattr(orch, "run_debate",
+                        lambda conn, d, limit=None: {"ok": 1, "parse_fail": 0,
+                                                     "timeout": 0, "error": 0})
+    result = runner.invoke(app, ["agentline", "run", "--line", "A_debate"])
+    assert result.exit_code == 0
+    assert "ok" in result.output
+
+
+def test_agentline_run_rejects_unknown_line(tmp_path, monkeypatch):
+    _use_tmp_db(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["agentline", "run", "--line", "A_nonsense"])
+    assert result.exit_code == 2
