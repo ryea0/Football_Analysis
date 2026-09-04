@@ -490,6 +490,7 @@ def test_pm_diff_does_not_pair_across_strategies(conn):
 # nokb 是 C 线测量对照轨：`fa status`/weekly/dashboard 三轨（STRATEGIES 单源），
 # TG 推送正文保持 §6.6 双轨——过滤在 render 单点（_REC_SQL + _bankroll_lines）。
 
+
 def test_tg_report_excludes_nokb_track(conn):
     """TG 正文保持双轨口径：候选表、bankroll 块均不含 nokb（设计档 §5/R1）。"""
     rid = _run(conn, "am")

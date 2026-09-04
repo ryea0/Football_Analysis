@@ -320,6 +320,8 @@ def test_out_of_gate_no_recommendation(priced):
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
     assert recs(c, fid) == []
     assert recs(c, fid, strategy=None) == []                # 三轨都没有
+
+
 def test_edge_gate_inclusive_at_exact_boundary(priced, monkeypatch):
     """把 EDGE_MIN monkeypatch 到**逐位等于**该边界的值，钉死 >=（含端点）。"""
     c, fx, probs = priced
