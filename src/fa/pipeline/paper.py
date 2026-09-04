@@ -66,6 +66,65 @@ _BFE_CLOSING = {"H": "bfe_home", "D": "bfe_draw", "A": "bfe_away",
 CLOSING_SOURCE_PINNACLE = "pinnacle"
 CLOSING_SOURCE_BETFAIR = "betfair"
 
+# 组合风控三参数（spec §5.3 v0.10，2026-09-04 负责人裁定预注册）——paper 期
+# **仅记录观测、不拦截**（:func:`risk_gates` 快照进 runs.summary），实盘入场
+# 硬前提。参照交易实践：组合总热度 / 相关集群限额 / 回撤节流（anti-martingale）。
+RISK_EXPOSURE_CAP = 0.30     # 单轨在途注金合计 ≤ 30% 该轨 bankroll
+RISK_MATCH_CAP = 2           # 同场同轨在途 ≤ 2 注（同场多市场是相关赌注）
+RISK_DRAWDOWN_PCT = 0.20     # 自峰值回撤 > 20% → 单注上限 2% 减半为 1%
+
+
+def peak_key(strategy: str) -> str:
+    """分轨 bankroll 峰值的 meta 键（回撤节流的基准线，随结算维护）。"""
+    return f"paper_bankroll_peak:{strategy}"
+
+
+def risk_gates(conn: sqlite3.Connection) -> dict:
+    """三参数的**观测快照**（只读，不拦截）：每轨敞口比/超限场数/回撤与节流态。
+
+    判据语义：``exposure`` = 在途注金合计 ÷ 该轨 bankroll（bankroll 未初始化
+    → None，不除零）；``fixtures_over_match_cap`` = 同场同轨在途注数 >
+    :data:`RISK_MATCH_CAP` 的场次数；``drawdown`` =（峰值−当前）÷ 峰值（峰值
+    未记录 → None），``throttled`` = 超过 :data:`RISK_DRAWDOWN_PCT`。三个
+    ``*_breach``/``throttled`` 布尔是「实盘若生效会不会拦」的先导指标——
+    paper 期收集它们的出现频率，正是预注册「先观测再生效」的意义。
+    """
+    by_strategy = {}
+    for strategy in STRATEGIES:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(b.stake), 0.0) AS pending"
+            " FROM bets b JOIN recommendations r ON r.id = b.recommendation_id"
+            " WHERE b.mode=? AND b.status=? AND r.strategy=?",
+            (MODE, STATUS_PENDING, strategy)).fetchone()
+        over = conn.execute(
+            "SELECT COUNT(*) AS n FROM ("
+            "  SELECT r.fixture_id FROM bets b"
+            "  JOIN recommendations r ON r.id = b.recommendation_id"
+            "  WHERE b.mode=? AND b.status=? AND r.strategy=?"
+            "  GROUP BY r.fixture_id HAVING COUNT(*) > ?)",
+            (MODE, STATUS_PENDING, strategy, RISK_MATCH_CAP)).fetchone()
+        raw_roll = get_meta(conn, bankroll_key(strategy))
+        raw_peak = get_meta(conn, peak_key(strategy))
+        bankroll = None if raw_roll is None else float(raw_roll)
+        peak = None if raw_peak is None else float(raw_peak)
+        exposure = (float(row["pending"]) / bankroll
+                    if bankroll else None)
+        drawdown = ((peak - bankroll) / peak
+                    if peak and bankroll and peak > 0 else None)
+        by_strategy[strategy] = {
+            "pending_stake": round(float(row["pending"]), 2),
+            "bankroll": bankroll,
+            "exposure": None if exposure is None else round(exposure, 3),
+            "exposure_breach": exposure is not None and exposure > RISK_EXPOSURE_CAP,
+            "fixtures_over_match_cap": int(over["n"]),
+            "drawdown": None if drawdown is None else round(drawdown, 3),
+            "throttled": drawdown is not None and drawdown > RISK_DRAWDOWN_PCT,
+        }
+    return {"exposure_cap": RISK_EXPOSURE_CAP, "match_cap": RISK_MATCH_CAP,
+            "drawdown_threshold": RISK_DRAWDOWN_PCT,
+            "enforced": False,            # paper 期仅观测；实盘入场前提之一
+            "by_strategy": by_strategy}
+
 
 def _closing(match: sqlite3.Row, market: str) -> tuple[float | None, str | None]:
     """ ``(收盘价, 基准来源)``：psc 优先、缺失 fallback bfe；双基准皆缺 →
@@ -239,8 +298,12 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
         track = tracks[strategy]
         if track["settled"]:
             bankroll, _initialized = _bankroll(conn, strategy)   # 各轨只读一次
-            set_meta(conn, bankroll_key(strategy),
-                     str(_money(bankroll + track["pnl"])))
+            new_roll = _money(bankroll + track["pnl"])
+            set_meta(conn, bankroll_key(strategy), str(new_roll))
+            # 峰值随结算维护（§5.3 回撤节流基准线）：创新高才写，回撤不动峰值
+            raw_peak = get_meta(conn, peak_key(strategy))
+            if raw_peak is None or new_roll > float(raw_peak):
+                set_meta(conn, peak_key(strategy), str(new_roll))
         by_strategy[strategy] = {
             "settled": track["settled"], "won": track["won"],
             "pnl": _money(track["pnl"]),

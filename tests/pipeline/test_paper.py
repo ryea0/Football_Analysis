@@ -889,3 +889,73 @@ def test_apply_verdict_touches_model_persona_rows_only(conn):
     assert rows["model_persona"]["final_stake_frac"] == pytest.approx(0.02 * 1.1)
     assert rows["model_only"]["verdict"] is None             # 纯模型轨不被判决波及
     assert rows["model_only"]["final_stake_frac"] is None
+
+
+# ------------------------------------- 组合风控三参数观测（§5.3 v0.10，paper 期仅记录）
+# 总敞口 ≤30% bankroll / 同场同轨 ≤2 注 / 峰值回撤 >20% 节流——不拦截，
+# runs.summary.risk_gates 每比赛日落一次快照，实盘入场硬前提。
+
+def test_risk_gates_exposure_ratio_per_track(conn):
+    set_meta(conn, "paper_bankroll:model_only", "1000.0")
+    run = add_run(conn)
+    for i, mkt in enumerate(("H", "D", "A", "O2.5")):
+        add_rec(conn, run, add_fixture(conn, f"ev{i}", "Chelsea", "Arsenal"), mkt)
+    place_paper_bets(conn, run)                       # 4 注 model_only × 20 = 80
+    conn.commit()
+    out = paper.risk_gates(conn)
+    mo = out["by_strategy"]["model_only"]
+    assert mo["pending_stake"] == pytest.approx(80.0)
+    assert mo["exposure"] == pytest.approx(0.08)      # 80/1000
+    assert mo["exposure_breach"] is False             # 远低于 30%
+    assert out["exposure_cap"] == 0.30
+
+
+def test_risk_gates_exposure_breach_flagged(conn):
+    """敞口超限的现实形态：早前按 1000 余额落的注还在途，余额已回落——
+    80 在途 / 200 余额 = 40% > 30%。"""
+    set_meta(conn, "paper_bankroll:model_only", "1000.0")
+    run = add_run(conn)
+    for i, mkt in enumerate(("H", "D", "A", "O2.5")):
+        add_rec(conn, run, add_fixture(conn, f"ev{i}", "Chelsea", "Arsenal"), mkt)
+    place_paper_bets(conn, run)                       # 4 × 20 = 80 在途
+    set_meta(conn, "paper_bankroll:model_only", "200.0")   # 余额回落（结算亏损）
+    conn.commit()
+    mo = paper.risk_gates(conn)["by_strategy"]["model_only"]
+    assert mo["exposure"] == pytest.approx(0.40)
+    assert mo["exposure_breach"] is True
+
+
+def test_risk_gates_match_cap_violations(conn):
+    """同场同轨 3 注在途（H/D/O2.5 同 fixture）→ 该场计一次超限。"""
+    run = add_run(conn)
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    for mkt in ("H", "D", "O2.5"):
+        add_rec(conn, run, fx, mkt)
+    place_paper_bets(conn, run)
+    conn.commit()
+    mo = paper.risk_gates(conn)["by_strategy"]["model_only"]
+    assert mo["fixtures_over_match_cap"] == 1
+    assert paper.risk_gates(conn)["match_cap"] == 2
+
+
+def test_risk_gates_drawdown_throttle_flag(conn):
+    set_meta(conn, "paper_bankroll:model_only", "750.0")
+    set_meta(conn, "paper_bankroll_peak:model_only", "1000.0")
+    conn.commit()
+    mo = paper.risk_gates(conn)["by_strategy"]["model_only"]
+    assert mo["drawdown"] == pytest.approx(0.25)
+    assert mo["throttled"] is True                    # >20% → 单注上限将减半
+
+
+def test_settle_updates_bankroll_peak(conn):
+    """结算创新高 → 峰值随结算维护（§5.3 回撤节流的基准线）。"""
+    set_meta(conn, "paper_bankroll:model_only", "1000.0")
+    run = add_run(conn)
+    fx = add_fixture(conn, "ev1", "Chelsea", "Arsenal")
+    add_rec(conn, run, fx, "H", best_odds=3.0)
+    place_paper_bets(conn, run)
+    conn.commit()
+    add_match(conn, "Chelsea", "Arsenal", "2026-09-02", 2, 0, psc_home=1.6)
+    settle_paper_bets(conn)                           # won：+40
+    assert get_meta(conn, "paper_bankroll:model_only") == "1040.0"
+    assert get_meta(conn, "paper_bankroll_peak:model_only") == "1040.0"

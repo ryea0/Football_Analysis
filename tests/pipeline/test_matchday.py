@@ -275,6 +275,11 @@ def test_am_full_chain(env):
     assert summary["half_life"] == FitConfig().half_life_days
     assert summary["fixtures"] == 1 and summary["recs"] == 2 and summary["bets"] == 2
     assert summary["unknown"] == []
+    # 组合风控三参数观测快照（§5.3 v0.10）：每次 matchday run 必落（布线钉测）
+    gates = summary["risk_gates"]
+    assert gates["enforced"] is False                # paper 期仅记录
+    assert set(gates["by_strategy"]) >= {"model_only", "model_persona"}
+    assert gates["by_strategy"]["model_only"]["pending_stake"] >= 0.0
     assert summary["telegram"] == {"sent": True, "error": None}
     assert summary["report"] == "matchday"
     assert get_meta(c, "odds_quota_remaining") == str(QUOTA)

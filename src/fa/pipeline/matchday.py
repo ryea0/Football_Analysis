@@ -56,7 +56,7 @@ from fa.model.fit import FitConfig, training_rows
 from fa.pipeline.fixtures import (DEFAULT_REGIONS, QUOTA_META_KEY,
                                   sync_fixtures)
 from fa.pipeline.odds_api import OddsApiError, list_events
-from fa.pipeline.paper import place_paper_bets
+from fa.pipeline.paper import place_paper_bets, risk_gates
 from fa.pipeline.reporting import (last_error, render_matchday_report,
                                    render_pm_update, send)
 from fa.pipeline.runs import (RUN_MATCHDAY, STATUS_DEGRADED, STATUS_FAILED,
@@ -200,6 +200,9 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         "unknown": sync["unknown"] if sync else [],
         "recs": len(rec_ids),
         "bets": placed,
+        # 组合风控三参数观测快照（§5.3 v0.10：paper 期仅记录不拦截）——
+        # 落注后取值，反映本窗结束时的真实敞口/超限/节流态
+        "risk_gates": risk_gates(conn),
         "quota_before": quota_before,
         "quota_left": quota_left,
         "degraded": bool(reasons),
