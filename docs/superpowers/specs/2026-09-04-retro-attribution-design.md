@@ -103,7 +103,7 @@
 
 1. **证据审计**（防编造）：`fa retro audit` 抽样检查 `evidence[].date`——赛前成因类标签（injury/rotation/motivation/congestion/news）引用来源必须早于开球；market_info 可引盘口数据；model_limitation/variance 允许零证据。违规率进报告
 2. **重跑一致性**（防随机叙事）：同场独立双跑 → primary_tag 一致率。v1 **先测不设门槛**，一致率本身即「LLM 归因可靠性」的第一手数据；解读规则预先写死：**若 <50%，retro 降格为「假设生成器」，不得作为分层依据**
-3. **预测效度**（真检验）：`fa retro analyze` 按 miss_tags 分层重算模型 vs 市场 log-loss 差——标签层差距明显大于无标签层 → 标签有信息量；各层无差 → **归因是叙事不是科学**，如实报告。v1 报点估计与每层样本量（小样本不装精确）；显著性检验方法随 analyze 实现定并写回本档。允许最终结论是「复盘归因无用」（spec「诚实检验而不是信仰」对本线同样生效）
+3. **预测效度**（真检验）：`fa retro analyze` 按 miss_tags 分层重算模型 vs 市场 log-loss 差——标签层差距明显大于无标签层 → 标签有信息量；各层无差 → **归因是叙事不是科学**，如实报告。v1 报点估计与每层样本量（小样本不装精确）；显著性检验方法随 analyze 实现定并写回本档（已定，见本节末方法句）。允许最终结论是「复盘归因无用」（spec「诚实检验而不是信仰」对本线同样生效）。**方法（v1 实现，2026-09-04）**：显著性检验用 Mann-Whitney U（双侧，单元=单场 log-loss 差 `ln(mkt_p/model_p)`，任一侧 n<8 用 exact），代表行取聚合行优先/单成员行次之，audit 违规行默认剔除——`fa retro analyze` 已落地
 4. **parse_fail 如实计数**：契约成功率本身是实验数据
 
 ## 9. 错误处理与降级
@@ -138,7 +138,7 @@ CLI（typer，挂现有 app）：
 - `fa retro run --selector ... [--matches ...]` → 选场、导出、调 hermes、落库
 - `fa retro report [--selector ...]` → Stage 0 起可用的分歧报告（纯 SQL）
 - `fa retro audit` → 证据日期抽样审计
-- `fa retro analyze` → 按标签分层重析 + 预测效度结论
+- `fa retro analyze [--batch-id N] [--include-violations]` → 按标签分层重析 + 预测效度结论（点估计+样本量为主读数；MWU 双侧 p 值仅参考；违规行默认剔除，`--include-violations` 显式纳入）
 - `fa retro runs` → 批台账与成本摘要
 
 ## 12. 测试策略
@@ -170,7 +170,7 @@ CLI（typer，挂现有 app）：
 | hermes prompt 角色 drifted | prompt 模块常量 + input_pack 留档可重放；harness/model 审计字段落库 |
 | 开放：K 值与对照比例（建议 top-20+对照 10） | Stage 0 用真实数据定，写回本档附录 |
 | 开放：retro/export.py 与 agentline/export.py 查询模式重复 | 先独立实现同模式；两边都落地后提取共享（不阻塞，避免跨 worktree 依赖） |
-| 开放：paper 注场次赛果结算口径 | Stage 2 前核对 M3 结算路径，赛果以 matches 表为准 |
+| 开放：paper 注场次赛果结算口径 | Stage 2 前核对 M3 结算路径，赛果以 matches 表为准。已核对（2026-09-04）：settle_paper_bets 配对即 `(league, home, away)` + kickoff 起往后 2 天窗取 matches 完赛行，paper_t1 选择器复用同模式（select._pair_match），赛果口径同源 |
 | **实测（2026-09-04 E2E 首批，batch #1，3 场真机）**：契约成功率 2/3=67%、单场 ≈11.8s、repaired=0——均在可接受带（阈值 50%/120s 未触发） | 台账如实入档；放量前再积累样本确认成功率稳定性 |
 | **实测（同批）：证据义务失守——唯一受检行（motivation 标签）零证据、digest 却断言具体事实，audit 违规率 1/1** | 关卡 1 首跑即命中；放量前负责人裁定处置（收紧 prompt 证据要求 / 违规行降权 / 仅标注）——在裁定前，audit 违规行的标签**不得**作为分层依据 |
 | **实测（同批）：parse_fail 不留原始输出，失败原因事后不可审计** | 下个计划补文件留档（如 data/retro/raw/）；本批 parse_fail 属内容级非确定性，诊断性重调返回合法 JSON 但证据日期=比赛日（同样会被关卡 1 拦截） |

@@ -776,6 +776,25 @@ def retro_consistency(
     typer.echo("解读规则：全同率 <50% → 归因线维持「假设生成器」降格"
                "（spec §5 预写）")
 
+
+@retro_app.command("analyze")
+def retro_analyze(
+    batch_id: int = typer.Option(None, "--batch-id",
+                                 help="限定批；空=全库"),
+    include_violations: bool = typer.Option(
+        False, "--include-violations",
+        help="含 audit 违规行（默认剔除——§15 裁定前不作分层依据）"),
+) -> None:
+    """关卡 3：按 miss_tags 分层的预测效度检验（点估计+Mann-Whitney U）"""
+    from fa.retro.analyze import render_analysis_report, stratified_analysis
+    conn = connect()
+    try:
+        res = stratified_analysis(conn, batch_id=batch_id,
+                                  include_violations=include_violations)
+    finally:
+        conn.close()
+    typer.echo(render_analysis_report(res))
+
 # ---- B 线 run 命令（T9/T10）----
 
 run_app = typer.Typer(help="运营 run（比赛日 / 结算日课，spec §9.6 调度）")

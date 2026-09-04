@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from fa.cli import app
 from fa.db import connect, init_db
+from fa.retro.analyze import stratified_analysis
 
 runner = CliRunner()
 
@@ -331,3 +332,100 @@ def test_consistency_discloses_k1_matches(db, tmp_path, monkeypatch):
     c = runner.invoke(app, ["retro", "consistency"])
     assert c.exit_code == 0, c.output
     assert "⚠ 含 k=1 场 1" in c.output
+
+
+# ---- 关卡 3：分层检验（设计 §8-3）----
+
+# 赛前成因标签行的合规证据（date 早于比赛日 2024-04-20）——本文件既有
+# `_seed`（tests.retro.test_select）三场 div = +0.1446/−0.2049/−0.0741，
+# 已由 db fixture 落库，此处只补归因行
+_EV_PRE = json.dumps([{"title": "赛前伤停名单", "date": "2024-04-19",
+                       "url": "https://e.com/pre"}])
+
+
+class TestAnalyze:
+    def _seed_attrib(self, conn, match_id, tags, evidence="[]",
+                     date_="2024-04-20", is_control=0, batch_id=1):
+        # batch_id 外键→retro_runs（connect 开 PRAGMA foreign_keys=ON），先补父行
+        conn.execute(
+            "INSERT OR IGNORE INTO retro_runs (id, selector, params_json,"
+            " n_selected, n_ok, n_parse_fail, n_timeout, n_error, duration_s,"
+            " created_at) VALUES (1, 'manual', '{}', 0, 0, 0, 0, 0, 0.0,"
+            " 'now')")
+        conn.execute(
+            "INSERT INTO retro_attributions (batch_id, match_id, league,"
+            " season, date, selector, attributor, miss_tags_json,"
+            " primary_tag, tags_confidence, model_vs_market,"
+            " evidence_json, digest, status, repaired, harness, model,"
+            " duration_s, input_pack_path, tag_set_version, created_at,"
+            " is_control) VALUES (?,?, 'E0',2024,?, 'manual',1,?,"
+            " ?,0.7,'model_wrong',?,'d','ok',0,'hermes',NULL,1.0,'p',"
+            " 'v1','2026-09-04T00:00:00Z',?)",
+            (batch_id, match_id, date_, json.dumps(tags), tags[0],
+             evidence, is_control))
+        conn.commit()
+
+    def test_stratified_point_estimates_handchecked(self, db):
+        """手算口径：_seed 三场 div = +0.1446 / −0.2049 / −0.0741。
+        归因行：match1 标 injury（div 0.1446），match2/3 无 injury 标签
+        （div −0.2049/−0.0741）→ injury 层均值 0.1446，对照层均值
+        (−0.2049 + −0.0741)/2 = −0.1395。"""
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE)
+        self._seed_attrib(conn, 2, ["variance"])
+        self._seed_attrib(conn, 3, ["variance"])
+        try:
+            res = stratified_analysis(conn)
+        finally:
+            conn.close()
+        t = res["per_tag"]["injury"]
+        assert t["n"] == 1 and t["mean_div"] == pytest.approx(0.1446, abs=1e-4)
+        assert t["mean_div_rest"] == pytest.approx(-0.1395, abs=1e-4)
+        v = res["per_tag"]["variance"]
+        assert v["n"] == 2 and v["n_rest"] == 1
+        assert res["n_excluded"] == 0
+
+    def test_violating_rows_excluded_by_default(self, db):
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"],
+                          evidence=json.dumps(
+                              [{"title": "t", "date": "2024-04-21",
+                                "url": "u"}]))          # 不早于比赛日 → 违规
+        self._seed_attrib(conn, 2, ["variance"])
+        try:
+            res = stratified_analysis(conn)              # 默认剔除
+            assert res["n_excluded"] == 1
+            assert res["per_tag"]["injury"]["n"] == 0
+            res2 = stratified_analysis(conn, include_violations=True)
+        finally:
+            conn.close()
+        assert res2["n_excluded"] == 0
+        assert res2["per_tag"]["injury"]["n"] == 1
+
+    def test_case_control_counts_split(self, db):
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], is_control=0, evidence=_EV_PRE)
+        self._seed_attrib(conn, 2, ["injury"], is_control=1, evidence=_EV_PRE)
+        try:
+            t = stratified_analysis(conn)["per_tag"]["injury"]
+        finally:
+            conn.close()
+        assert (t["n"], t["n_case"], t["n_control"]) == (2, 1, 1)
+
+    def test_mwu_small_layer_gives_none_or_pvalue(self, db):
+        """n<2 的层无法检验——p_value=None，不抛错（小样本如实降格）。"""
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE)
+        try:
+            res = stratified_analysis(conn)
+        finally:
+            conn.close()
+        assert res["per_tag"]["injury"]["p_value"] is None
+
+    def test_cli_analyze_outputs_tag_lines(self, db):
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE)
+        conn.close()
+        result = runner.invoke(app, ["retro", "analyze"])
+        assert result.exit_code == 0
+        assert "injury" in result.output and "分层" in result.output
