@@ -5,16 +5,24 @@ O2.5 kelly=0.01，挂在**同一个 run**——一次管线执行产出一个 ph
 ``run_persona_phase`` 靠 run_id 选场，``build_input`` 靠 (fixture_id, run_id)
 取本窗行）。pm 传播用例另插 phase='pm' 的第二 run。
 
+M6（§12.7）双轨：``run_persona_phase`` 每场两轨两次调用（kb→nokb 顺序固定），
+nokb 轨行由 ``add_rec(..., strategy=NOKB_STRATEGY)`` 种下（model_only 与 persona
+阶段无关，不种）；知识快照走 ``config.project_root()`` 属性访问，autouse 夹具
+把 root 指到 tmp（同 test_matchday._isolate_root 的缝），测试产物不落真仓库。
+
 persona 文件指针：真实 ``personas/*.md`` 由 T9/T10 落盘，本层把
 ``fa.persona.apply.persona_path`` 指向 tmp——fake 保留 config 的两条真实语义
 （league 不在映射 → ValueError、文件缺失 → FileNotFoundError），hermes 仍走
 fixture 脚本真子进程（C1：mock 与实跑同一代码路径，不破）。
 """
+from datetime import date
 from pathlib import Path
 
 import pytest
 
 from fa.db import connect, init_db
+from fa.evolve import windows as _windows
+from fa.persona import apply as apply_mod
 from fa.persona.apply import apply_verdict, run_persona_phase
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -33,6 +41,18 @@ VETO = {"verdict": "veto", "confidence_delta": 0.12,          # 强制置 0
 @pytest.fixture
 def fix() -> Path:
     return FIXTURES
+
+
+_FIXTURE_OK = FIXTURES / "hermes_ok"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_root(tmp_path, monkeypatch):
+    """M6 起 ``run_persona_phase`` 一进来就写本窗知识快照（``config.project_root()``
+    定位）——指到 tmp，测试产物不落真仓库（knowledge 缝：属性访问，打一点即全隔离）。"""
+    from fa import config
+
+    monkeypatch.setattr(config, "project_root", lambda: tmp_path)
 
 
 # ---------------------------------------------------------------- 种子工具
@@ -61,12 +81,13 @@ def add_fixture(c, event_key, home, away, league=LEAGUE):
          "scheduled", "2026-09-01T08:00:00Z")).lastrowid
 
 
-def add_rec(c, run_id, fixture_id, market, kelly=0.02, phase="am"):
+def add_rec(c, run_id, fixture_id, market, kelly=0.02, phase="am",
+            strategy="model_persona"):
     return c.execute(
         "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
         " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
         " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (run_id, fixture_id, "model_persona", market, phase, 0.5, 0.4, 2.0,
+        (run_id, fixture_id, strategy, market, phase, 0.5, 0.4, 2.0,
          "pinnacle", 0.1, 0.3, kelly, "2026-09-10T09:00:00Z")).lastrowid
 
 
@@ -93,8 +114,10 @@ def conn_seeded(tmp_path):
 
 @pytest.fixture
 def persona_files(tmp_path, monkeypatch):
-    """persona 文件指向 tmp：D1 映射到已写盘的人格文件，其余 league 沿 config
-    语义抛 ValueError（无映射）。返回目录（用例可删文件造 FileNotFoundError）。"""
+    """persona 文件指向 tmp：映射语义照 config（league 不在映射 → ValueError），
+    已映射联赛指向 tmp 里的同名文件——用例写盘哪个联赛，哪个联赛就能点评
+    （D1 预置；E0 等由双轨用例自写）。返回目录（用例可删文件造 FileNotFoundError）。"""
+    from fa.config import PERSONA_FILES
     import fa.persona.apply as apply_mod
 
     d = tmp_path / "personas"
@@ -104,9 +127,9 @@ def persona_files(tmp_path, monkeypatch):
         encoding="utf-8")
 
     def fake_persona_path(league):
-        if league != LEAGUE:
+        if league not in PERSONA_FILES:
             raise ValueError(f"无 persona 文件映射：{league!r}")
-        return d / "bundesliga.md"
+        return d / PERSONA_FILES[league]
 
     monkeypatch.setattr(apply_mod, "persona_path", fake_persona_path)
     return d
@@ -346,3 +369,154 @@ def test_phase_propagates_veto_zeroes_and_never_overwrites(conn_seeded,
     assert rows["O2.5"]["verdict"] == "agree"                    # 已判行不动
     assert rows["O2.5"]["final_stake_frac"] == 0.021
     assert rows["O2.5"]["key_factors"] == '["早判"]'
+
+
+# ------------------------------------------------- 双轨调用与知识注入（M6 §12.7）
+
+def _dual_track_hermes(tmp_path):
+    """可编程 HERMES_BIN：按**调用序**分档（kb→nokb 顺序固定），prompt 落盘、
+    回固定合法输出。用序不用内容分档——无知识库时期两条 prompt 都无 KB 段。
+    prompt 在 ``$2``（命令形态 ``hermes -z <prompt> -t search``，T2 钉死）。"""
+    script = tmp_path / "hermes_dual.sh"
+    script.write_text(
+        "#!/usr/bin/env bash\n"
+        'n=$(cat "$SEQ_FILE" 2>/dev/null || echo 0); n=$((n+1));'
+        ' echo $n > "$SEQ_FILE"\n'
+        'if [ "$n" = 1 ]; then printf \'%s\' "$2" > "$KB_FILE";'
+        ' else printf \'%s\' "$2" > "$NOKB_FILE"; fi\n'
+        'sh "' + str(_FIXTURE_OK) + '"\n')
+    script.chmod(0o755)
+    return script
+
+
+def _seq_hermes(tmp_path, second):
+    """按调用序换输出的 HERMES_BIN：第 1 次（kb 轨）走 hermes_ok，第 2 次
+    （nokb 轨）跑 ``second`` fixture 脚本（timeout / veto 等分档场景）。"""
+    script = tmp_path / "hermes_seq.sh"
+    script.write_text("#!/usr/bin/env bash\n"
+                      'n=$(cat "$SEQ_FILE" 2>/dev/null || echo 0); n=$((n+1));'
+                      ' echo $n > "$SEQ_FILE"\n'
+                      'if [ "$n" = 1 ]; then sh "' + str(_FIXTURE_OK) + '";'
+                      " else " + second + "; fi\n")
+    script.chmod(0o755)
+    return script
+
+
+_VETO_JSON = ('{"verdict":"veto","confidence_delta":0.1,'
+              '"key_factors":["k"],"report_md":"r"}')
+
+
+def _seed_nokb(c, run_id, fixture_id, kelly=0.02, phase="am", markets=("H",)):
+    """给 nokb 轨种行（数字与 kb 轨同——value 三轨落行，数字全同）。"""
+    for m in markets:
+        add_rec(c, run_id, fixture_id, m, kelly=kelly, phase=phase,
+                strategy=apply_mod.NOKB_STRATEGY)
+
+
+def _track_row(c, fixture_id, run_id, strategy, market="H"):
+    return c.execute(
+        "SELECT * FROM recommendations WHERE fixture_id=? AND run_id=?"
+        " AND strategy=? AND market=?", (fixture_id, run_id, strategy,
+                                         market)).fetchone()
+
+
+def test_run_persona_phase_dual_track_kb_only_in_kb_prompt(conn_seeded, tmp_path,
+                                                           monkeypatch,
+                                                           persona_files):
+    """kb 轨 prompt 含知识库段、nokb 轨不含；两轨各得判决行；
+    summary 原键 = kb 轨计数 + nokb_* 镜像键。"""
+    conn, _fx, run_id = conn_seeded
+    fid = add_fixture(conn, "ev-e0-kb", "Chelsea", "Arsenal", league="E0")
+    (persona_files / "epl.md").write_text(
+        "# 英超人格\n\n你是一名谨慎的英超点评员。\n", encoding="utf-8")
+    add_rec(conn, run_id, fid, "H", kelly=0.02)                  # kb 轨
+    add_rec(conn, run_id, fid, "O2.5", kelly=0.01)
+    _seed_nokb(conn, run_id, fid, kelly=0.02, markets=("H", "O2.5"))
+    # 预置 w1 知识快照（含一条 E0 条目）；today 钉在 2026-09-10 → 窗 1（锚点 09-04）
+    snap = tmp_path / "evolution" / "snapshots" / "w1"
+    snap.mkdir(parents=True)
+    (snap / "epl.md").write_text("## 教训\n- [E0-L01|x]\n", encoding="utf-8")
+    monkeypatch.setattr(_windows, "beijing_today", lambda: date(2026, 9, 10))
+    monkeypatch.setenv("HERMES_BIN", str(_dual_track_hermes(tmp_path)))
+    monkeypatch.setenv("SEQ_FILE", str(tmp_path / "seq"))
+    monkeypatch.setenv("KB_FILE", str(tmp_path / "kb.prompt"))
+    monkeypatch.setenv("NOKB_FILE", str(tmp_path / "nokb.prompt"))
+    out = run_persona_phase(conn, run_id, ["E0"])
+    kb_prompt = (tmp_path / "kb.prompt").read_text(encoding="utf-8")
+    nokb_prompt = (tmp_path / "nokb.prompt").read_text(encoding="utf-8")
+    assert "联赛知识库" in kb_prompt and "E0-L01" in kb_prompt
+    assert "联赛知识库" not in nokb_prompt
+    assert out["called"] == 1 and out["nokb_called"] == 1
+    # 两轨 verdict 均落库（各自 strategy 行）
+    for strategy in ("model_persona", "model_persona_nokb"):
+        row = conn.execute(
+            "SELECT verdict FROM recommendations WHERE fixture_id=? AND strategy=?",
+            (fid, strategy)).fetchone()
+        assert row["verdict"] == "agree"
+
+
+def test_run_persona_phase_degraded_per_track(conn_seeded, tmp_path, monkeypatch,
+                                              persona_files):
+    """nokb 轨超时只降 nokb（degraded 按 track 分账），kb 轨照常。"""
+    conn, fid, run_id = conn_seeded
+    _seed_nokb(conn, run_id, fid)
+    script = tmp_path / "sleep_30"
+    script.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    script.chmod(0o755)
+    monkeypatch.setenv("HERMES_BIN",
+                       str(_seq_hermes(tmp_path, 'sh "' + str(script) + '"')))
+    monkeypatch.setenv("SEQ_FILE", str(tmp_path / "seq"))
+    monkeypatch.setenv("FA_PERSONA_TIMEOUT", "0.5")
+    out = run_persona_phase(conn, run_id, ["D1"])
+    assert out["ok"] == 1 and out["nokb_ok"] == 0
+    assert out["nokb_degraded"][0]["reason"] == "timeout"
+    assert out["degraded"] == []                     # kb 轨完好，不陪葬
+    assert _track_row(conn, fid, run_id, apply_mod.STRATEGY)["verdict"] == "agree"
+    assert _track_row(conn, fid, run_id,
+                      apply_mod.NOKB_STRATEGY)["verdict"] is None
+
+
+def test_nokb_veto_zeroes_only_nokb_rows(conn_seeded, tmp_path, monkeypatch,
+                                         persona_files):
+    """nokb 轨 veto 双零**按轨**生效：nokb 行 final=0（paper 层 frac<=0 不落注），
+    kb 轨 agree 行照常乘 delta，不陪葬。"""
+    conn, fid, run_id = conn_seeded
+    _seed_nokb(conn, run_id, fid)
+    monkeypatch.setenv("HERMES_BIN",
+                       str(_seq_hermes(tmp_path, "echo '" + _VETO_JSON + "'")))
+    monkeypatch.setenv("SEQ_FILE", str(tmp_path / "seq"))
+    out = run_persona_phase(conn, run_id, ["D1"])
+    assert out["veto"] == 0 and out["nokb_veto"] == 1
+    kb = _track_row(conn, fid, run_id, apply_mod.STRATEGY)
+    assert kb["verdict"] == "agree"
+    assert kb["final_stake_frac"] == pytest.approx(0.02 * 0.95, abs=1e-9)
+    nokb = _track_row(conn, fid, run_id, apply_mod.NOKB_STRATEGY)
+    assert nokb["verdict"] == "veto"
+    assert nokb["final_stake_frac"] == 0.0
+    assert nokb["confidence_delta"] == 0.0
+
+
+def test_propagate_verdict_per_strategy(conn_seeded, monkeypatch, fix,
+                                        persona_files):
+    """pm 沿用 am 按轨传播：kb 判决传播 kb 行、nokb 传播 nokb 行，互不串轨。"""
+    conn, fx, run_am = conn_seeded
+    _seed_nokb(conn, run_am, fx, kelly=0.02, markets=("H", "O2.5"))
+    assert apply_verdict(conn, fx, AGREE) == 2                       # kb 轨 agree
+    assert apply_verdict(conn, fx, VETO,
+                         strategy=apply_mod.NOKB_STRATEGY) == 2      # nokb 轨 veto
+    run_pm = add_run(conn, phase="pm")
+    add_rec(conn, run_pm, fx, "H", kelly=0.03, phase="pm")
+    _seed_nokb(conn, run_pm, fx, kelly=0.03, phase="pm")
+
+    monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
+    out = run_persona_phase(conn, run_pm, ["D1"], attempted={fx})
+    assert out["called"] == 0 and out["nokb_called"] == 0            # 零调用
+
+    kb = _track_row(conn, fx, run_pm, apply_mod.STRATEGY)
+    assert kb["verdict"] == "agree" and kb["report_md"] == "x"
+    assert kb["final_stake_frac"] == pytest.approx(0.03 * 1.1, abs=1e-9)
+    nokb = _track_row(conn, fx, run_pm, apply_mod.NOKB_STRATEGY)
+    assert nokb["verdict"] == "veto"                             # 不串轨：nokb 不吃 agree
+    assert nokb["confidence_delta"] == 0.0
+    assert nokb["final_stake_frac"] == 0.0
+    assert nokb["key_factors"] == '["a"]' and nokb["report_md"] == "x"

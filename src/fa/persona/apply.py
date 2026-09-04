@@ -1,4 +1,4 @@
-"""persona 判决应用与阶段编排（spec §6.4 / §6.5 / §6.2）。
+"""persona 判决应用与阶段编排（spec §6.4 / §6.5 / §6.2；M6 §12.7 双轨）。
 
 降级只回退该场（§6.5 场次级）：该场三列保持中性、点评两列不动、记入返回值
 degraded——调用方（matchday）把它写进 runs.summary.persona；当日不重试
@@ -8,7 +8,9 @@ degraded——调用方（matchday）把它写进 runs.summary.persona；当日�
 am 广播判决时 pm 的行尚不存在，pm value 落的新行 ``verdict IS NULL``——
 run_persona_phase 对 attempted 跳过的 fixture 把库内已有判决（首个非 NULL
 判决行）复制到本 fixture 的 NULL 行。只写 NULL 行，绝不覆盖已判行；final 按
-各行 kelly 重算，veto 源则 delta/final 双零（点评随判决走）。
+各行 kelly 重算，veto 源则 delta/final 双零（点评随判决走）。传播**按轨**：
+model_persona 判决只落 model_persona 行、nokb 判决只落 nokb 行，互不串轨
+（§12.7 对照轨的分账口径）。
 """
 from __future__ import annotations
 
@@ -16,6 +18,7 @@ import json
 import sqlite3
 
 from fa.config import persona_path
+from fa.evolve.knowledge import ensure_current_snapshot, window_kb_text
 from fa.persona import PersonaError
 from fa.persona.caller import call_hermes
 from fa.persona.contract import (
@@ -26,6 +29,8 @@ from fa.persona.contract import (
 )
 
 STRATEGY = "model_persona"
+NOKB_STRATEGY = "model_persona_nokb"
+_TRACKS = (STRATEGY, NOKB_STRATEGY)
 
 # 降级词表（写进 runs.summary.persona 的取值域）：timeout/exit 来自 caller，
 # extract/contract 来自契约层；无 reason 的 PersonaError 归 unknown。
@@ -45,10 +50,12 @@ def _write_verdict_row(conn: sqlite3.Connection, row_id: int, kelly: float,
         (verdict, delta, round(final, 6), factors, report_md, row_id))
 
 
-def apply_verdict(conn: sqlite3.Connection, fixture_id: int, output: dict) -> int:
-    """§6.4 映射广播到该 fixture 的 model_persona 轨**全部行**（不分 phase：am
-    判决 pm 行共用，§6.2）；agree/downweight 逐行按各自 kelly 重算 final，veto
-    置零。同写 verdict/confidence_delta/key_factors(JSON 串)/report_md。
+def apply_verdict(conn: sqlite3.Connection, fixture_id: int, output: dict,
+                  strategy: str = STRATEGY) -> int:
+    """§6.4 映射广播到该 fixture 的 ``strategy`` 轨**全部行**（不分 phase：am
+    判决 pm 行共用，§6.2；M6 §12.7 起按轨落——nokb 轨的 veto 只压 nokb 行）；
+    agree/downweight 逐行按各自 kelly 重算 final，veto 置零。同写
+    verdict/confidence_delta/key_factors(JSON 串)/report_md。
     返回更新行数（该场无此轨行则为 0）。"""
     verdict = output["verdict"]
     delta = 0.0 if verdict == "veto" else float(output["confidence_delta"])
@@ -56,17 +63,19 @@ def apply_verdict(conn: sqlite3.Connection, fixture_id: int, output: dict) -> in
     rows = conn.execute(
         "SELECT id, kelly_stake_frac FROM recommendations"
         " WHERE fixture_id=? AND strategy=?",
-        (fixture_id, STRATEGY)).fetchall()
+        (fixture_id, strategy)).fetchall()
     for row in rows:
         _write_verdict_row(conn, row["id"], row["kelly_stake_frac"], verdict,
                            delta, factors, output["report_md"])
     return len(rows)
 
 
-def _propagate_verdict(conn: sqlite3.Connection, fixture_id: int) -> int:
-    """把该 fixture 已有判决复制到 ``verdict IS NULL`` 的行（pm 沿用 am，§6.2）。
+def _propagate_verdict(conn: sqlite3.Connection, fixture_id: int,
+                       strategy: str = STRATEGY) -> int:
+    """把该 fixture ``strategy`` 轨的已有判决复制到该轨 ``verdict IS NULL`` 的行
+    （pm 沿用 am，§6.2；按轨各传各的，§12.7）。
 
-    源行取该 fixture **首个**非 NULL 判决行（ORDER BY id LIMIT 1）；目标行由
+    源行取该 fixture 该轨**首个**非 NULL 判决行（ORDER BY id LIMIT 1）；目标行由
     ``verdict IS NULL`` 选出（只写 NULL 行，绝不覆盖已判行），final 按各行
     kelly 重算、veto 源双零。无已判行 / 无 NULL 行 → 0，不报错。
     """
@@ -74,7 +83,7 @@ def _propagate_verdict(conn: sqlite3.Connection, fixture_id: int) -> int:
         "SELECT verdict, confidence_delta, key_factors, report_md"
         " FROM recommendations WHERE fixture_id=? AND strategy=?"
         "  AND verdict IS NOT NULL ORDER BY id LIMIT 1",
-        (fixture_id, STRATEGY)).fetchone()
+        (fixture_id, strategy)).fetchone()
     if src is None:
         return 0
     verdict = src["verdict"]
@@ -83,7 +92,7 @@ def _propagate_verdict(conn: sqlite3.Connection, fixture_id: int) -> int:
     rows = conn.execute(
         "SELECT id, kelly_stake_frac FROM recommendations"
         " WHERE fixture_id=? AND strategy=? AND verdict IS NULL",
-        (fixture_id, STRATEGY)).fetchall()
+        (fixture_id, strategy)).fetchall()
     for row in rows:
         _write_verdict_row(conn, row["id"], row["kelly_stake_frac"], verdict,
                            delta, src["key_factors"], src["report_md"])
@@ -95,53 +104,69 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                       attempted: set[int] | None = None) -> dict:
     """一窗（am 或 pm）的阶段编排：选该 run 的候选 fixture 去重逐场处理——
 
-    persona 文件 → build_input（按本 run 取候选）→ build_prompt → call_hermes
-    → extract → validate → apply_verdict；任一环节失败只降该场（§6.5 场次级，
-    ``PersonaError``/``FileNotFoundError``/``ValueError`` → reason
-    ``persona_file``/``timeout``/``exit``/``extract``/``contract``/``unknown``）。
-    ``attempted`` 里的场跳过且零调用，改做判决传播（pm 沿用 am，§6.2）；不在
-    ``leagues`` 清单的场不调用但记入 attempted。恰一次 ``conn.commit()``。
+    M6 起每场**两轨两次调用**（§12.7 对照轨）：kb 轨（persona + 本窗知识快照）
+    写 model_persona 行；nokb 轨（纯 persona）写 model_persona_nokb 行，顺序固定
+    kb→nokb。降级按轨分别记账（degraded = kb 轨、nokb_degraded = nokb 轨），
+    persona 文件缺失两轨同降（未触达调用不计入 called）。
+    ``attempted`` 里的场跳过且零调用，改做判决传播（pm 沿用 am，§6.2）——按轨
+    各自传播。恰一次 ``conn.commit()``。
 
-    返回 ``{"called", "ok", "veto", "degraded": [{"fixture_id", "reason"}],
-    "attempted": 排序名单（传入 ∪ 本次涉及）}``。
+    返回 ``{"called","ok","veto","degraded":[{fixture_id,reason}],"attempted"}
+    （kb 轨语义不变，保 ops/watchdog 兼容）+ "nokb_called","nokb_ok",
+    "nokb_veto","nokb_degraded" 镜像键``。
     """
     seen = set(attempted or ())
-    called = ok = veto = 0
-    degraded: list[dict] = []
+    counts = {t: {"called": 0, "ok": 0, "veto": 0, "degraded": []}
+              for t in _TRACKS}
+    kb_idx = ensure_current_snapshot()      # 快照自足（幂等；B 线唯一读取口）
     rows = conn.execute(
         "SELECT DISTINCT r.fixture_id, f.league FROM recommendations r"
         " JOIN fixtures f ON f.id = r.fixture_id"
-        " WHERE r.run_id=? AND r.strategy=?"
-        " ORDER BY r.fixture_id", (run_id, STRATEGY)).fetchall()
+        " WHERE r.run_id=? AND r.strategy IN (?, ?)"
+        " ORDER BY r.fixture_id",
+        (run_id, STRATEGY, NOKB_STRATEGY)).fetchall()
     league_set = set(leagues)
     for row in rows:
         fid, league = row["fixture_id"], row["league"]
         if fid in seen:                      # am 已判/已试：pm 沿用，零调用
-            _propagate_verdict(conn, fid)
+            _propagate_verdict(conn, fid, STRATEGY)
+            _propagate_verdict(conn, fid, NOKB_STRATEGY)
             continue
         seen.add(fid)                        # 见过即记（无论调没调、成没成）
         if league not in league_set:
             continue
         try:
             persona_md = persona_path(league).read_text(encoding="utf-8")
-            prompt = build_prompt(persona_md, build_input(conn, fid, run_id))
-            called += 1                      # hermes 实际调用数（额度口径）：
-                                             # persona_file 降级未触达调用不计
-            output = extract_json(call_hermes(prompt))
-            validate_output(output)
-            apply_verdict(conn, fid, output)
         except (FileNotFoundError, ValueError):
             # 文件缺失，或 fixtures 表 league 不在 persona 映射（config 抛
             # ValueError）——都归 persona_file：人格这一环没就位，非模型之过。
-            degraded.append({"fixture_id": fid, "reason": "persona_file"})
+            for t in _TRACKS:                # 人格这一环没就位，两轨同降
+                counts[t]["degraded"].append({"fixture_id": fid,
+                                              "reason": "persona_file"})
             continue
-        except PersonaError as exc:
-            reason = getattr(exc, "reason", "unknown")
-            degraded.append({"fixture_id": fid,
-                             "reason": _REASON.get(reason, reason)})
-            continue
-        ok += 1
-        veto += 1 if output["verdict"] == "veto" else 0
+        kb_md = window_kb_text(kb_idx, league)
+        input_obj = build_input(conn, fid, run_id)
+        for track in _TRACKS:
+            c = counts[track]
+            try:
+                prompt = build_prompt(persona_md, input_obj,
+                                      kb_md=kb_md if track == STRATEGY else None,
+                                      kb_label=f"（快照 w{kb_idx}）")
+                c["called"] += 1             # hermes 实际调用数（额度口径）：
+                                             # persona_file 降级未触达调用不计
+                output = extract_json(call_hermes(prompt))
+                validate_output(output)
+                apply_verdict(conn, fid, output, strategy=track)
+            except PersonaError as exc:
+                reason = getattr(exc, "reason", "unknown")
+                c["degraded"].append({"fixture_id": fid,
+                                      "reason": _REASON.get(reason, reason)})
+                continue
+            c["ok"] += 1
+            c["veto"] += 1 if output["verdict"] == "veto" else 0
     conn.commit()
-    return {"called": called, "ok": ok, "veto": veto,
-            "degraded": degraded, "attempted": sorted(seen)}
+    kb, nokb = counts[STRATEGY], counts[NOKB_STRATEGY]
+    return {"called": kb["called"], "ok": kb["ok"], "veto": kb["veto"],
+            "degraded": kb["degraded"], "attempted": sorted(seen),
+            "nokb_called": nokb["called"], "nokb_ok": nokb["ok"],
+            "nokb_veto": nokb["veto"], "nokb_degraded": nokb["degraded"]}

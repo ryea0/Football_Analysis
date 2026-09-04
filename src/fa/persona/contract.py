@@ -45,9 +45,16 @@ def _contract_clause() -> str:
     return _CONTRACT_CLAUSE_BASE + "\n" + _NO_SEARCH_CLAUSE
 
 
-def build_prompt(persona_md: str, input_obj: dict) -> str:
-    """prompt = persona 全文 + 该场输入 JSON + 输出契约说明（spec §6.2）。"""
-    return (persona_md.rstrip() + "\n\n## 本场输入\n```json\n"
+def build_prompt(persona_md: str, input_obj: dict, kb_md: str | None = None,
+                 kb_label: str = "") -> str:
+    """prompt = persona 全文 +（可选）知识库段 + 该场输入 JSON + 输出契约说明。
+
+    知识段（M6 §12.7）：``kb_md`` 只由 model_persona 轨传入（窗口快照文本），
+    nokb 轨与无知识库时期传 None——段整体缺省，prompt 形状不空挂标题。
+    """
+    kb = (f"\n\n## 联赛知识库{kb_label}\n\n" + kb_md.rstrip()
+          if kb_md else "")
+    return (persona_md.rstrip() + kb + "\n\n## 本场输入\n```json\n"
             + json.dumps(input_obj, ensure_ascii=False, indent=2)
             + "\n```" + _contract_clause())
 

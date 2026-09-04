@@ -1,8 +1,8 @@
-"""contract 输出侧测试：提取矩阵 + 校验矩阵（合法与非法边界逐条）。"""
+"""contract 输出侧测试：提取矩阵 + 校验矩阵（合法与非法边界逐条）+ prompt 形状。"""
 import pytest
 
-from fa.persona.contract import (PersonaContractError, extract_json,
-                                 validate_output)
+from fa.persona.contract import (PersonaContractError, build_prompt,
+                                 extract_json, validate_output)
 
 GOOD = {"verdict": "downweight", "confidence_delta": -0.05,
         "key_factors": ["a"], "report_md": "x"}
@@ -61,3 +61,19 @@ def test_validate_rejects(obj, why):
 ])
 def test_validate_accepts(obj):
     assert validate_output(obj) is None
+
+
+# ---------------------------------------------------------------- prompt 形状（M6 §12.7）
+
+def test_build_prompt_with_kb_section():
+    p = build_prompt("# 人格", {"x": 1}, kb_md="- [E0-S01] 知识条目",
+                     kb_label="（快照 w2）")
+    assert "## 联赛知识库（快照 w2）" in p
+    assert "- [E0-S01] 知识条目" in p
+    assert p.index("## 联赛知识库") < p.index("## 本场输入")   # 段序：人格→知识→输入
+
+
+def test_build_prompt_without_kb_unchanged_shape():
+    p = build_prompt("# 人格", {"x": 1})
+    assert "联赛知识库" not in p
+    assert "## 本场输入" in p
