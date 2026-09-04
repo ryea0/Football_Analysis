@@ -1,4 +1,4 @@
-"""线 A 落库（设计 §6）：UNIQUE(match_id, line) 幂等 upsert。"""
+"""线 A 落库（设计 §6）：UNIQUE(match_id, line, attributor) 幂等 upsert。"""
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -10,13 +10,13 @@ def _now() -> str:
 
 def save_prediction(conn: sqlite3.Connection, match_id: int, line: str,
                     parsed: dict, raw_output: str, harness: str,
-                    model: str, duration_s: float) -> int:
+                    model: str, duration_s: float, attributor: int = 1) -> int:
     conn.execute(
-        "INSERT INTO agentline_predictions (match_id, line, p_home, p_draw,"
-        " p_away, p_over25, confidence, reasoning_digest, sources_json,"
+        "INSERT INTO agentline_predictions (match_id, line, attributor, p_home,"
+        " p_draw, p_away, p_over25, confidence, reasoning_digest, sources_json,"
         " raw_output, status, repaired, harness, model, duration_s, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-        " ON CONFLICT(match_id, line) DO UPDATE SET"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(match_id, line, attributor) DO UPDATE SET"
         " p_home=excluded.p_home, p_draw=excluded.p_draw,"
         " p_away=excluded.p_away, p_over25=excluded.p_over25,"
         " confidence=excluded.confidence,"
@@ -25,14 +25,16 @@ def save_prediction(conn: sqlite3.Connection, match_id: int, line: str,
         " status=excluded.status, repaired=excluded.repaired,"
         " harness=excluded.harness, model=excluded.model,"
         " duration_s=excluded.duration_s, created_at=excluded.created_at",
-        (match_id, line, parsed["p_home"], parsed["p_draw"], parsed["p_away"],
-         parsed["p_over25"], parsed["confidence"], parsed["reasoning_digest"],
-         parsed["sources_json"], raw_output, parsed["status"],
-         int(parsed["repaired"]), harness, model, duration_s, _now()))
+        (match_id, line, attributor, parsed["p_home"], parsed["p_draw"],
+         parsed["p_away"], parsed["p_over25"], parsed["confidence"],
+         parsed["reasoning_digest"], parsed["sources_json"], raw_output,
+         parsed["status"], int(parsed["repaired"]), harness, model,
+         duration_s, _now()))
     conn.commit()
     row = conn.execute(
         "SELECT id FROM agentline_predictions"
-        " WHERE match_id=? AND line=?", (match_id, line)).fetchone()
+        " WHERE match_id=? AND line=? AND attributor=?",
+        (match_id, line, attributor)).fetchone()
     return row["id"]
 
 

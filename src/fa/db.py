@@ -3,7 +3,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -187,12 +187,16 @@ CREATE INDEX IF NOT EXISTS idx_retro_attr_match ON retro_attributions (match_id)
 # 范式对比线两表（spec §12.5 / 设计 §6）：线 A 专用，与 B 线表物理隔离——
 # 本模块的 B 线边界注释同样适用于这里：绝不写 recommendations / bets 等。
 # v4/v5 分层由并行分支合并产生（2026-09-04）：retro 先占 v4，本线抬 v5。
+# v7（A_multi 计划 T1）：line 词表加 'A_multi'、加 attributor 列、UNIQUE 扩成
+# 三元组——同一场同一 line 的 N 个成员行（1..N）与聚合行（0）共存；CHECK 无法
+# 后补，存量库走 _migrate_up 的重建路径（rename-copy-drop，数据保全）。
 _AL_TABLE = """
 CREATE TABLE IF NOT EXISTS agentline_predictions (
     id                INTEGER PRIMARY KEY,
     match_id          INTEGER NOT NULL REFERENCES matches(id),
     line              TEXT NOT NULL
-        CHECK (line IN ('A_base', 'A_enh')),
+        CHECK (line IN ('A_base', 'A_enh', 'A_multi')),
+    attributor        INTEGER NOT NULL DEFAULT 1,  -- 成员 1..N；聚合行 0（A_multi）
     p_home REAL, p_draw REAL, p_away REAL, p_over25 REAL,   -- parse_fail 时 NULL
     confidence        REAL,
     reasoning_digest  TEXT,
@@ -205,7 +209,7 @@ CREATE TABLE IF NOT EXISTS agentline_predictions (
     model             TEXT,
     duration_s        REAL,
     created_at        TEXT NOT NULL,
-    UNIQUE (match_id, line)           -- 幂等：一场一line一行
+    UNIQUE (match_id, line, attributor)   -- 幂等：一场一line一归因子一行
 );
 CREATE INDEX IF NOT EXISTS idx_alp_line ON agentline_predictions (line);
 
@@ -310,7 +314,11 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     v5->v6 纯加列——matches 增 BFE 收盘四列、bets 增 closing_source（Pinnacle
     断供应对，spec §7.3）；recommendations 补 persona 两列 key_factors /
     report_md（§6.3；M4 分支基于旧 main 原占 v4，集成时并入 v6——第三个
-    并行撞号位，2026-09-04）。"""
+    并行撞号位，2026-09-04）；
+    v6->v7 重建 agentline_predictions——line 词表加 'A_multi'、加 attributor 列、
+    UNIQUE 扩成三元组：带 CHECK 的列与约束无法 ALTER 后补，唯一路径是
+    rename-copy-drop（存量行全列保全、attributor 回填 DEFAULT 1，A_multi 计划
+    T1，2026-09-04）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -356,6 +364,34 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
             if "report_md" not in rcols:
                 conn.execute(
                     "ALTER TABLE recommendations ADD COLUMN report_md TEXT")
+    if from_v < 7:
+        # v7：agentline_predictions 加 attributor + A_multi 词表 + 三元 UNIQUE。
+        # CHECK 无法后补——唯一路径是重建（rename-copy-drop）。幂等护栏：
+        # attributor 已在（新库先经 _SCHEMA 建出即含列）则只做 nothing。
+        acols = {r["name"] for r in conn.execute(
+            "PRAGMA table_info(agentline_predictions)")}
+        if acols and "attributor" not in acols:
+            # 前置：idx_alp_line 会随旧表改名、继续占住该索引名——不先摘，
+            # 下方 _AL_TABLE 的 CREATE INDEX IF NOT EXISTS 会静默跳过，DROP
+            # 旧表时索引随之消失（重建库丢索引）。autoindex 随表走，无需处理。
+            conn.execute("DROP INDEX IF EXISTS idx_alp_line")
+            conn.executescript(
+                "ALTER TABLE agentline_predictions RENAME TO"
+                " agentline_predictions_v6;")
+            conn.executescript(_AL_TABLE)       # 新形状（含 attributor）
+            conn.execute(
+                "INSERT INTO agentline_predictions (match_id, line, p_home,"
+                " p_draw, p_away, p_over25, confidence, reasoning_digest,"
+                " sources_json, raw_output, status, repaired, harness, model,"
+                " duration_s, created_at)"
+                " SELECT match_id, line, p_home, p_draw, p_away, p_over25,"
+                " confidence, reasoning_digest, sources_json, raw_output,"
+                " status, repaired, harness, model, duration_s, created_at"
+                " FROM agentline_predictions_v6;")
+            # INSERT..SELECT 在外键开启下逐行校验 match_id→matches：真库存量
+            # 全经 save_prediction（FK ON）写入、必然有效；真有脏行就在这里
+            # fail-fast，不静默吞掉（宁可迁移失败也不悄悄丢/改数据）。
+            conn.execute("DROP TABLE agentline_predictions_v6;")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
