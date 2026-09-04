@@ -324,6 +324,7 @@ def test_bline_vocab_accepts_all_legal_values(conn, bline_ids):
 
 def test_migrate_up_v1_adds_everything(tmp_path):
     """_migrate_up 单独跑就能把 v1 库补齐到当前版本（不依赖 _SCHEMA 兜底）。"""
+
     p = tmp_path / "v1.db"
     _legacy_db(p, version=1, with_bp=False)
     c = connect(p)
@@ -358,13 +359,20 @@ def test_migrate_up_v2_adds_bline_retro_and_persona(tmp_path):
     c.close()
 
 
-def test_migrate_and_fresh_schemas_match(tmp_path):
-    """新建与迁移两条路径产出的全部表/索引 DDL 必须逐字一致（M2 教训的推广）。"""
-    init_db(tmp_path / "a.db")                      # 全新库
-    init_db(tmp_path / "b.db")                      # 降到 v1 再升级回当前版本
-    _set_version(tmp_path / "b.db", 1,
-                 drop=("backtest_predictions", *_BLINE_TABLES,
-                       "retro_runs", "retro_attributions", *_AGENTLINE_TABLES))
+@pytest.mark.parametrize("from_v,drop", [
+    (1, ("backtest_predictions", *_BLINE_TABLES)),   # v1 跨级升级
+    (3, ()),                                         # v3 就地升级（M3 真库路径）
+], ids=["from_v1", "from_v3"])
+def test_migrate_and_fresh_schemas_match(tmp_path, from_v, drop):
+    """新建与迁移两条路径产出的表形状必须一致（M2 教训的推广）。
+
+    from_v=3 腿先摘掉 v4 两列再升，等价于真实 M3 库的 v3 形状。
+    """
+    init_db(tmp_path / "a.db")                      # 全新 v4
+    init_db(tmp_path / "b.db")                      # 降到 from_v 再升级回 v4
+    if from_v == 3:
+        _strip_persona_columns(tmp_path / "b.db")
+    _set_version(tmp_path / "b.db", from_v, drop=drop)
     init_db(tmp_path / "b.db")
 
     tables = ("backtest_predictions", *_BLINE_TABLES,
@@ -382,12 +390,15 @@ def test_migrate_and_fresh_schemas_match(tmp_path):
         assert a.execute(sql, (t,)).fetchall() == \
             b.execute(sql, (t,)).fetchall(), t
         # DDL 文本逐字一致。from_v1 腿的表全部由常量 executescript 建出，无列级
-        # ALTER，恒与新建一致；from_v3 腿（recommendations 走 ALTER 补列、列序
-        # 缀尾）的形状一致性由独立的
-        # test_v3_shape_matches_fresh_on_persona_columns 以无序形状比对覆盖。
-        sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
-        assert a.execute(sql, (t,)).fetchone()["sql"] == \
-            b.execute(sql, (t,)).fetchone()["sql"], t
+        # ALTER，恒与新建一致；from_v3 腿的 ALTER 补列表（recommendations 补
+        # persona 两列、matches 补 BFE 四列、bets 补 closing_source——列序缀尾）
+        # DDL 文本必异，跳过逐字比较：其形状一致性由上面的 _table_cols（dict
+        # 相等无视列序）+ _unique_columns + 独立的
+        # test_v3_shape_matches_fresh_on_persona_columns 无序比对覆盖。
+        if not (from_v == 3 and t in ("recommendations", "matches", "bets")):
+            sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?"
+            assert a.execute(sql, (t,)).fetchone()["sql"] == \
+                b.execute(sql, (t,)).fetchone()["sql"], t
     a.close(); b.close()
 
 
