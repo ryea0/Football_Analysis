@@ -72,6 +72,10 @@ def run_retro_batch(conn: sqlite3.Connection, cands: list[dict],
             _insert_aggregate(conn, batch_id, cand, selector, agg,
                               sum(member_durations), pack_dir, paths)
             counts["ok" if agg["status"] == "ok" else "error"] += 1
+        # 逐场提交（热修 2026-09-04）：批尾单 commit 曾致整批长事务——并发批
+        # (agentline) 撞 database is locked 实证，且批中崩溃全回滚零留痕。
+        # 逐场 commit 后：写锁每场即释；崩溃时已跑场次与台账行（零计数）留痕。
+        conn.commit()
     duration = time.monotonic() - t0
     conn.execute(
         "UPDATE retro_runs SET n_ok=?, n_parse_fail=?, n_timeout=?, n_error=?,"
