@@ -76,11 +76,16 @@ def b_recommendations(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def b_bets(conn: sqlite3.Connection) -> pd.DataFrame:
-    """页2 下表：paper/live 注明细 + 推荐维度（market/strategy 等）+ 队名。"""
-    return pd.read_sql_query("""
+    """页2 下表：paper/live 注明细 + 推荐维度（market/strategy 等）+ 队名。
+
+    ``closing_source`` 透出 CLV 实际所用基准（spec §7.3 基准链：pinnacle /
+    betfair / NULL）；``pnl`` 盈亏三态——won/lost = return−stake、void = 0
+    （零损益）、pending = NaN（在途无账）。
+    """
+    df = pd.read_sql_query("""
         SELECT b.id, b.mode, b.placed_at, b.status, b.bookmaker,
                b.odds_taken, b.stake, b.settled_at, b.return_amt,
-               b.closing_odds, b.clv,
+               b.closing_odds, b.closing_source, b.clv,
                r.strategy, r.phase, r.market, r.model_p, r.market_p,
                r.edge, r.ev,
                f.kickoff_utc, th.name AS home, ta.name AS away
@@ -91,6 +96,32 @@ def b_bets(conn: sqlite3.Connection) -> pd.DataFrame:
         LEFT JOIN teams ta ON ta.id = f.away_team_id
         ORDER BY b.placed_at DESC, b.id DESC
     """, conn)
+    if df.empty:
+        df["pnl"] = pd.Series(dtype=float)
+        return df
+    settled = df["status"].isin(["won", "lost"])
+    df["pnl"] = (df["return_amt"].fillna(0.0) - df["stake"]).where(settled, 0.0)
+    df.loc[df["status"] == "pending", "pnl"] = float("nan")
+    return df
+
+
+def by_date(df: pd.DataFrame, column: str, choice) -> pd.DataFrame:
+    """页 2/4 的日期过滤纯函数：``choice`` 为 None /「全部…」→ 全量；否则按
+    ``column``（ISO 串）的 ``YYYY-MM-DD`` 前缀命中。页内 selectbox 的选项由
+    :func:`date_choices` 生成，口径同源（「全部」前缀即全量，容「全部 All」）。"""
+    if choice is None or str(choice).startswith("全部"):
+        return df
+    if column not in df.columns or df.empty:
+        return df.iloc[0:0]
+    mask = df[column].astype(str).str.startswith(choice)
+    return df[mask]
+
+
+def date_choices(df: pd.DataFrame, column: str) -> list[str]:
+    """``column`` 的去重日期选项（降序——最近在前），供 selectbox。"""
+    if column not in df.columns or df.empty:
+        return []
+    return sorted({str(v)[:10] for v in df[column] if v}, reverse=True)
 
 
 def b_ab_tracks(conn: sqlite3.Connection) -> dict:

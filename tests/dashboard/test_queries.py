@@ -458,3 +458,53 @@ def test_a_paper_sim_empty(db):
     assert a_paper_sim(db)["empty"] is True                       # 空库
     _seed_bp_rows(db)
     assert a_paper_sim(db, leagues=["SP1"])["empty"] is True      # 过滤后无候选
+
+
+# ------------------------------------- 台账基准列 / 盈亏列 / 日期过滤（2026-09-04 增补）
+
+def test_b_bets_has_closing_source_and_pnl(db):
+    """closing_source 列透出（CLV 基准链可溯源）+ pnl 盈亏列三态：
+    won/lost = return−stake；void = 0（零损益）；pending = NaN（在途无账）。"""
+    from queries import b_bets
+
+    _seed_rec_chain(db)
+    db.execute(
+        "UPDATE bets SET closing_source='betfair' WHERE id=10")
+    db.commit()
+    df = b_bets(db)
+    assert "closing_source" in df.columns
+    assert df[df["id"] == 10].iloc[0]["closing_source"] == "betfair"
+    assert df[df["id"] == 11].iloc[0]["closing_source"] is None or \
+        df[df["id"] == 11].iloc[0]["closing_source"] != "betfair"
+    won = df[df["id"] == 10].iloc[0]
+    assert won["pnl"] == pytest.approx(15.0)                 # 25 − 10
+    pending = df[df["id"] == 11].iloc[0]
+    assert pending["pnl"] is None or (isinstance(pending["pnl"], float)
+                                      and math.isnan(pending["pnl"]))
+
+
+def test_b_bets_pnl_void_is_zero(db):
+    from queries import b_bets
+
+    _seed_rec_chain(db)
+    db.execute(
+        "UPDATE bets SET status='void', settled_at='2026-09-06T06:30:00',"
+        " return_amt=0.0 WHERE id=11")
+    db.commit()
+    row = b_bets(db)[lambda d: d["id"] == 11].iloc[0]
+    assert row["pnl"] == 0.0                                 # void = 零损益
+
+
+def test_by_date_filter_helper(db):
+    """页 2/4 的日期过滤纯函数：None/「全部」→ 全量；日期串 → 前缀命中。"""
+    from queries import by_date
+
+    _seed_rec_chain(db)
+    from queries import b_bets
+    df = b_bets(db)
+    assert len(by_date(df, "placed_at", None)) == 2
+    assert len(by_date(df, "placed_at", "全部")) == 2
+    only_12th = by_date(df, "placed_at", "2026-09-04")
+    assert list(only_12th["id"]) == [11, 10]                 # 两注都落在这天
+    assert by_date(df, "settled_at", "2026-09-06")["id"].tolist() == [10]
+    assert by_date(df, "placed_at", "1999-01-01").empty
