@@ -1,13 +1,11 @@
 """关卡原子性：暂存渲染/merge 原子一步/重入防护/关窗判定（设计档 §8）。"""
 import json
-from datetime import date, datetime
 
 import pytest
 
 from fa import config
 from fa.db import connect, init_db
 from fa.evolve import EvolutionError, apply as A, knowledge as K
-from fa.evolve.windows import window_bounds
 
 
 CONTRACT = {"league": "E0",
@@ -69,7 +67,7 @@ def test_stage_proposal_writes_three_artifacts(tmp_root, kbfile):
 
 def test_merge_proposal_atomic_and_reentrant_guard(conn, tmp_root, kbfile):
     wid = _mk_window(conn, 1)
-    rid = _mk_run(conn, wid, "E0", path="evolution/proposals/w1/E0.json")
+    _mk_run(conn, wid, "E0", path="evolution/proposals/w1/E0.json")
     A.stage_proposal(1, "E0", CONTRACT, {"league": "E0"})
     msg = A.merge_proposal(conn, wid, "E0", note="裁定通过")
     assert "新教训" in K.kb_path("E0").read_text()

@@ -258,10 +258,11 @@ def test_status_empty_db_renders_both_sections(tmp_path, monkeypatch):
     from fa.db import get_meta
     conn = connect(db)
     try:
-        # status 只读：三把 bankroll 键（legacy + 两轨）一个都不写
+        # status 只读：四把 bankroll 键（legacy + 三轨）一个都不写
         assert get_meta(conn, "paper_bankroll") is None
         assert get_meta(conn, bankroll_key("model_only")) is None
         assert get_meta(conn, bankroll_key("model_persona")) is None
+        assert get_meta(conn, bankroll_key("model_persona_nokb")) is None
     finally:
         conn.close()
 

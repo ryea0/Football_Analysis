@@ -12,16 +12,18 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fa import config
+from fa.evolve import EvolutionError
+from fa.evolve import windows as _windows
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _fmt(x, pct=True):
+def _fmt(x):
     if x is None:
         return "—"
-    return f"{x:+.2%}" if pct else f"{x:.4f}"
+    return f"{x:+.2%}"
 
 
 def write_event_report(conn: sqlite3.Connection, window_id: int, *,
@@ -29,6 +31,8 @@ def write_event_report(conn: sqlite3.Connection, window_id: int, *,
                        today: date | None = None) -> Path:
     win = conn.execute("SELECT * FROM evolution_windows WHERE id=?",
                        (window_id,)).fetchone()
+    if win is None:
+        raise EvolutionError(f"窗口 {window_id} 不存在")
     closes = win["closes_at"]
     root = config.project_root()
     path = root / "docs" / "evolution" / f"report-{closes}.md"
@@ -36,7 +40,8 @@ def write_event_report(conn: sqlite3.Connection, window_id: int, *,
 
     lines = [f"# C 线进化事件报告 — 窗口 w{win['idx']}（{win['opened_at']} ~ {closes}）",
              "", f"- 事件时刻：{_now_iso()}（UTC）",
-             f"- 报告基准日：{today.isoformat() if today else _now_iso()[:10]}",
+             # 属性访问不打死绑定——monkeypatch windows.beijing_today 才生效
+             f"- 报告基准日：{today.isoformat() if today else _windows.beijing_today().isoformat()}",
              "- TTL 修剪：" + ("；".join(f"{lg}×{len(a)}（{', '.join(a)}）"
                                           for lg, a in pruned) if pruned else "无"),
              ""]
@@ -44,7 +49,6 @@ def write_event_report(conn: sqlite3.Connection, window_id: int, *,
         "SELECT * FROM evolution_runs WHERE window_id=? ORDER BY league",
         (window_id,)).fetchall()
     n_merged = 0
-    dep_total = am_total = 0
     for r in runs:
         ruling = conn.execute(
             "SELECT ruling, note FROM evolution_rulings WHERE run_id=?",
@@ -65,8 +69,6 @@ def write_event_report(conn: sqlite3.Connection, window_id: int, *,
                 n_a = len(contract.get("appends") or [])
                 n_m = len(contract.get("amendments") or [])
                 n_d = len(contract.get("deprecations") or [])
-                am_total += n_m
-                dep_total += n_d
                 lines.append(f"- 变更：+{n_a} / 改{n_m} / 废{n_d}"
                              f"；**被推翻或削弱旧条目 {n_m + n_d}**（健康度）")
             if epath.is_file():
@@ -86,7 +88,6 @@ def write_event_report(conn: sqlite3.Connection, window_id: int, *,
     lines.append("## 版本戳串联")
     for row in conn.execute(
             "SELECT r.strategy, r.personas_hash, COUNT(*) AS n FROM recommendations r"
-            " JOIN fixtures f ON f.id = r.fixture_id"
             " WHERE date(r.created_at, '+8 hours') >= ?"
             " AND date(r.created_at, '+8 hours') < ?"
             " GROUP BY r.strategy, r.personas_hash ORDER BY n DESC",

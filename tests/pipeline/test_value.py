@@ -599,7 +599,7 @@ def test_three_tracks_same_numbers_and_nokb_kelly_init(priced):
 def test_personas_hash_stamped_on_all_rows(priced):
     c, fx, probs = priced
     run = add_run(c)
-    ids = generate_recommendations(c, [LEAGUE], "am", run, personas_hash="a" * 64)
+    generate_recommendations(c, [LEAGUE], "am", run, personas_hash="a" * 64)
     rows = c.execute("SELECT DISTINCT personas_hash, strategy FROM recommendations"
                      " WHERE run_id=?", (run,)).fetchall()
     assert {r["personas_hash"] for r in rows} == {"a" * 64}

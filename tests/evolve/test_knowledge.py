@@ -1,7 +1,5 @@
 """知识文件语法/树 hash/快照/契约应用（设计档 §4/§3）。"""
-import hashlib
 from datetime import date
-from pathlib import Path
 
 import pytest
 

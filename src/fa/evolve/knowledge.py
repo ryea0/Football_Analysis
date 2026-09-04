@@ -33,13 +33,11 @@ from fa.evolve import windows as _windows
 
 SECTIONS = ("结构性认知", "时效", "教训")
 _SECTION_LETTER = {"结构性认知": "S", "时效": "T", "教训": "L"}
-_LETTER_SECTION = {v: k for k, v in _SECTION_LETTER.items()}
 
 _ENTRY_RE = re.compile(
     r"^- \[(?P<anchor>[A-Z0-9]{2,3}-(?P<letter>[STL])\d{2})"
     r"(?:\|(?P<date>\d{4}-\d{2}-\d{2}))?(?:\|(?P<ttl>\d+)d)?\] ?(?P<text>.*)$")
 _HEADER_RE = re.compile(r"^## (.+)$")
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 @dataclass(frozen=True)
