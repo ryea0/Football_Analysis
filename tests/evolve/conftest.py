@@ -131,3 +131,41 @@ def seed_window_rows(conn, run_id=None, day=DAY1, fixture_id=1, *,
     conn.commit()
     return {"run_id": run_id, "fixture_id": fixture_id, "kb": kb,
             "nokb": nokb, "mo": mo, "mo_bet": mo_bet}
+
+
+def seed_kill_with_double_cover(conn, fixture_id, run_id=None, day=DAY1,
+                                market="H", *, am=("won", 10.0, 22.0),
+                                pm=("lost", 10.0, 0.0)):
+    """误杀场景 + am/pm **双窗覆盖**的 model_only 已结算对照注对（T7 修复轮
+    增量，Ruling 4 的第二块事实源；不触碰 seed_window_rows 既有语义）。
+
+    recommendations 的 UNIQUE(fixture_id, market, strategy, phase) 允许同一
+    (fixture, market) 的 am/pm 两行并存 → 同场同市场两张已结算 model_only 注。
+    evidence 的误杀对照按计划口径取**全部**已结算注聚合：
+    (Σreturn−Σstake)/Σstake —— 缺省 am won(stake 10/return 22) +
+    pm lost(stake 10/return 0) → (22−20)/20 = 0.1，与行序/query plan 无关。
+
+    am/pm 各为 ``(status, stake, return_amt)`` 三元组；传 ``None`` 跳过该腿
+    （单腿 = 只有一张已结算注）。fixture_id 必填（调用方自选，避免与
+    seed_window_rows 缺省的 fixture 1 撞 UNIQUE）。
+
+    返回 ``{"run_id","fixture_id","kb","am","pm","am_bet","pm_bet"}``
+    （am/pm 可能为 None）。
+    """
+    run_id = _mk_run(conn, day=day) if run_id is None else run_id
+    _mk_fixture(conn, fixture_id, day=day)
+    kb = _mk_rec(conn, run_id, fixture_id, "model_persona", market=market,
+                 verdict="veto", confidence_delta=-0.25,
+                 final_stake_frac=0.0, day=day)
+    out = {"run_id": run_id, "fixture_id": fixture_id, "kb": kb,
+           "am": None, "pm": None, "am_bet": None, "pm_bet": None}
+    for leg, spec in (("am", am), ("pm", pm)):      # spec None = 跳过该腿
+        if spec is None:
+            continue
+        rec = _mk_rec(conn, run_id, fixture_id, "model_only", market=market,
+                      phase=leg, day=day)
+        bet = _mk_bet(conn, rec, status=spec[0], stake=spec[1],
+                      return_amt=spec[2], odds_taken=2.2, day=day)
+        out[leg], out[f"{leg}_bet"] = rec, bet
+    conn.commit()
+    return out

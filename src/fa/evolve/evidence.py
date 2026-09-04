@@ -1,8 +1,9 @@
 """窗口×联赛证据聚合（设计档 §7）——反思的唯一证据源，只读。
 
 三轨各查各账：kb/model_persona、nokb/model_persona_nokb、对照 ref/model_only。
-未结算注不进 ROI、单列计数；误杀对照取 model_only 同 (fixture, market) 已结算
-注的实际收益率——双轨天然提供反事实，确定性、无模拟。
+未结算注不进 ROI、单列计数；误杀对照取 model_only 同 (fixture, market)
+**全部**已结算注的聚合收益率（(Σreturn−Σstake)/Σstake，与轨道 ROI 同口径；
+Σstake=0 如实落 None）——双轨天然提供反事实，确定性、无模拟。
 
 窗口归属按北京日期：created_at 是 UTC ISO 'Z' 串，``date(created_at,'+8 hours')``
 即北京时间日期，落在 [opened, closes) 才入账。
@@ -96,8 +97,13 @@ def _kills(conn, opened: str, closes: str, league: str) -> list[dict]:
         " ORDER BY r.fixture_id, r.market", (league, opened, closes)).fetchall()
     out = []
     for r in rows:
+        # 对照口径 = 该 (fixture, market) **全部**已结算 model_only 注的聚合：
+        # UNIQUE(fixture_id, market, strategy, phase) 允许 am/pm 各落一行，
+        # 单行 fetchone 无 ORDER BY 会随 query plan 漂移（+1.2/−1.0 翻面）——
+        # 聚合后与轨道 ROI 同口径，行序无关。Σstake=0（无已结算注）→ None。
         mo = conn.execute(
-            "SELECT b.return_amt, b.stake FROM bets b"
+            "SELECT COALESCE(SUM(b.return_amt), 0) AS ret,"
+            " COALESCE(SUM(b.stake), 0) AS stk FROM bets b"
             " JOIN recommendations r2 ON r2.id = b.recommendation_id"
             " WHERE r2.fixture_id=? AND r2.market=? AND r2.strategy='model_only'"
             " AND b.mode='paper' AND b.status IN ('won','lost')",
@@ -107,9 +113,9 @@ def _kills(conn, opened: str, closes: str, league: str) -> list[dict]:
                 "nokb_verdict": (nokb.get(r["fixture_id"]) or {}).get("verdict"),
                 "kb_final_frac": r["final_stake_frac"],
                 "mo_return_on_stake": None}
-        if mo is not None and mo["stake"]:
-            item["mo_return_on_stake"] = ((mo["return_amt"] or 0.0)
-                                          - mo["stake"]) / mo["stake"]
+        if mo is not None and mo["stk"]:
+            item["mo_return_on_stake"] = ((mo["ret"] or 0.0)
+                                          - mo["stk"]) / mo["stk"]
         item.update(_label(conn, r["fixture_id"]))
         out.append(item)
     return out

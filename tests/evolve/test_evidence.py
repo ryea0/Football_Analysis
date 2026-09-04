@@ -121,3 +121,23 @@ def test_divergence_delta_only_and_unaligned_kill(conn):
     assert ev["kills"][0]["home"] is None and ev["kills"][0]["away"] is None
     assert ev["kb_track"]["verdicts"] == {"agree": 2, "downweight": 1, "veto": 0}
     assert ev["model_only_ref"]["roi"] == -1.0
+
+
+def test_kill_counterfactual_aggregates_am_pm_pair(conn):
+    """修复轮（Important）：误杀对照取同 (fixture, market) **全部**已结算
+    model_only 注的聚合——am/pm 双窗覆盖时若按单行 fetchone（无 ORDER BY）
+    会随 query plan 在 +1.2/−1.0 间漂移；聚合后恒为 0.1，且与轨道 ROI 同口径。"""
+    from tests.evolve.conftest import seed_kill_with_double_cover
+    # fixture 1：kb veto（H）+ am won(10/22) + pm lost(10/0)
+    seed_kill_with_double_cover(conn, 1)
+    # fixture 2：kb veto 但对照注全部 void → Σstake=0 → 如实落 None
+    seed_kill_with_double_cover(conn, 2, am=("void", 10.0, None), pm=None)
+    ev = window_evidence(conn, windows.window_bounds(1), "E0")
+    kills = {k["fixture_id"]: k for k in ev["kills"]}
+    assert set(kills) == {1, 2}
+    assert kills[1]["mo_return_on_stake"] == 0.1     # (22+0−(10+10))/(10+10)
+    assert kills[1]["nokb_verdict"] is None          # 该场景未种 nokb 行
+    assert kills[2]["mo_return_on_stake"] is None    # 零注护栏（void 不入聚合）
+    # 聚合口径与轨道 ROI 一致：model_only_ref 同样按全部已结算注算
+    # （n_bets=3 含 fixture 2 的 void 注；n_settled 只计 won/lost）
+    assert ev["model_only_ref"] == {"n_bets": 3, "n_settled": 2, "roi": 0.1}
