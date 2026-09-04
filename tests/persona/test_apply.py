@@ -257,15 +257,41 @@ def test_phase_degrades_when_persona_file_missing(conn_seeded, monkeypatch, fix,
     assert out["called"] == 0                                    # 没到调用那步
 
 
+def test_phase_degrades_unaligned_fixture_per_track(conn_seeded, monkeypatch, fix,
+                                                    persona_files):
+    """``build_input`` 的 §6.3 契约缺口（主客未对齐）＝场次级降级（§6.5）：两轨
+    同降该场（reason unknown，同 pre-M6 语义）、不炸 phase、不吞 commit——
+    余下场两轨照常判决落库。"""
+    conn, fx, run_id = conn_seeded
+    _seed_nokb(conn, run_id, fx)
+    bad = conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc,"
+        " home_team_id, away_team_id, status, created_at)"
+        " VALUES ('D1','ev-d1-bad','oddsapi',?,NULL,NULL,'scheduled',"
+        " '2026-09-01T08:00:00Z')", (KICKOFF,)).lastrowid
+    add_rec(conn, run_id, bad, "H", kelly=0.01)                  # kb 轨
+    _seed_nokb(conn, run_id, bad, kelly=0.01)
+    monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
+    out = run_persona_phase(conn, run_id, ["D1"])
+    assert out["ok"] == 1 and out["nokb_ok"] == 1                # 健康场两轨照判
+    assert out["degraded"] == [{"fixture_id": bad, "reason": "unknown"}]
+    assert out["nokb_degraded"] == [{"fixture_id": bad, "reason": "unknown"}]
+    assert out["attempted"] == sorted([fx, bad])
+    assert all(r["verdict"] is None for r in recs(conn, bad))    # 中性保持
+    assert _track_row(conn, fx, run_id, apply_mod.STRATEGY)["verdict"] == "agree"
+    assert _track_row(conn, fx, run_id,
+                      apply_mod.NOKB_STRATEGY)["verdict"] == "agree"  # 已落库
+
+
 def test_phase_degrades_unmapped_league_as_persona_file(conn_seeded, monkeypatch,
                                                         fix, persona_files):
     """fixtures 表里 league 不在 PERSONA_FILES 映射 → config 抛 ValueError，
     归 persona_file 类降级（人格文件缺失的一种），不得炸整个 phase。"""
     conn, fx, run_id = conn_seeded
-    other = add_fixture(conn, "ev-e0-1", "Chelsea", "Arsenal", league="E0")
+    other = add_fixture(conn, "ev-it1-x", "Juventus", "Napoli", league="IT1")
     add_rec(conn, run_id, other, "H", kelly=0.01)
     monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
-    out = run_persona_phase(conn, run_id, ["D1", "E0"])
+    out = run_persona_phase(conn, run_id, ["D1", "IT1"])
     assert out["ok"] == 1 and out["degraded"] == [{"fixture_id": other,
                                                   "reason": "persona_file"}]
     assert out["attempted"] == sorted([fx, other])
@@ -376,7 +402,8 @@ def test_phase_propagates_veto_zeroes_and_never_overwrites(conn_seeded,
 def _dual_track_hermes(tmp_path):
     """可编程 HERMES_BIN：按**调用序**分档（kb→nokb 顺序固定），prompt 落盘、
     回固定合法输出。用序不用内容分档——无知识库时期两条 prompt 都无 KB 段。
-    prompt 在 ``$2``（命令形态 ``hermes -z <prompt> -t search``，T2 钉死）。"""
+    prompt 在 ``$2``（命令形态 ``hermes -z <prompt> -t search``，T2 钉死）。
+    仅单被处理场用例适用（n=1 即 kb 轨）；多场需改 ``n % 2`` 奇偶分档。"""
     script = tmp_path / "hermes_dual.sh"
     script.write_text(
         "#!/usr/bin/env bash\n"

@@ -107,7 +107,8 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
     M6 起每场**两轨两次调用**（§12.7 对照轨）：kb 轨（persona + 本窗知识快照）
     写 model_persona 行；nokb 轨（纯 persona）写 model_persona_nokb 行，顺序固定
     kb→nokb。降级按轨分别记账（degraded = kb 轨、nokb_degraded = nokb 轨），
-    persona 文件缺失两轨同降（未触达调用不计入 called）。
+    persona 文件缺失 / 本场输入组装失败（§6.3 契约缺口）两轨同降（未触达调用
+    不计入 called）。
     ``attempted`` 里的场跳过且零调用，改做判决传播（pm 沿用 am，§6.2）——按轨
     各自传播。恰一次 ``conn.commit()``。
 
@@ -145,7 +146,17 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                                               "reason": "persona_file"})
             continue
         kb_md = window_kb_text(kb_idx, league)
-        input_obj = build_input(conn, fid, run_id)
+        try:
+            input_obj = build_input(conn, fid, run_id)
+        except PersonaError as exc:
+            # §6.3 契约缺口（fixture 缺 / 主客未对齐 / kickoff 不可解析）＝输入这一环
+            # 没就位，两轨同降、继续下一场（§6.5 场次级；pre-M6 语义：无 reason 属性
+            # 的 PersonaError 归 unknown）——不截断本窗余下场、不吞 commit。
+            reason = getattr(exc, "reason", "unknown")
+            for t in _TRACKS:
+                counts[t]["degraded"].append({"fixture_id": fid,
+                                              "reason": _REASON.get(reason, reason)})
+            continue
         for track in _TRACKS:
             c = counts[track]
             try:
@@ -161,9 +172,9 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                 reason = getattr(exc, "reason", "unknown")
                 c["degraded"].append({"fixture_id": fid,
                                       "reason": _REASON.get(reason, reason)})
-                continue
-            c["ok"] += 1
-            c["veto"] += 1 if output["verdict"] == "veto" else 0
+            else:                        # 无异常才计数（原 continue 的等价改写）
+                c["ok"] += 1
+                c["veto"] += 1 if output["verdict"] == "veto" else 0
     conn.commit()
     kb, nokb = counts[STRATEGY], counts[NOKB_STRATEGY]
     return {"called": kb["called"], "ok": kb["ok"], "veto": kb["veto"],
