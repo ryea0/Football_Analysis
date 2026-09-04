@@ -648,12 +648,14 @@ def retro_report(
 @retro_app.command("run")
 def retro_run(
     selector: str = typer.Option("divergence", "--selector",
-                                 help="divergence|manual（paper_t1/agentline_aligned 属 S2/S3）"),
+                                 help="divergence|manual|paper_t1（agentline_aligned 属 S3）"),
     matches: str = typer.Option("", "--matches", help="manual：逗号分隔 match_id"),
     league: str = typer.Option("", "--league"),
     season: int = typer.Option(None, "--season"),
     date_from: str = typer.Option("", "--from"),
     date_to: str = typer.Option("", "--to"),
+    tdate: str = typer.Option("", "--date",
+                              help="paper_t1：比赛日 YYYY-MM-DD，空=昨天"),
     top: int = typer.Option(20, "--top"),
     control: int = typer.Option(10, "--control", help="对照场数（divergence 用）"),
     seed: int = typer.Option(42, "--seed"),
@@ -668,7 +670,8 @@ def retro_run(
 
     from fa.config import project_root
     from fa.retro.pipeline import run_retro_batch
-    from fa.retro.select import select_divergence, select_manual
+    from fa.retro.select import (select_divergence, select_manual,
+                                 select_paper_t1)
     conn = connect()
     try:
         if selector == "divergence":
@@ -688,9 +691,14 @@ def retro_run(
                                   league=league or None, season=season)
             params = {"matches": matches, "league": league, "season": season,
                       "attributors": attributors}
+        elif selector == "paper_t1":
+            from datetime import date as _d, timedelta as _td
+            day = tdate or (_d.today() - _td(days=1)).isoformat()
+            cands, t1meta = select_paper_t1(conn, day)
+            params = {"date": day, **t1meta, "attributors": attributors}
         else:
-            typer.echo(f"--selector 须为 divergence|manual（S2/S3 再扩），"
-                       f"收到 {selector!r}")
+            typer.echo(f"--selector 须为 divergence|manual|paper_t1"
+                       f"（agentline_aligned 属 S3），收到 {selector!r}")
             raise typer.Exit(code=1)
         if attributors < 1:
             typer.echo(f"--attributors 须 ≥1，收到 {attributors}")

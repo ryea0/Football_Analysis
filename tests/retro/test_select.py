@@ -6,7 +6,7 @@ import pytest
 
 from fa.db import connect, init_db
 from fa.retro.select import (divergence_rows, select_divergence,
-                             select_manual)
+                             select_manual, select_paper_t1)
 
 LEAGUE = "E0"
 SEASON = 2023
@@ -110,3 +110,60 @@ def test_select_manual(conn):
     assert all(not r["is_control"] for r in rows)
     rows2 = select_manual(conn, match_ids=[3])
     assert [r["match_id"] for r in rows2] == [3]
+
+
+# ---- paper_t1（Stage 2，设计 §4：前一比赛日 recommendations 所涉场次）----
+
+def _seed_t1(conn):
+    """昨日推荐链：fixture（kickoff 2024-04-20）+ recommendation + 完赛对齐。
+    复用 _seed 的 teams/matches/backtest_predictions（conn fixture 已先跑）。
+    注意主客 id：_seed 的 match 1 = Arsenal(id1) vs West Ham(id3)——fixture
+    必须写 (1,3) 才配到 match 1（写 (1,2) 会配到 match 3 = Arsenal vs
+    Chelsea，2024-04-22）。"""
+    conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc,"
+        " home_team_id, away_team_id, status, created_at)"
+        " VALUES ('E0','ev-t1','oddsapi','2024-04-20T14:00:00Z',1,3,"
+        " 'finished','2024-04-20T08:00:00Z')")          # id 1
+    conn.execute(
+        "INSERT INTO runs (type, phase, started_at, status)"
+        " VALUES ('matchday','am','2026-09-04T03:00:00Z','ok')")   # id 1
+    conn.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market,"
+        " phase, model_p, market_p, best_odds, bookmaker, edge, ev,"
+        " kelly_stake_frac, created_at)"
+        " VALUES (1,1,'model_only','H','am',0.45,0.52,2.10,'Pinnacle',"
+        "0.063,0.132,0.05,'2026-09-04T03:05:00Z')")
+    conn.commit()
+
+
+class TestSelectPaperT1:
+    def test_paired_recommendation_match_selected(self, conn):
+        _seed_t1(conn)
+        cands, meta = select_paper_t1(conn, "2024-04-20")
+        assert [c["match_id"] for c in cands] == [1]
+        assert meta == {"n_fixtures": 1, "n_unpaired": 0, "n_no_prediction": 0}
+        c = cands[0]
+        assert c["home"] == "Arsenal" and c["away"] == "West Ham"
+        assert c["is_control"] is False
+        assert c["outcome"] == "H"            # build_pack 契约键来自 fetch_predictions
+
+    def test_unpaired_fixture_counted_not_fatal(self, conn):
+        _seed_t1(conn)
+        # 换成库里无完赛行的两队（Liverpool 主场无 match）
+        conn.execute("UPDATE fixtures SET home_team_id=4, away_team_id=3 WHERE id=1")
+        conn.commit()
+        cands, meta = select_paper_t1(conn, "2024-04-20")
+        assert cands == [] and meta["n_unpaired"] == 1
+
+    def test_no_prediction_row_skipped_and_counted(self, conn):
+        _seed_t1(conn)
+        conn.execute("DELETE FROM backtest_predictions WHERE match_id=1")
+        conn.commit()
+        cands, meta = select_paper_t1(conn, "2024-04-20")
+        assert cands == [] and meta["n_no_prediction"] == 1
+
+    def test_other_date_selects_nothing(self, conn):
+        _seed_t1(conn)
+        cands, meta = select_paper_t1(conn, "2024-04-21")
+        assert cands == [] and meta["n_fixtures"] == 0
