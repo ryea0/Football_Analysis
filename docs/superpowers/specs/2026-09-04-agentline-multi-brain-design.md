@@ -80,6 +80,13 @@
 2. `attributor INTEGER NOT NULL DEFAULT 1` 列（成员 1..3、聚合 0）——无 CHECK 可后补，但一次到位免 ALTER
 3. 本建议不改变一期任何行为（A_multi 只是词表占位）
 
+> **落地记录（2026-09-04，v7）**：一期建表时未采纳本建议（词表只含两词、无
+> attributor 列）；2026-09-04 以 schema v7 重建表迁移补齐欠账——CHECK 三词 +
+> attributor 列 + `UNIQUE(match_id, line, attributor)` 三元组（后者为落地时
+> 的一次到位扩展：A_multi 同场聚合 0 与成员 1..3 四行并存的前提，A_base/A_enh
+> 恒 attributor=1 语义不变；store.py 幂等冲突目标同步抬三元组）。护栏与数据
+> 省保全见 `db.py _migrate_up` v6→v7 分层与 `tests/test_db.py`。
+
 ## 7. 非目标
 
 - 不做 agent 指挥官 / meta-agent 路由（总纲 D2）

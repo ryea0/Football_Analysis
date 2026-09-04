@@ -16,7 +16,7 @@ def save_prediction(conn: sqlite3.Connection, match_id: int, line: str,
         " p_away, p_over25, confidence, reasoning_digest, sources_json,"
         " raw_output, status, repaired, harness, model, duration_s, created_at)"
         " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
-        " ON CONFLICT(match_id, line) DO UPDATE SET"
+        " ON CONFLICT(match_id, line, attributor) DO UPDATE SET"
         " p_home=excluded.p_home, p_draw=excluded.p_draw,"
         " p_away=excluded.p_away, p_over25=excluded.p_over25,"
         " confidence=excluded.confidence,"
@@ -37,13 +37,17 @@ def save_prediction(conn: sqlite3.Connection, match_id: int, line: str,
 
 
 def save_run(conn, line: str, profile: str, model: str | None,
-             counts: dict, summary: dict) -> int:
+             counts: dict, summary: dict, started_at: str | None = None) -> int:
+    # started_at 由调用方传批次起点（run_line 开头取的 _now()）；缺省回落当下
+    # （兼容旧调用）。不传时起点=落库时刻，长批会把批尾记成起点（2026-09-04
+    # 实测 04:25 启动的批次险些记成 ~05:07）。
     cur = conn.execute(
         "INSERT INTO agentline_runs (line, profile, model, n_ok,"
         " n_parse_fail, n_timeout, n_error, started_at, finished_at, summary)"
         " VALUES (?,?,?,?,?,?,?,?,?,?)",
         (line, profile, model, counts.get("ok", 0), counts.get("parse_fail", 0),
-         counts.get("timeout", 0), counts.get("error", 0), _now(), _now(),
+         counts.get("timeout", 0), counts.get("error", 0),
+         started_at or _now(), _now(),
          json.dumps(summary, ensure_ascii=False)))
     conn.commit()
     return cur.lastrowid
