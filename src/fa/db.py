@@ -117,7 +117,9 @@ CREATE TABLE IF NOT EXISTS bets (
         CHECK (status IN ('pending', 'won', 'lost', 'void')),
     settled_at        TEXT,
     return_amt        REAL,
-    closing_odds      REAL,                  -- CLV 基准（Pinnacle 收盘）
+    closing_odds      REAL,                  -- CLV 基准（psc 优先，缺失 fallback bfe）
+    -- closing_source 诚实记账用了哪个基准：'pinnacle' / 'betfair'；NULL=无基准
+    closing_source    TEXT,
     clv               REAL,
     UNIQUE (recommendation_id, mode)
 );
@@ -259,6 +261,9 @@ CREATE TABLE IF NOT EXISTS matches (
     psc_home REAL, psc_draw REAL, psc_away REAL,   -- Pinnacle 收盘（回测基准）
     over25_ps REAL, under25_ps REAL,
     over25_psc REAL, under25_psc REAL,
+    -- Betfair 交易所收盘（BFECH/BFECD/BFECA/BFEC>2.5）：Pinnacle 断供
+    -- （football-data 2025-12 起）后的 CLV fallback 基准，spec §7.3
+    bfe_home REAL, bfe_draw REAL, bfe_away REAL, over25_bfe REAL,
     raw_line TEXT NOT NULL,                         -- 原始 CSV 行 JSON 留档
     UNIQUE (league, season, date, home_team_id, away_team_id)
 );
@@ -302,8 +307,10 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     v4->v5 新增范式对比线两表（agentline_predictions / agentline_runs）并给
     retro_attributions 加 attributor 列——v5 分层由 2026-09-04 并行分支合并产生
     （retro ensemble 与 agentline 同日各自 bump v4，合并时统一为单一 v5）；
-    v5->v6 recommendations 补 persona 两列（key_factors / report_md，§6.3）
-    ——M4 分支同日也 bump 了 v4，与 retro/agentline 分叉合并为单一 v6。"""
+    v5->v6 纯加列——matches 增 BFE 收盘四列、bets 增 closing_source（Pinnacle
+    断供应对，spec §7.3）；recommendations 补 persona 两列 key_factors /
+    report_md（§6.3；M4 分支基于旧 main 原占 v4，集成时并入 v6——第三个
+    并行撞号位，2026-09-04）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -324,19 +331,29 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
                 "ALTER TABLE retro_attributions ADD COLUMN"
                 " attributor INTEGER NOT NULL DEFAULT 1")
     if from_v < 6:
-        # persona 两列（M4）：守卫兜住「M4 v4 老库两列已在」
-        # 列级加法只能 ALTER：老库已有数据，不得重建表。from_v<3 的库上一步
-        # _BLINE_TABLE 刚建出含两列形状（M4 DDL，两列已在），故按列存在性判定、只补真缺
-        # 的——顺带让半途断掉的迁移可续跑（ADD COLUMN 非事务原子）。与
-        # _BLINE_TABLE 同名列同语义，文本上难免两处（ALTER 无法复用 DDL 常量），
-        # 形状一致性由 test_migrate_and_fresh_schemas_match[from_v3] 钉住。
-        cols = {r["name"] for r in
-                conn.execute("PRAGMA table_info(recommendations)")}
-        if cols:                          # 空集＝表不存在（假形状最小库），无事可做
-            if "key_factors" not in cols:
+        # 防重入：版本号与表形状在历史上出现过错位（is_control 先例——加列未
+        # bump 版本），列已存在就跳过，别让 ALTER 炸在「旧版本号 × 新形状表」上；
+        # 表本身缺失（极简合成库 / 分支级 _migrate_up 单测）同样跳过——真实库
+        # 自 v1 起 matches/bets 必在
+        mcols = {r["name"] for r in conn.execute("PRAGMA table_info(matches)")}
+        if mcols:
+            for col in ("bfe_home", "bfe_draw", "bfe_away", "over25_bfe"):
+                if col not in mcols:
+                    conn.execute(f"ALTER TABLE matches ADD COLUMN {col} REAL")
+        bcols = {r["name"] for r in conn.execute("PRAGMA table_info(bets)")}
+        if bcols and "closing_source" not in bcols:
+            conn.execute("ALTER TABLE bets ADD COLUMN closing_source TEXT")
+        # persona 两列（M4，§6.3）：列级加法只能 ALTER——老库已有数据不得重建
+        # 表；按列存在性判定只补真缺的，半途断掉的迁移可续跑（ADD COLUMN 非事务
+        # 原子）。与 _BLINE_TABLE 同名列同语义，形状一致性由
+        # test_migrate_and_fresh_schemas_match 钉住。
+        rcols = {r["name"] for r in
+                 conn.execute("PRAGMA table_info(recommendations)")}
+        if rcols:
+            if "key_factors" not in rcols:
                 conn.execute(
                     "ALTER TABLE recommendations ADD COLUMN key_factors TEXT")
-            if "report_md" not in cols:
+            if "report_md" not in rcols:
                 conn.execute(
                     "ALTER TABLE recommendations ADD COLUMN report_md TEXT")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))

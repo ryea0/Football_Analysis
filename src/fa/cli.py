@@ -19,6 +19,9 @@ def main() -> None:
     # 没有这行，.env 是死配置——hermes cron（§9.6）的裸环境永远拿不到 key，
     # 每日 run 全部 no_key（T12 E2E 实测发现的缺陷）。
     load_env()
+    # cron 无人值守契约：schema 落后的生产库在跑批前自迁移（如 v3 库遇 v5 代码，
+    # ALTER 在这里完成，而不是结算写到一半炸掉）。幂等：新库建全、旧库补差。
+    init_db()
 
 
 @app.command()
@@ -861,3 +864,99 @@ def run_daily_cmd() -> None:
         typer.echo("  推送：已发 Telegram（结算简报）")
     else:
         typer.echo(f"  推送：失败（{last_error()}）——结算已落库")
+
+
+ops_app = typer.Typer(help="运维告警（跑批失败/漏跑的 TG 告警，spec 风险 #6）")
+app.add_typer(ops_app, name="ops")
+
+
+@ops_app.command("alert")
+def ops_alert_cmd(text: str = typer.Argument(..., help="告警正文")):
+    """推一条告警到 Telegram（cron wrapper 的失败路径调用）"""
+    from fa.pipeline.ops import send_alert
+    from fa.pipeline.reporting import last_error
+
+    if send_alert(text):
+        typer.echo("告警已发 Telegram")
+        return
+    typer.echo(f"告警推送失败（{last_error()}）")
+    raise typer.Exit(code=1)
+
+
+@ops_app.command("watchdog")
+def ops_watchdog_cmd() -> None:
+    """daily 健诊：成功间隔超阈值（漏跑/连续失败）即告警（daily wrapper 收尾调用）"""
+    from fa.pipeline.ops import run_watchdog
+    from fa.pipeline.reporting import last_error
+
+    conn = connect()
+    try:
+        out = run_watchdog(conn)
+    finally:
+        conn.close()
+
+    if out["alert"] is None:
+        typer.echo("watchdog：无异常（daily 成功间隔在阈值内）")
+        return
+    typer.echo(out["alert"])
+    if not out["sent"]:
+        typer.echo(f"告警推送失败（{last_error()}）")
+        raise typer.Exit(code=1)
+
+
+@ops_app.command("weekly")
+def ops_weekly_cmd() -> None:
+    """周度小结（M5 §10）：上个自然周 paper 双轨对照 → TG；空周静默"""
+    from fa.pipeline.reporting import last_error
+    from fa.pipeline.weekly import run_weekly
+
+    conn = connect()
+    try:
+        out = run_weekly(conn)
+    finally:
+        conn.close()
+
+    if out["empty"]:
+        typer.echo("周度小结：静默（上周无落注、无结算）")
+        return
+    if out["sent"]:
+        typer.echo("周度小结已发 Telegram")
+        return
+    typer.echo(f"周度小结推送失败（{last_error()}）")
+    raise typer.Exit(code=1)
+
+
+@ops_app.command("backfill-clv")
+def ops_backfill_clv_cmd() -> None:
+    """补齐已结算 paper 注缺失的收盘基准（只填 NULL，损益与状态不动）"""
+    from fa.pipeline.paper import backfill_clv
+
+    conn = connect()
+    try:
+        out = backfill_clv(conn)
+    finally:
+        conn.close()
+    typer.echo(f"回填收盘基准：{out['filled']} 注（closing_source 记账实际基准）")
+
+
+@data_app.command("backfill-bfe")
+def data_backfill_bfe_cmd(
+    seasons_from: int = typer.Option(2024, "--from",
+                                     help="起始赛季（含）——BFE 列 2024-25 才有"),
+    refresh: bool = typer.Option(False, "--refresh", help="强制重下 CSV"),
+) -> None:
+    """把 Betfair 交易所收盘列回填进已入库 matches（Pinnacle 断供应对，spec §7.3）"""
+    from fa.data.sync import backfill_bfe
+
+    conn = connect()
+    try:
+        rep = backfill_bfe(conn, seasons_from=seasons_from, refresh=refresh)
+    finally:
+        conn.close()
+    typer.echo(f"回填 {rep.filled} 行（{rep.files_ok} 个赛季文件）")
+    for lg, year in rep.missing:
+        typer.echo(f"  [缺文件] {lg} {year}-{(year + 1) % 100:02d} 赛季")
+    for lg, year, msg in rep.file_errors:
+        typer.echo(f"  [出错] {lg} {year}-{(year + 1) % 100:02d} 赛季：{msg}")
+    if rep.file_errors:
+        raise typer.Exit(code=1)

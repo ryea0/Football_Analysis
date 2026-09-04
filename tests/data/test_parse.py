@@ -75,3 +75,23 @@ def test_trim_keeps_strictness_for_nonempty_extra_fields():
     bad = CSV_RAGGED.replace("5,3,,,,,,,,,,,,,,", "5,3,99,,,,,,,,,,,,,")
     with pytest.raises(pd.errors.ParserError):
         parse_csv(bad, "E0", 2004)
+
+
+# 2026-27 起 football-data.co.uk 移除 Pinnacle 列族，Betfair 交易所收盘成为
+# B 线 CLV 的 fallback 基准（spec §7.3，2026-09-04 裁定）——BFE 列解析钉测
+CSV_BFE = """Div,Date,HomeTeam,AwayTeam,FTHG,FTAG,FTR,BFECH,BFECD,BFECA,BFEC>2.5
+SP1,03/09/2026,Osasuna,Getafe,1,0,H,2.1,3.4,3.2,2.05
+"""
+
+
+def test_parse_betfair_exchange_closing_columns():
+    rows = parse_csv(CSV_BFE, "SP1", 2026)
+    assert len(rows) == 1
+    r = rows[0]
+    assert (r.bfe_home, r.bfe_draw, r.bfe_away) == (2.1, 3.4, 3.2)
+    assert r.over25_bfe == 2.05
+
+
+def test_parse_bfe_missing_columns_yield_none():
+    rows = parse_csv(CSV_90S, "E0", 1995)
+    assert all(r.bfe_home is None and r.over25_bfe is None for r in rows)

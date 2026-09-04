@@ -255,11 +255,12 @@ def _result(status: str, run_id: int, phase: str, *, fixtures: int = 0,
             persona: dict | None = None) -> dict:
     """统一的返回形状：CLI / 测试只认这一份契约。
 
+    ``region_merged`` / ``snapshot_reused`` 是降级三态的**本窗**事实（与 runs.summary
+    同源）：CLI 据此选降级文案——只给 ``degraded`` 布尔，文案就得猜「是缩了范围还是
+    没拉盘」，而猜错一句就是向用户谎报价格新鲜度。``degraded`` 仍只表示「有降级」。
     ``persona`` 只带四个结果键；``attempted`` 名单只进 ``runs.summary``（pm 的
-    沿用依据），不进调用方返回。``region_merged`` / ``snapshot_reused`` 是降级
-    三态的**本窗**事实（与 runs.summary 同源）：CLI 据此选降级文案——只给
-    ``degraded`` 布尔，文案就得猜「是缩了范围还是没拉盘」，而猜错一句就是向
-    用户谎报价格新鲜度。``degraded`` 仍只表示「有降级」。"""
+    沿用依据），不进调用方返回。"""
+
     return {"status": status, "run_id": run_id, "phase": phase,
             "fixtures": fixtures, "aligned": aligned,
             "unknown": list(unknown or []), "recs": recs, "bets": bets,

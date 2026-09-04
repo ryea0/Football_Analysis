@@ -10,6 +10,9 @@ CLV，价「走低」（2.10→2.30）给负 CLV。
 import json
 from datetime import datetime, timezone
 
+
+
+
 import pytest
 
 from fa.db import connect, init_db
@@ -678,8 +681,6 @@ def test_pm_update_sections_grouped_by_league_with_kickoff(conn):
     assert "### 英超（1）" in gone
     assert "Bayern vs Dortmund" in gone
 
-
-# ------------------------------------- persona 段渲染（M4）
 
 # ------------------------------------------------- persona 段（M4 T14 真渲染）
 

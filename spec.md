@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | 项目名 | fa（Football Analysis） |
-| 版本 | v0.6（确认稿） |
+| 版本 | v0.9（确认稿） |
 | 日期 | 2026-09-04 |
 | 状态 | M1 完成；M2 判决 NO-GO（+3.02%，docs/m2-verdict.md）；**项目负责人批准 §12 双线并存协议——B 线（M3-M5 paper 模式）在推翻顺序关卡的前提下启动**（2026-09-03） |
 
@@ -12,6 +12,9 @@
 > v0.3 → v0.4 变更：Provider 体系成型——OddsProvider 家族（历史 CSV / Odds API / 二期滚球与交易所）+ 新增 ExecutionProvider（Paper 模拟盘为默认实现，真实平台二期以官方 API + 地区合规为前提）；`bets` 增 `mode` 字段，模拟盘自 M3 起每日自动落注结算，并成为 M5 实盘入场前提。
 > v0.4 → v0.5 变更：新增 **§12 双线并存协议**——A 线（研究评测，已建成）与 B 线（运营模拟 = M3-M5 paper 模式）在同一程序并存、结论分账；项目负责人显式推翻「M2 NO-GO → M3+ 不启动」的顺序约束（决策记录见 §12.4）；A 线判据不变。
 > v0.5 → v0.6 变更：新增本地只读看板（§7.4）——`dashboard/`（Streamlit + plotly，独立 dependency-group），B/A 线分区观察出口，只读连库、指标口径复用回测模块（设计：docs/superpowers/specs/2026-09-04-web-dashboard-design.md）。
+> v0.6 → v0.7 变更：调度载体双轨化（§9.6）——system crontab 与 hermes cron 双载体可切换（2026-09-04 负责人裁定「并行开发、实现可切换」）；job 唯一入口 `scripts/fa_cron.sh`，失败告警与漏跑看护收进 `fa ops alert` / `fa ops watchdog`（风险 #6 落地）。
+> v0.7 → v0.8 变更：CLV 收盘基准链（§3.2/§7.3）——football-data 自 2025-12 断供 Pinnacle，B 线收盘基准改为「Pinnacle 优先、缺失 fallback Betfair 交易所（`bfe_*`）」并以 `bets.closing_source` 记账（2026-09-04 负责人裁定）；matches 增 `bfe_*` 四列（schema v6——v5 已被范式对比线占用）、`fa data backfill-bfe` / `fa ops backfill-clv` 回填既有分区与台账；A 线回测基准不变。
+> v0.8 → v0.9 变更：周度小结（§9.6 weekly / §10）——`fa ops weekly` 上周双轨对照（落注/结算/ROI/CLV/bankroll）周一 07:00 推 TG，空周静默；§12.3 判据时钟裁定——6 周观察期自 cron 激活日起算，激活前数据留档不进预注册样本（2026-09-04 负责人裁定）。
 
 ---
 
@@ -98,10 +101,10 @@ hermes cron（调度）
 |---|---|---|
 | `teams` | id, league, name | 规范队名（以 football-data.co.uk 拼写为准） |
 | `team_aliases` | team_id, source, alias | 跨源别名映射，UNIQUE(source, alias) |
-| `matches` | id, league, season, date, home_team_id, away_team_id, fthg, ftag, 射门/射正/角球, Pinnacle 开盘/收盘赔率列, raw_line(JSON) | 已完赛场次；原始 CSV 行整行留档便于重放 |
+| `matches` | id, league, season, date, home_team_id, away_team_id, fthg, ftag, 射门/射正/角球, Pinnacle 开盘/收盘赔率列, Betfair 交易所收盘列（2024-25 起，`bfe_*`），raw_line(JSON) | 已完赛场次；原始 CSV 行整行留档便于重放 |
 | `odds_snapshots` | id, fetched_at, source, event_key, match_id(可空), market(h2h/totals), region, bookmaker, outcomes(JSON), raw(JSON) | 实时盘快照；对齐完成前 match_id 允许为空 |
 | `recommendations` | id, run_id, match_id, strategy(model_only / model_persona), market, model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac, verdict, confidence_delta, final_stake_frac, created_at | A/B 双轨：两套 strategy 各存一份（见 6.6） |
-| `bets` | id, recommendation_id, mode(paper/live), placed_at, bookmaker, odds_taken, stake, status(pending/won/lost/void), settled_at, return_amt, closing_odds, clv | 投注台账，模拟 / 实盘分模式统计 |
+| `bets` | id, recommendation_id, mode(paper/live), placed_at, bookmaker, odds_taken, stake, status(pending/won/lost/void), settled_at, return_amt, closing_odds, closing_source(pinnacle/betfair), clv | 投注台账，模拟 / 实盘分模式统计；closing_source 记账 CLV 实际所用基准 |
 | `runs` | id, type(daily/matchday/backtest/manual), phase(am/pm, 可空), started_at, finished_at, status, credits_before/after, summary(JSON) | 每次 run 的审计记录（v0.5：am/pm 移入 phase 列，type 词表四值加 CHECK 约束） |
 | `meta` | key, value | bankroll、Odds API 额度水位等 KV |
 
@@ -288,15 +291,15 @@ hermes cron（调度）
 |---|---|---|
 | ROI | 净利 / 总投注额 | 最终结果，但小样本噪声大 |
 | 累计 P&L | 累计净额 | 绝对量 |
-| **CLV** | odds_taken / Pinnacle 收盘价 − 1，按注中位数 | **金标准**：持续买在收盘前且价格更好 = 长期正期望的信号，比短期盈亏更早暴露真相 |
-
-paper bankroll 与上表指标按 `strategy` 分轨统计（model_only / model_persona 各一本，初始各 1000）——§12.3 预注册判据的分轨对比口径（M4 裁定，2026-09-04：分轨隔离使一轨盈余不放大另一轨仓位，A/B 对比不失真）。
+| **CLV** | odds_taken / 收盘价 − 1，按注中位数。**收盘基准链（2026-09-04 裁定）**：Pinnacle 收盘（`psc_*`，与 A 线回测同源）优先；缺失 fallback Betfair 交易所收盘（`bfe_*`，含佣金前置、略偏严）；实际所用记 `bets.closing_source`。背景：football-data.co.uk 自 2025-12 起断供 Pinnacle（2026-27 赛季连列已删），B 线不 fallback 则主判据失明 | **金标准**：持续买在收盘前且价格更好 = 长期正期望的信号，比短期盈亏更早暴露真相 |
 
 ### 7.4 本地只读看板（v0.6）
 
 - `dashboard/`（Streamlit 多页应用）：B 线运营监控 4 页 + A 线研究可视化 3 页，页面按 §12 双线分区，表边界同 §12.1（A 线页只读 `backtest_predictions`/`matches`）
 - 只读连接（`mode=ro`）+ 独立依赖组（`uv run --group dashboard streamlit run dashboard/app.py`）；指标口径单一来源——复用 `backtest/metrics` 与 `backtest/simulate`，看板不另写公式
 - 看板是**视图不是证据源**：结论仍以 runs 落库记录与 m*/判决文档为准
+
+paper bankroll 与上表指标按 `strategy` 分轨统计（model_only / model_persona 各一本，初始各 1000）——§12.3 预注册判据的分轨对比口径（M4 裁定，2026-09-04：分轨隔离使一轨盈余不放大另一轨仓位，A/B 对比不失真）。
 
 ---
 
@@ -386,13 +389,25 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 - persona 失败 → 6.5 降级
 - 所有 run 写 `runs` 表 + 文件日志
 
-### 9.6 调度（hermes cron，两条 job，北京时间）
+### 9.6 调度（双载体 cron，三条 job，北京时间）
 
 | job | 时间 | 动作 |
 |---|---|---|
 | daily | 每日 06:30 | `fa run daily`（数据更新 + 结算） |
 | matchday-am | 每日 11:00 | `fa run matchday --phase am`：拉盘→建模→价值→persona→**完整推荐报告**；管线内部检查当日赛程，无赛事即空跑退出，不耗额度 |
 | matchday-pm | 每日 17:00 | `fa run matchday --phase pm`：**更新版报告（已确认）**——与 11:00 对比只推差异：已推候选的盘口移动（CLV 预览）、新增/消失候选，去重不重发全量；persona 不重跑（沿用 11:00 判决），仅对新增候选场次补跑一次 |
+| weekly | 每周一 07:00 | `fa ops weekly`（M5 §10「周度小结」，v0.9）：上个自然周（北京时间）paper **双轨对照**（落注/结算/ROI/CLV 中位/bankroll）→ TG；空周（双落注且零结算）静默——daily 结算后、am 拉盘前的槽位 |
+
+**载体与告警（2026-09-04 负责人裁定：双载体并行开发、实现可切换）**：三条 job 的
+唯一入口是 `scripts/fa_cron.sh <daily|am|pm>`——环境补齐（PATH 补 uv 所在、导出
+clash 代理供 TG 推送）、日志落 `logs/cron/`、job 失败即 `fa ops alert` TG 告警、
+daily 成功后 `fa ops watchdog` 查漏跑（最近两次成功 daily 间隔 >25h 即告警，风险
+#6 落地）；成功时 stdout 静默。装配载体二选一、互斥切换（双跑会重复触发）：
+system crontab（`scripts/cron_install.sh`，标记块幂等）或 hermes cron
+（`scripts/hermes_cron_install.sh`，`--no-agent --script` 纯调度——hermes 不进
+LLM，gateway 亦无须配 TG 代理，告警走 fa 自己的推送路径）。时刻事实单
+`scripts/cron_jobs.txt` 为双载体共同事实源（机时区 Asia/Shanghai，本地时刻即
+北京时间，无需换算）。
 
 ### 9.7 测试策略
 
@@ -450,7 +465,8 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 3. **队名对齐是持续成本**：新赛季 / 杯赛交叉数据会持续产生新别名；隔离表 + 告警保证不脏数据
 4. **大小球线对齐**：历史 CSV 基准为 2.5 线；实时盘主线可能漂移（2.75 等）——一期只取 2.5 线，其余丢弃并计数
 5. **persona 输出不合规率未知**：降级路径必须被 mock 测试全路径覆盖
-6. **hermes cron 依赖本机常开**：跑批失败要有 TG 告警（daily 失败超 1 天即告警）
+6. **调度依赖本机常开**：跑批失败要有 TG 告警（daily 失败超 1 天即告警）——**已落地（2026-09-04，M5 运营基建）**：wrapper 失败即 `fa ops alert`；漏跑/连续失败（最近两次成功 daily 间隔 >25h）由 `fa ops watchdog` 告警（§9.6）。机器关机期间本地无从自发告警，恢复后首个 daily 揭示
+7. **上游数据源列漂移**：football-data.co.uk 已实际发生（2025-12 断供 Pinnacle、2026-27 删列、以 Paddy Power `PPC*` 顶位——**2026-09-04 实测归因**，spec v0.8 应对）——后续任何上游列变动先经 `fa data backfill-bfe` 式回填与 `closing_source` 记账核对，绝不让基准静默失明；隔离表与额度水位同属「上游变了要知道」的既有防线
 
 ### 开放问题（到对应里程碑再定，不提前锁死）
 
@@ -489,6 +505,7 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 
 - **B 线胜出**：模拟盘累计 ≥300 注 且（a）model_persona 轨 CLV > 0，或（b）model_persona 轨 ROI 显著优于 model_only 轨——则 persona/运营假设成立，再议实盘
 - **B 线归档**：6 周后未达胜出条件 → B 线停跑归档，结论记档（「persona 未能拯救负选择池」或「样本不足」如实记录）
+- **判据时钟裁定（2026-09-04 负责人）**：6 周观察期自 **cron 激活日**（集成分支合并 + `cron_install.sh` 装配之日——无人值守跑批、M4 双轨、CLV 基准链同时就位）起算；model_persona 轨的 A/B 对比样本同日起算。激活前的 09-03~09-04 首跑数据留档但不进预注册判据样本（机械栈未齐的样本质量参差）
 - **A 线判据不变**：任何新建模想法仍须样本外劣化 ≤1% 才具转正资格
 - 两线结论**不得互相冒充**：A 线的历史判决不因 B 线前向波动修改；B 线不引用回测数字充当前向证据
 

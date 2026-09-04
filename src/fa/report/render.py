@@ -475,7 +475,8 @@ def render_pm_update(conn, am_run_id, pm_run_id, quota_left, degraded):
         added, lambda r: r["league"],
         lambda r: (f"- {_label(r)} {_kickoff_cell(r)} · {_mkt(r)} "
                    f"· {_strategy(r)} @ {r['best_odds']:.2f}，EV {r['ev']:+.2%}，"
-                   f"仓位 {r['kelly_stake_frac']:.2%}{_persona_note(r, verdict_icon)}"))
+                   f"仓位 {r['kelly_stake_frac']:.2%}"
+                   f"{_persona_note(r, verdict_icon)}"))
     lines.append("")
 
     lines += _heading("已消失", len(gone))

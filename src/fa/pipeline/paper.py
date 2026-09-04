@@ -21,9 +21,12 @@
 额的口径，也是 paper 模式零真金下最简单的可复算账本。
 
 **判胜与 CLV**（§7.3）：H/D/A 用 ``fthg``/``ftag``；O2.5 用 ``fthg+ftag ≥ 3``。
-``closing_odds`` 取 ``matches`` 的 Pinnacle 收盘列（H/D/A → ``psc_home/psc_draw/
-psc_away``；O2.5 → ``over25_psc``），缺失则 ``NULL``；``clv = odds_taken/closing
-− 1``，收盘缺失或非正 → ``NULL``（NULL 安全：中位数只吃非 NULL 者）。
+``closing_odds`` 走**基准链**——Pinnacle 收盘列（H/D/A → ``psc_home/psc_draw/
+psc_away``；O2.5 → ``over25_psc``）优先，缺失 fallback Betfair 交易所收盘
+（``bfe_*``，football-data 自 2025-12 断供 Pinnacle，2026-09-04 裁定）；实际
+所用基准记 ``closing_source``（'pinnacle'/'betfair'，双缺 → 两列皆 ``NULL``）。
+``clv = odds_taken/closing − 1``，收盘缺失 → ``NULL``（NULL 安全：中位数只吃
+非 NULL 者）。事后基准才落库的已结算注由 :func:`backfill_clv` 只填 NULL 地补。
 
 时间：``placed_at`` / ``settled_at`` 都经 :func:`_now`（唯一注入缝，测试
 monkeypatch 它）。本模块**不触网**；``matches`` / ``backtest_predictions`` 只读
@@ -51,9 +54,28 @@ STATUS_FINISHED = "finished"        # fixtures.status：配对并结算完的场
 MAX_MATCH_DAY_GAP = 2               # fixture↔match 配对窗上界（brief：相差 ≤2 天）；
                                     # 下界 0——不认 kickoff **之前**的同配对完赛（T7 审查）
 
-# 各市场 → matches 的收盘列（CLV 基准，spec §7.3「Pinnacle 收盘价」）
-_CLOSING_COLUMN = {"H": "psc_home", "D": "psc_draw", "A": "psc_away",
-                   "O2.5": "over25_psc"}
+# 各市场 → matches 的收盘列（CLV 基准，spec §7.3）。基准链：Pinnacle 收盘
+# （psc_*，与 A 线回测同源）优先；football-data 自 2025-12 起断供 Pinnacle，
+# 缺失时 fallback Betfair 交易所收盘（bfe_*，2026-09-04 负责人裁定）。
+# bets.closing_source 记账实际用了哪个（'pinnacle'/'betfair'）——两基准混合的
+# CLV 序列才可解释（§12.3 结论分账的证据链要求）。
+_PINNACLE_CLOSING = {"H": "psc_home", "D": "psc_draw", "A": "psc_away",
+                     "O2.5": "over25_psc"}
+_BFE_CLOSING = {"H": "bfe_home", "D": "bfe_draw", "A": "bfe_away",
+                "O2.5": "over25_bfe"}
+CLOSING_SOURCE_PINNACLE = "pinnacle"
+CLOSING_SOURCE_BETFAIR = "betfair"
+
+
+def _closing(match: sqlite3.Row, market: str) -> tuple[float | None, str | None]:
+    """ ``(收盘价, 基准来源)``：psc 优先、缺失 fallback bfe；双基准皆缺 →
+    ``(None, None)``（closing_source 同为 NULL，绝不猜基准）。"""
+    for columns, source in ((_PINNACLE_CLOSING, CLOSING_SOURCE_PINNACLE),
+                            (_BFE_CLOSING, CLOSING_SOURCE_BETFAIR)):
+        value = match[columns[market]]
+        if value is not None and value > 0:
+            return value, source
+    return None, None
 
 # 待落注推荐：该 run 指定轨，且 (fixture_id, market, strategy, mode=paper)
 # 级未下过（bets join recommendations——pm 窗对同场同市场不重下，UNIQUE 含 phase）。
@@ -190,15 +212,15 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
             track = tracks.setdefault(                  # 未知轨也不丢账（防御）
                 bet["strategy"], {"settled": 0, "won": 0, "pnl": 0.0, "clvs": []})
             is_won = _is_won(bet["market"], match["fthg"], match["ftag"])
-            closing = match[_CLOSING_COLUMN[bet["market"]]]
+            closing, source = _closing(match, bet["market"])
             clv = (bet["odds_taken"] / closing - 1
-                   if closing is not None and closing > 0 else None)
+                   if closing is not None else None)
             return_amt = _money(bet["stake"] * bet["odds_taken"]) if is_won else 0.0
             conn.execute(
                 "UPDATE bets SET status=?, settled_at=?, return_amt=?,"
-                " closing_odds=?, clv=? WHERE id=?",
+                " closing_odds=?, closing_source=?, clv=? WHERE id=?",
                 ("won" if is_won else "lost", settled_at, return_amt,
-                 closing, clv, bet["bet_id"]),
+                 closing, source, clv, bet["bet_id"]),
             )
             settled += 1
             won += 1 if is_won else 0
@@ -228,6 +250,49 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
     return {"by_strategy": by_strategy,
             "settled": settled, "won": won, "pnl": _money(pnl),
             "clv_median": statistics.median(clvs) if clvs else None}
+
+
+def backfill_clv(conn: sqlite3.Connection) -> dict:
+    """补齐已结算 paper 注缺失的收盘基准，返回 ``{"filled": n}``。
+
+    场景：结算时双基准皆缺（Pinnacle 断供初期、BFE 尚未回填），事后基准落库
+    （``fa data backfill-bfe``）——这里按结算同款配对与基准链补
+    ``closing_odds`` / ``closing_source`` / ``clv``。**只填 ``closing_odds IS
+    NULL`` 的 won/lost 注**：已有基准的注不碰（哪怕新基准更优——CLV 序列不能
+    事后换基准），pending 注不碰（正常结算自会带 fallback），状态与损益永不改。
+    """
+    pending = conn.execute(
+        "SELECT b.id AS bet_id, b.odds_taken, r.market, r.fixture_id,"
+        " f.league, f.home_team_id, f.away_team_id, f.kickoff_utc"
+        " FROM bets b"
+        " JOIN recommendations r ON r.id = b.recommendation_id"
+        " JOIN fixtures f ON f.id = r.fixture_id"
+        " WHERE b.mode=? AND b.status IN (?, ?) AND b.closing_odds IS NULL"
+        " ORDER BY b.id", (MODE, *SETTLED_STATUSES)).fetchall()
+    by_fixture: dict[int, list[sqlite3.Row]] = {}
+    for row in pending:
+        by_fixture.setdefault(row["fixture_id"], []).append(row)
+
+    filled = 0
+    for fixture_id in sorted(by_fixture):           # 稳定序：fixture id（同结算）
+        group = by_fixture[fixture_id]
+        head = group[0]
+        match = _paired_match(conn, head["league"], head["home_team_id"],
+                              head["away_team_id"], _kickoff_date(head["kickoff_utc"]))
+        if match is None:
+            continue
+        for bet in group:
+            closing, source = _closing(match, bet["market"])
+            if closing is None:
+                continue
+            conn.execute(
+                "UPDATE bets SET closing_odds=?, closing_source=?, clv=?"
+                " WHERE id=? AND closing_odds IS NULL",
+                (closing, source, bet["odds_taken"] / closing - 1,
+                 bet["bet_id"]))
+            filled += 1
+    conn.commit()
+    return {"filled": filled}
 
 
 def paper_summary(conn: sqlite3.Connection) -> dict[str, dict]:
