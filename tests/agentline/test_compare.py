@@ -322,6 +322,24 @@ def test_debate_gain_no_critic_rows_yields_rho_none(conn_debate_nocritic):
     assert g["n"] == 1 and g["rho"] is None and g["n_rho"] == 0
 
 
+@pytest.fixture()
+def conn_debate_flat_revs(tmp_path):
+    """3 场可比但 v0==终版（revs 全 0 零方差）、severity 各异：Spearman
+    未定义 → nan。仿 retro/_mwu_p 口径必须如实记 None，不得让 nan 穿透
+    到报告渲染成 ρ=nan（n_rho 照报——有可比对但向量退化，完整披露）。"""
+    def seed(conn):
+        for mid, sev in ((1, 0.2), (2, 0.5), (3, 0.8)):
+            _deb_seed(conn, mid, 0.40, 0.40, sev)   # ph_v0 == ph_fin
+    yield from _conn_with(tmp_path, "debflat", seed)
+
+
+@pytest.mark.filterwarnings("ignore:An input array is constant")
+def test_debate_gain_flat_revisions_rho_is_none_not_nan(conn_debate_flat_revs):
+    g = debate_gain(conn_debate_flat_revs)
+    assert g["n"] == 3 and g["n_rho"] == 3
+    assert g["rho"] is None                          # nan 不得穿透
+
+
 def test_debate_gain_empty(conn_empty):
     assert debate_gain(conn_empty) == {"n": 0}
 

@@ -5,6 +5,7 @@ odds_*、outcome、total_goals 原样保留——evaluate 与 candidates 的入�
 schema 完全复用，评测代码零改动（市场是所有评估的对照线，spec §8.2）。
 """
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -93,7 +94,8 @@ def debate_gain(conn, leagues=None, seasons=None) -> dict:
     v0 取 rounds 表 round=0 的 generator ok 行 payload；终版取 predictions
     的 A_debate ok 行。rho = 每场最大攻击 severity 与修订幅度（三项 L1）的
     Spearman 相关（n<3 或无可比对 → None）——高攻击低修订=固执、低攻击高
-    修订=无主见，两向都如实报。
+    修订=无主见，两向都如实报。零方差（如整批提前终止 → revs 全 0）时
+    Spearman 未定义返回 nan，如实记 None，不渲染 ρ=nan（仿 retro._mwu_p）。
     """
     from fa.backtest.metrics import fetch_predictions
     bp = fetch_predictions(conn, leagues, seasons)
@@ -132,7 +134,11 @@ def debate_gain(conn, leagues=None, seasons=None) -> dict:
     rho = None
     if len(sevs) >= 3:
         from scipy.stats import spearmanr
-        rho = float(spearmanr(sevs, revs).statistic)
+        rho_raw = float(spearmanr(sevs, revs).statistic)
+        # 全平手/单侧零方差（如整批提前终止 → revs 全 0）时 Spearman 未定义
+        # 返回 nan——仿 retro._mwu_p 口径如实记 None，不让 nan 漏进报告渲染
+        # 成 ρ=nan；n_rho 照报（ρ=—（n=5）= 有可比对但向量退化，完整披露）。
+        rho = None if math.isnan(rho_raw) else rho_raw
     return {"n": n, "v0_ll": e_v0["model_ll"], "final_ll": e_final["model_ll"],
             "rho": rho, "n_rho": len(sevs)}
 
