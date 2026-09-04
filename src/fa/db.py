@@ -362,10 +362,14 @@ def init_db(path: Path | None = None) -> None:
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
     elif row["version"] < SCHEMA_VERSION:
-        if row["version"] < 8:
-            bak = p.with_name(p.name + ".bak-v8")
-            if not bak.exists():
-                shutil.copy2(p, bak)   # 表重建类迁移的保守护栏（设计档 §14）
+        # 表重建类迁移的保守护栏（设计档 §14）：v8 重建 recommendations、v9 重建
+        # agentline_predictions，各在升级前落一份 .bak-vN 快照（同名不覆盖，
+        # 二次 init 幂等）；老库跨多个重建版本就多备几份，代价可忽略。
+        for guard in (8, 9):
+            if row["version"] < guard:
+                bak = p.with_name(p.name + f".bak-v{guard}")
+                if not bak.exists():
+                    shutil.copy2(p, bak)
         _migrate_up(conn, row["version"])
     elif row["version"] > SCHEMA_VERSION:
         raise RuntimeError(

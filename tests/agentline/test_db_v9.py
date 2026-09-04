@@ -1,7 +1,7 @@
 """schema v9（2026-09-05 设计 §2.4/§5）：五词表 + budget_exhausted，v8→v9 影子重建。"""
 import sqlite3
 
-from fa.db import SCHEMA_VERSION, _AL_TABLE, connect, init_db
+from fa.db import SCHEMA_VERSION, connect, init_db
 
 
 def _cols(conn, table):
@@ -82,6 +82,9 @@ def test_v9_shadow_recovery(tmp_path):
                         " WHERE status='ok'").fetchone()["c"] == 2
     assert conn.execute("SELECT 1 FROM sqlite_master WHERE name="
                         "'agentline_predictions_v8'").fetchone() is None
+    # 命名索引接回（v7 先例同款）：影子占住的 idx_alp_line 已摘、随新表重建
+    assert "idx_alp_line" in {r["name"] for r in conn.execute(
+        "PRAGMA index_list(agentline_predictions)")}
     conn.close()
 
 
@@ -146,3 +149,23 @@ def test_fresh_and_migrated_have_debate_rounds(tmp_path):
         r["name"] for r in conn2.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
     conn2.close()
+
+
+def test_migrate_v8_backup_created(tmp_path):
+    """v9 重建类迁移同享 .bak 保守护栏（v8 先例同款）：升级前快照落 .bak-v9、
+    备份内容确为迁移前状态、二次 init 幂等不重复备份/迁移。"""
+    db = _old_shape_db(tmp_path / "t.db")     # v8 形状 + 2 行存量
+    init_db(db)                               # v8 -> v9 重建
+    init_db(db)                               # 二次 init：版本已到位，不再备份
+    bak_path = tmp_path / "t.db.bak-v9"
+    assert bak_path.exists()
+    # 裸 sqlite3 读备份（勿经 connect 的 WAL pragma 触碰备份文件）
+    bak = sqlite3.connect(bak_path)
+    assert bak.execute("SELECT version FROM schema_version").fetchone()[0] == 8
+    bak.close()
+    conn = connect(db)
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[
+        "version"] == SCHEMA_VERSION
+    assert conn.execute("SELECT COUNT(*) c FROM agentline_predictions"
+                        ).fetchone()["c"] == 2
+    conn.close()

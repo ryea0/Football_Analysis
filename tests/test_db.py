@@ -24,8 +24,10 @@ def conn(tmp_path):
 
 # B 线五表（schema v3）：表边界见 spec §12.1——B 线独占，绝不写 backtest_predictions
 _BLINE_TABLES = ("fixtures", "odds_snapshots", "recommendations", "bets", "runs")
-# 范式对比线两表（schema v5；v4 为 retro 线）：线 A 专属，物理隔离分账（spec §12.5）
-_AGENTLINE_TABLES = ("agentline_predictions", "agentline_runs")
+# 范式对比线表（spec §12.5）：v5 两表（agentline_predictions / agentline_runs）
+# + v9 辩论逐轮审计表（agentline_debate_rounds）——线 A 专属，物理隔离分账
+_AGENTLINE_TABLES = ("agentline_predictions", "agentline_runs",
+                     "agentline_debate_rounds")
 
 
 def _table_cols(c, table: str) -> dict:
