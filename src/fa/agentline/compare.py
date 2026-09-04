@@ -1,4 +1,5 @@
-"""五对照评测（设计 §8）：线 P / A_base / A_enh / A_multi / 市场，同一判据。
+"""六对照评测（设计 §8 + 2026-09-05 设计 §2.5）：线 P / A_base / A_enh /
+A_multi / A_debate / 市场收盘，同批同判据。
 
 行适配原则：agentline 的 p_* 覆盖 bp 行拷贝，mkt_*（Pinnacle 收盘去水）、
 odds_*、outcome、total_goals 原样保留——evaluate 与 candidates 的入参

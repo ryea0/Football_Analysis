@@ -633,14 +633,19 @@ def test_main_callback_runs_init_db(monkeypatch):
 
 def test_agentline_run_debate_dispatch(tmp_path, monkeypatch):
     db = _use_tmp_db(tmp_path, monkeypatch)
-    called = {}
     import fa.agentline.orchestrate as orch
-    monkeypatch.setattr(orch, "run_debate",
-                        lambda conn, d, limit=None: {"ok": 1, "parse_fail": 0,
-                                                     "timeout": 0, "error": 0})
-    result = runner.invoke(app, ["agentline", "run", "--line", "A_debate"])
+    seen = {}
+
+    def fake_run_debate(conn, d, limit=None):
+        seen["limit"] = limit
+        return {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+
+    monkeypatch.setattr(orch, "run_debate", fake_run_debate)
+    result = runner.invoke(app, ["agentline", "run", "--line", "A_debate",
+                                 "--limit", "5"])
     assert result.exit_code == 0
     assert "ok" in result.output
+    assert seen["limit"] == 5               # --limit 透传 run_debate
 
 
 def test_agentline_run_rejects_unknown_line(tmp_path, monkeypatch):

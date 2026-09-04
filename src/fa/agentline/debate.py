@@ -56,7 +56,6 @@ def max_abs_delta(a: dict, b: dict) -> float:
 
 _MAX_ROUNDS = 2
 _EPS = 0.02
-_PROB_KEYS = ("p_home", "p_draw", "p_away")
 
 
 def _status_of(parsed: dict, run_err: str | None) -> dict:
