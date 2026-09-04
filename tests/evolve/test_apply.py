@@ -103,6 +103,49 @@ def test_gate_closed_requires_all_leagues_terminal(conn):
     assert A.gate_closed(conn, 1)
 
 
+def test_merge_rejects_live_drift_since_stage(conn, tmp_root, kbfile):
+    """漂移护栏：反思后活文件被动过（TTL 修剪/人工改动）→ 拒合并且零副作用。"""
+    wid = _mk_window(conn, 1)
+    _mk_run(conn, wid, "E0", path="evolution/proposals/w1/E0.json")
+    A.stage_proposal(1, "E0", CONTRACT, {"league": "E0"})
+    live = K.kb_path("E0")
+    live.write_text(live.read_text(encoding="utf-8").replace(
+        "盘口惯性低估前 6 轮", "盘口惯性低估前 6 轮（人工改动）"),
+        encoding="utf-8")
+    with pytest.raises(EvolutionError):
+        A.merge_proposal(conn, wid, "E0", note="裁定通过")
+    # 护栏在写活文件前触发：人工改动未被覆盖、无任何 Ruling 行
+    assert "（人工改动）" in live.read_text(encoding="utf-8")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM evolution_rulings").fetchone()[0] == 0
+
+
+def test_merge_ignores_header_only_staged_drift(conn, tmp_root, kbfile):
+    """暂存 proposed.md 头部（generated= 日期是机械字段）与 merge 日不同不算
+    漂移——人审关卡天然跨日，护栏只比解析后的条目内容。"""
+    wid = _mk_window(conn, 1)
+    _mk_run(conn, wid, "E0", path="evolution/proposals/w1/E0.json")
+    A.stage_proposal(1, "E0", CONTRACT, {"league": "E0"})
+    staged = tmp_root / "evolution" / "proposals" / "w1" / "E0.proposed.md"
+    lines = staged.read_text(encoding="utf-8").splitlines(keepends=True)
+    lines[0] = "<!-- kb: league=E0 generated=2020-01-01 hash=ab12 -->\n"
+    staged.write_text("".join(lines), encoding="utf-8")
+    msg = A.merge_proposal(conn, wid, "E0", note="裁定通过")
+    assert "w1" in msg and "新教训" in K.kb_path("E0").read_text()
+
+
+def test_record_ruling_rejects_merged_and_blank_note(conn):
+    """record_ruling 只收 rejected/shelved（merged 归 merge_proposal）且 note 强制非空。"""
+    wid = _mk_window(conn, 1)
+    rid = _mk_run(conn, wid, "E0")
+    with pytest.raises(EvolutionError):
+        A.record_ruling(conn, rid, "merged", note="merged 只走 merge_proposal")
+    with pytest.raises(EvolutionError):
+        A.record_ruling(conn, rid, "rejected", note="   ")
+    assert conn.execute(
+        "SELECT COUNT(*) FROM evolution_rulings").fetchone()[0] == 0
+
+
 def _mk_window(conn, idx):
     cur = conn.execute("INSERT INTO evolution_windows (idx, opened_at, closes_at)"
                        " VALUES (?, '2026-09-04', '2026-10-16')", (idx,))

@@ -1,4 +1,4 @@
-"""C 线编排：tick（修剪→反思→报告）、手动反思/校准、人审视图与状态。
+"""C 线编排：tick（反思→报告，TTL 修剪随反思事件）、手动反思/校准、人审视图与状态。
 
 ``_today`` 是唯一时间缝（默认北京时间今天，测试注入）——tick 的全部窗口
 判定经它走（诚实条款：断言不依赖真实时钟）。
@@ -53,12 +53,14 @@ def _reflect_window(conn, w: W.Window, leagues: list[str],
 
 
 def run_tick(conn: sqlite3.Connection, today: date | None = None) -> str:
-    """周检：TTL 修剪 → 升序反思到期未反思窗口（前窗关卡未关则顺延）。"""
+    """周检：升序反思到期未反思窗口（前窗关卡未关则顺延）。
+
+    TTL 修剪只在真正反思的进化事件执行（设计档 §4/R7）——关卡开着还周周
+    修剪活文件，正是 merge 漂移护栏要拦的人为漂移源；顺延/无到期窗则不动。
+    """
     d = today or _today()
-    pruned = K.prune_live_files(d)
-    lines = [f"tick @ {d.isoformat()}：TTL 修剪 "
-             + ("；".join(f"{lg}×{len(a)}" for lg, a in pruned) if pruned
-                else "无")]
+    pruned: list[tuple[str, list[str]]] = []
+    lines: list[str] = []
     for w in W.due_windows(d):
         row = conn.execute("SELECT id, reflected_at FROM evolution_windows"
                            " WHERE idx=?", (w.idx,)).fetchone()
@@ -67,6 +69,7 @@ def run_tick(conn: sqlite3.Connection, today: date | None = None) -> str:
         if w.idx > 1 and not A.gate_closed(conn, w.idx - 1):
             lines.append(f"w{w.idx - 1} 关卡未关，w{w.idx} 顺延（下次 tick 再查）")
             break
+        pruned = K.prune_live_files(d)
         outs = _reflect_window(conn, w, list(config.PERSONA_FILES))
         wid = conn.execute("SELECT id FROM evolution_windows WHERE idx=?",
                            (w.idx,)).fetchone()["id"]
@@ -76,6 +79,9 @@ def run_tick(conn: sqlite3.Connection, today: date | None = None) -> str:
         REP.write_event_report(conn, wid, pruned=pruned, today=d)
         lines.append(f"w{w.idx} 反思完成：" + "，".join(
             f"{o['league']}={o['status']}" for o in outs))
+    lines.insert(0, f"tick @ {d.isoformat()}：TTL 修剪 "
+                 + ("；".join(f"{lg}×{len(a)}" for lg, a in pruned) if pruned
+                    else "无"))
     if len(lines) == 1:
         lines.append("无到期窗口")
     return "\n".join(lines)

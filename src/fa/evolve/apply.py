@@ -106,13 +106,14 @@ def record_ruling(conn: sqlite3.Connection, run_id: int, ruling: str,
     if not note.strip():
         raise EvolutionError("裁定必须留理由（note 强制非空）")
     _require_unruled(conn, run_id)
-    conn.execute(
-        "INSERT INTO evolution_rulings (run_id, ruling, kb_hash_after, note,"
-        " decided_at) VALUES (?, ?, NULL, ?, ?)", (run_id, ruling, note, _now_iso()))
     wid = conn.execute("SELECT window_id FROM evolution_runs WHERE id=?",
                        (run_id,)).fetchone()["window_id"]
-    close_window_if_terminal(conn, wid)
-    conn.commit()
+    with conn:                                        # 单事务：Ruling + 关窗刷新
+        conn.execute(
+            "INSERT INTO evolution_rulings (run_id, ruling, kb_hash_after, note,"
+            " decided_at) VALUES (?, ?, NULL, ?, ?)",
+            (run_id, ruling, note, _now_iso()))
+        close_window_if_terminal(conn, wid)
 
 
 def merge_proposal(conn: sqlite3.Connection, window_id: int, league: str,
@@ -133,6 +134,18 @@ def merge_proposal(conn: sqlite3.Connection, window_id: int, league: str,
                            generated=_now_iso()[:10],
                            digest=K._text_digest(old_text))
     live.parent.mkdir(parents=True, exist_ok=True)
+    # 漂移护栏（先比后写）：暂存 .proposed.md 是人审 `fa evolve review` 看到的
+    # 唯一内容——活文件在反思后被动过（TTL 修剪/人工改动）则现渲染必偏离暂存，
+    # 拒绝合并。按解析后条目比对而非裸文本：头部 generated= 日期是机械字段，
+    # 人审关卡天然跨日（tick 反思日暂存、人隔日合并），裸文本比对会误伤。
+    staged = ((config.project_root() / run["proposal_path"]).parent
+              / f"{league}.proposed.md")
+    if staged.is_file():
+        staged_kb = K.parse_kb(staged.read_text(encoding="utf-8"), league)
+        if staged_kb.entries != K.parse_kb(new_text, league).entries:
+            raise EvolutionError(
+                f"{league} 活文件在反思后已变更——TTL 修剪或人工改动；"
+                "请核查后重新走关卡")
     live.write_text(new_text, encoding="utf-8")       # 先写文件
     hash_after = K.personas_tree_hash(config.project_root() / "personas")
     with conn:                                        # 后原子落账（单事务）
