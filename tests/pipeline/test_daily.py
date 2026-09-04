@@ -149,6 +149,7 @@ def test_settled_bets_push_brief_and_record_daily_run(env):
 
 def test_no_settlement_stays_silent(env):
     """无可结注：静默（不推送、不造噪音），run 照常收尾。"""
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
     out = daily.run_daily(env.conn)
 
     assert out["status"] == "ok" and out["sent"] is None
@@ -163,6 +164,7 @@ def test_pending_but_unplayable_also_stays_silent(env):
     h, a = _seed_team(c, "Chelsea"), _seed_team(c, "Arsenal")
     _seed_pending_bet(c, _seed_fixture(c, h, a), _seed_run(c))
     c.commit()
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
     assert out["settled"] == 0 and env.pushed == []
@@ -195,6 +197,7 @@ def test_partial_sync_success_is_not_degraded(env):
     _seed_settleable(c)
     env.sync_report = SyncReport(files_ok=168, inserted=59000,
                                  file_errors=[("F1", 1997, "空文件")])
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
 
@@ -238,6 +241,7 @@ def test_push_failure_is_recorded_but_does_not_break_daily(env):
     c = env.conn
     _seed_settleable(c)
     env.ok, env.error = False, "exit 1: send failed"
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
 
@@ -253,6 +257,7 @@ def test_daily_run_still_recorded_when_settlement_raises(env, monkeypatch):
         raise ValueError("台账炸了")
 
     monkeypatch.setattr(daily, "settle_paper_bets", boom)
+    monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
     with pytest.raises(ValueError):
         daily.run_daily(env.conn)
     row = env.conn.execute(
@@ -280,6 +285,7 @@ def test_cli_daily_reports_settlement(tmp_path, monkeypatch):
             daily, "sync_history",
             lambda conn, **kw: SyncReport(files_ok=5, inserted=7))
         monkeypatch.setattr(daily, "send", lambda text: True)
+        monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
         result = CliRunner().invoke(app, ["run", "daily"])
         assert result.exit_code == 0, result.output
         assert "结算 1 注" in result.output
@@ -299,6 +305,7 @@ def test_cli_daily_silent_when_nothing_settled(tmp_path, monkeypatch):
     monkeypatch.setattr(daily, "sync_history", lambda conn, **kw: SyncReport())
     monkeypatch.setattr(daily, "send",
                         lambda text: (_ for _ in ()).throw(AssertionError("不应推送")))
+    monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
     result = CliRunner().invoke(app, ["run", "daily"])
     assert result.exit_code == 0, result.output
     assert "结算 0 注" in result.output

@@ -15,7 +15,8 @@
 **表边界（§12.1）**：``fa.data.sync_history`` 写 ``matches`` 是 A 线表的共享维护
 步（本模块是 B 线唯一触达 ``matches`` 的入口，且是复用 A 线既有函数、非 B 线自写）；
 B 线实时侧（fixtures / value / paper / matchday）依旧不碰它。其余写入与 paper
- Provider 一致：``bets`` / ``fixtures.status`` / ``meta``，另写 runs（审计）。
+ Provider 一致：``bets`` / ``fixtures.status`` / ``meta``，另写 runs（审计）；
+复盘步（Stage 2）经 ``fa.retro.pipeline`` 写 ``retro_runs`` / ``retro_attributions``。
 """
 
 from __future__ import annotations

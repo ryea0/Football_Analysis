@@ -60,6 +60,65 @@ def test_run_manual_batch(db, tmp_path, monkeypatch):
     conn.close()
 
 
+def test_run_paper_t1_batch(db, tmp_path, monkeypatch):
+    """paper_t1 全链路（Stage 2）：昨日推荐链（test_select._seed_t1，比赛日
+    2024-04-20）→ 选场 → fake headless → 落库。台账 selector='paper_t1' 且
+    params_json 含选场计数 n_fixtures；归因行 selector 同步落 paper_t1。"""
+    from fa.retro import pipeline
+    from tests.retro.test_select import _seed_t1
+    conn = connect(db)
+    _seed_t1(conn)                      # db fixture 已跑 _seed（teams/三场预测）
+    conn.close()
+
+    def fake_headless(prompt):
+        return {"ok": True, "output": json.dumps({
+            "miss_tags": ["injury"], "primary_tag": "injury",
+            "tags_confidence": 0.8, "model_vs_market": "model_wrong",
+            "evidence": [{"title": "赛前伤停名单", "date": "2024-04-19",
+                          "url": "https://e.com/1"}],
+            "digest": "伤停致模型高估主胜。"}, ensure_ascii=False),
+            "error": None, "duration_s": 0.4}
+
+    monkeypatch.setattr(pipeline, "run_headless", fake_headless)
+    r = runner.invoke(
+        app, ["retro", "run", "--selector", "paper_t1",
+              "--date", "2024-04-20", "--out-root", str(tmp_path / "p")])
+    assert r.exit_code == 0, r.output
+    assert "批 #" in r.output and "paper_t1" in r.output
+    conn = connect(db)
+    try:
+        run = conn.execute(
+            "SELECT selector, params_json, n_selected, n_ok"
+            " FROM retro_runs").fetchone()
+        assert run["selector"] == "paper_t1"
+        params = json.loads(run["params_json"])
+        assert params["date"] == "2024-04-20" and params["n_fixtures"] == 1
+        assert run["n_selected"] == 1 and run["n_ok"] == 1
+        attr = conn.execute(
+            "SELECT selector, match_id, status FROM retro_attributions"
+        ).fetchone()
+        assert attr["selector"] == "paper_t1" and attr["status"] == "ok"
+        assert attr["match_id"] == 1
+    finally:
+        conn.close()
+
+
+def test_run_paper_t1_empty_hint_reports_select_counts(db, monkeypatch):
+    """空场提示对 paper_t1 不得指向「先跑 fa backtest run」（误导）——
+    分支化为该日推荐链诊断，并把选场计数带给读者。"""
+    from fa.retro import pipeline
+
+    def must_not_call(prompt):
+        raise AssertionError("空场不得触达 run_headless")
+
+    monkeypatch.setattr(pipeline, "run_headless", must_not_call)
+    r = runner.invoke(app, ["retro", "run", "--selector", "paper_t1",
+                            "--date", "2024-04-19"])
+    assert r.exit_code == 1
+    assert "无推荐" in r.output and "n_fixtures" in r.output
+    assert "backtest run" not in r.output
+
+
 def test_run_manual_requires_a_filter(db, tmp_path, monkeypatch):
     """零过滤护栏（额度纪律）：manual 三参全空 = 全库逐场真调 LLM，
     必须在选场前拒绝，exit 1 + 明示原因（实测 11.8s/场 × 59k 场）。"""
@@ -453,3 +512,27 @@ class TestAnalyze:
         """全平手（两组值全同）且两侧 n≥8（asymptotic）→ 双侧 p=nan，
         如实记 None——不让 nan 漏进渲染成 p=nan。"""
         assert _mwu([1.0] * 8, [1.0] * 8) is None
+
+    def test_full_db_cross_batch_duplicate_disclosed(self, db):
+        """全库模式（不给 --batch-id）代表行按 (batch_id, match_id) 取——
+        同一场跨两个批各一行 → n_rows=2、n_duplicate_matches=1（诚实披露，
+        不去重：MWU 单元独立性被污染须可见）；限批读数应为 0。"""
+        conn = connect(db)
+        # batch_id 外键→retro_runs（connect 开 PRAGMA foreign_keys=ON），补父行 id=2
+        conn.execute(
+            "INSERT INTO retro_runs (id, selector, params_json, n_selected,"
+            " n_ok, n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+            " VALUES (2, 'manual', '{}', 0, 0, 0, 0, 0, 0.0, 'now')")
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE, batch_id=1)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE, batch_id=2)
+        try:
+            res = stratified_analysis(conn)
+            one = stratified_analysis(conn, batch_id=1)
+        finally:
+            conn.close()
+        assert res["n_rows"] == 2
+        assert res["n_duplicate_matches"] == 1
+        assert one["n_rows"] == 1 and one["n_duplicate_matches"] == 0
+        result = runner.invoke(app, ["retro", "analyze"])
+        assert result.exit_code == 0, result.output
+        assert "重复场次 1" in result.output

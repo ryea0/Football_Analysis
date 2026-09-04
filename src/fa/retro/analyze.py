@@ -153,6 +153,10 @@ def stratified_analysis(conn: sqlite3.Connection, batch_id=None,
     miss_tags_json 为 NULL 的 ok 行不入分层（与 audit_batch 同一过滤——无
     标签集无从分层，宁缺毋崩）。现状（v1 不改行为）：k≥2 ensemble 批若无
     有效聚合行，成员 2..N 行被静默丢弃（attributor=1 兜底只覆盖首个成员行）。
+    跨批重复（v1 不去重，如实披露）：全库模式（batch_id=None）代表行按
+    (batch_id, match_id) 取，同一场跨多个批会多行入 rows——MWU 单元独立性
+    与各层 n 被污染；n_duplicate_matches 记该重复数（= n_rows − 去重后场数），
+    读关卡判决请用 --batch-id 限定批（method 串同此说明）。
     诚实条款：不因「想让某层显著」而调整口径；点估计+样本量为主读数，
     p 值仅参考（v1 小样本不装精确）。
     """
@@ -179,8 +183,8 @@ def stratified_analysis(conn: sqlite3.Connection, batch_id=None,
         if p is None:
             n_no_pred += 1
             continue
-        rows.append({"tags": tags, "div": _divergence(p),
-                     "is_control": r["is_control"]})
+        rows.append({"match_id": r["match_id"], "tags": tags,
+                     "div": _divergence(p), "is_control": r["is_control"]})
     per_tag = {}
     for t in TAGS:
         layer = [r for r in rows if t in r["tags"]]
@@ -195,14 +199,20 @@ def stratified_analysis(conn: sqlite3.Connection, batch_id=None,
             "p_value": _mwu([r["div"] for r in layer],
                             [r["div"] for r in rest]),
         }
-    return {"n_rows": len(rows), "n_excluded": n_excluded,
+    return {"n_rows": len(rows),
+            "n_duplicate_matches": len(rows) - len({r["match_id"]
+                                                    for r in rows}),
+            "n_excluded": n_excluded,
             "n_no_prediction": n_no_pred, "per_tag": per_tag,
             "method": "Mann-Whitney U 双侧；单元=单场 log-loss 差；"
-                      "任一侧 n<8 用 exact；p 值仅参考（点估计+样本量为主）"}
+                      "任一侧 n<8 用 exact；p 值仅参考（点估计+样本量为主）；"
+                      "全库模式同场跨批未去重——读关卡判决请用 --batch-id 限定批"}
 
 
 def render_analysis_report(res: dict) -> str:
-    lines = [f"标签分层效度检验（n={res['n_rows']}，剔除违规 {res['n_excluded']}"
+    lines = [f"标签分层效度检验（n={res['n_rows']}，"
+             f"重复场次 {res['n_duplicate_matches']}"
+             f"，剔除违规 {res['n_excluded']}"
              f"，缺预测 {res['n_no_prediction']}）——{res['method']}"]
     for t, e in res["per_tag"].items():
         if e["n"] == 0:
@@ -210,7 +220,8 @@ def render_analysis_report(res: dict) -> str:
         m = f"{e['mean_div']:+.4f}" if e["mean_div"] is not None else "—"
         mr = (f"{e['mean_div_rest']:+.4f}"
               if e["mean_div_rest"] is not None else "—")
-        pv = f"{e['p_value']:.3f}" if e["p_value"] is not None else "n/a"
+        # .3g：极小 p（如 1.8e-4 以下）不落成 0.000 被误读为恰零
+        pv = f"{e['p_value']:.3g}" if e["p_value"] is not None else "n/a"
         lines.append(f"  {t:16s} n={e['n']:3d}（病例 {e['n_case']}/"
                      f"对照 {e['n_control']}）mean_div={m} vs 无标层 {mr}"
                      f"（n={e['n_rest']}）p={pv}")

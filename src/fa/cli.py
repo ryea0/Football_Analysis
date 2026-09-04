@@ -674,6 +674,7 @@ def retro_run(
                                  select_paper_t1)
     conn = connect()
     try:
+        t1_counts: dict | None = None    # paper_t1 选场计数（空场提示带给读者）
         if selector == "divergence":
             cands = select_divergence(
                 conn, date_from=date_from or None, date_to=date_to or None,
@@ -696,6 +697,7 @@ def retro_run(
             day = tdate or (_d.today() - _td(days=1)).isoformat()
             cands, t1meta = select_paper_t1(conn, day)
             params = {"date": day, **t1meta, "attributors": attributors}
+            t1_counts = t1meta
         else:
             typer.echo(f"--selector 须为 divergence|manual|paper_t1"
                        f"（agentline_aligned 属 S3），收到 {selector!r}")
@@ -706,7 +708,16 @@ def retro_run(
         if limit is not None:
             cands = cands[:limit]
         if not cands:
-            typer.echo("选场为空——检查过滤条件（或先跑 fa backtest run）")
+            if selector == "paper_t1":
+                # 空场对 paper_t1 常态（非比赛日/推荐链断链），与「忘了先跑
+                # backtest」不同源——提示指向当日推荐链诊断并附选场计数
+                typer.echo(
+                    f"选场为空——昨日（或 --date）无推荐场次/未配对完赛/"
+                    f"缺预测行（n_fixtures={t1_counts['n_fixtures']}"
+                    f" n_unpaired={t1_counts['n_unpaired']}"
+                    f" n_no_prediction={t1_counts['n_no_prediction']}）")
+            else:
+                typer.echo("选场为空——检查过滤条件（或先跑 fa backtest run）")
             raise typer.Exit(code=1)
         root = Path(out_root) if out_root else project_root() / "data" / "retro" / "inputs"
         out = run_retro_batch(conn, cands, selector, params, root,
