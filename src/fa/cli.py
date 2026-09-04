@@ -643,6 +643,8 @@ def retro_run(
     limit: int = typer.Option(None, "--limit", help="截取前 N 场（控制 LLM 成本）"),
     out_root: str = typer.Option("", "--out-root",
                                  help="信息集留档根目录，空=data/retro/inputs"),
+    attributors: int = typer.Option(
+        1, "--attributors", help="独立归因者数（ensemble；1=现行单跑，≥2 产生投票聚合行）"),
 ) -> None:
     """归因批跑：选场→导出→hermes→契约→落库（单场失败不中断）"""
     from pathlib import Path
@@ -658,7 +660,8 @@ def retro_run(
                 leagues=[s for s in league.split(",") if s] or None,
                 top_k=top, control_k=control, seed=seed)
             params = {"top": top, "control": control, "seed": seed,
-                      "league": league, "from": date_from, "to": date_to}
+                      "league": league, "from": date_from, "to": date_to,
+                      "attributors": attributors}
         elif selector == "manual":
             if not (matches.strip() or league.strip() or season is not None):
                 typer.echo("--selector manual 须至少给 --matches / --league /"
@@ -666,10 +669,14 @@ def retro_run(
                 raise typer.Exit(code=1)
             cands = select_manual(conn, match_ids=_parse_int_list(matches),
                                   league=league or None, season=season)
-            params = {"matches": matches, "league": league, "season": season}
+            params = {"matches": matches, "league": league, "season": season,
+                      "attributors": attributors}
         else:
             typer.echo(f"--selector 须为 divergence|manual（S2/S3 再扩），"
                        f"收到 {selector!r}")
+            raise typer.Exit(code=1)
+        if attributors < 1:
+            typer.echo(f"--attributors 须 ≥1，收到 {attributors}")
             raise typer.Exit(code=1)
         if limit is not None:
             cands = cands[:limit]
@@ -677,7 +684,8 @@ def retro_run(
             typer.echo("选场为空——检查过滤条件（或先跑 fa backtest run）")
             raise typer.Exit(code=1)
         root = Path(out_root) if out_root else project_root() / "data" / "retro" / "inputs"
-        out = run_retro_batch(conn, cands, selector, params, root)
+        out = run_retro_batch(conn, cands, selector, params, root,
+                              attributors=attributors)
     finally:
         conn.close()
     typer.echo(f"批 #{out['batch_id']}（{selector}）：选 {out['n_selected']} 场，"
@@ -719,6 +727,29 @@ def retro_runs(limit: int = typer.Option(10, "--limit")) -> None:
                    f" ok={r['n_ok']} parse_fail={r['n_parse_fail']}"
                    f" timeout={r['n_timeout']} error={r['n_error']}"
                    f" {r['duration_s']:.1f}s {r['created_at']}")
+
+
+@retro_app.command("consistency")
+def retro_consistency(
+    batch_id: int = typer.Option(None, "--batch-id", help="空=全部批"),
+) -> None:
+    """成员一致性三档（关卡 2：全同/多数/无多数 + 成员失败计数）"""
+    from fa.retro.analyze import consistency_report
+    conn = connect()
+    try:
+        rep = consistency_report(conn, batch_id)
+    finally:
+        conn.close()
+    typer.echo(f"一致性（n={rep['n_matches']} 场）：全同 {rep['unanimous']}"
+               f"  多数 {rep['majority']}  无多数 {rep['none']}"
+               f"  一致率 {rep['agreement_rate']:.0%}（全同+多数）")
+    typer.echo(f"成员失败行：{rep['member_failures']}（成员级明细见"
+               " fa retro runs 台账与成员行 status）")
+    if rep["n_k1"] > 0:
+        typer.echo(f"  ⚠ 含 k=1 场 {rep['n_k1']}（每场仅 1 成员、恒计全同"
+                   "——读全同率前先看批 params 的 attributors）")
+    typer.echo("解读规则：全同率 <50% → 归因线维持「假设生成器」降格"
+               "（spec §5 预写）")
 
 # ---- B 线 run 命令（T9/T10）----
 

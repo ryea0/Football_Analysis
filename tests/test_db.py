@@ -626,7 +626,7 @@ def test_v3_migrates_to_current(tmp_path):
     conn.execute("DROP TABLE retro_attributions")
     conn.commit()
     conn.close()
-    init_db(db)                      # 触发 _migrate_up(3 -> 4)
+    init_db(db)                      # 触发 _migrate_up(3 -> 5)
     conn = connect(db)
     try:
         assert conn.execute(
@@ -655,3 +655,86 @@ def test_migrate_up_v3_adds_retro(tmp_path):
     assert c.execute(
         "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     c.close()
+
+
+# ---------------------------------------------------------------------------
+# schema v5：ensemble 成员归因（retro_attributions.attributor 列）
+# ---------------------------------------------------------------------------
+
+def test_v5_attributor_column_defaults_and_values(tmp_path):
+    """v5：attributor 列存在、DEFAULT 1、显式 0（聚合行）可写。"""
+    from fa.db import connect, init_db
+    db = tmp_path / "v5.db"
+    init_db(db)
+    conn = connect(db)
+    try:
+        info = conn.execute("PRAGMA table_info(retro_attributions)").fetchall()
+        col = [c for c in info if c["name"] == "attributor"]
+        assert col and col[0]["notnull"] == 1 and col[0]["dflt_value"] == "1"
+        conn.execute(
+            "INSERT INTO retro_runs (selector, params_json, n_selected, n_ok,"
+            " n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+            " VALUES ('manual', '{}', 1, 1, 0, 0, 0, 0.1, '2026-09-04T00:00:00Z')")
+        rid = conn.execute("SELECT id FROM retro_runs").fetchone()["id"]
+        # FK 开启（connect 内 PRAGMA foreign_keys=ON）：先备好父行，matches
+        # 的 home/away_team_id 引用才合法（落库后恰为 id 1、2）
+        conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+        conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Chelsea')")
+        conn.execute("INSERT INTO matches (id, league, season, date,"
+            " home_team_id, away_team_id, raw_line)"
+            " VALUES (1, 'E0', 2023, '2024-04-20', 1, 2, '{}')")
+        for v in (0, 1, 3):                      # 聚合 0 / 成员 1 / 成员 3
+            conn.execute(
+                "INSERT INTO retro_attributions (batch_id, match_id, league,"
+                " season, date, selector, status, harness, input_pack_path,"
+                " tag_set_version, created_at, attributor)"
+                " VALUES (?, 1, 'E0', 2023, '2024-04-20', 'manual', 'ok',"
+                " 'hermes', 'p.json', 'v1', '2026-09-04T00:00:00Z', ?)",
+                (rid, v))
+        conn.commit()
+        vals = sorted(r["attributor"] for r in conn.execute(
+            "SELECT attributor FROM retro_attributions"))
+        assert vals == [0, 1, 3]
+    finally:
+        conn.close()
+
+
+def test_v4_migrates_to_v5(tmp_path):
+    """v4 库（无 attributor 列）经 init_db ALTER 升 v5，存量行回填 1。"""
+    from fa.db import connect, init_db
+    db = tmp_path / "v4.db"
+    init_db(db)                                   # v5 新建
+    conn = connect(db)
+    conn.execute("ALTER TABLE retro_attributions DROP COLUMN attributor")
+    conn.execute("UPDATE schema_version SET version=4")
+    conn.execute(
+        "INSERT INTO retro_runs (selector, params_json, n_selected, n_ok,"
+        " n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+        " VALUES ('manual', '{}', 0, 0, 0, 0, 0, 0.0, '2026-09-04T00:00:00Z')")
+    # 放一条存量归因行（列已 DROP，只能按 v4 形状插）——验证 ALTER 的
+    # DEFAULT 1 真把它回填成单成员语义
+    conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Arsenal')")
+    conn.execute("INSERT INTO teams (league, name) VALUES ('E0','Chelsea')")
+    conn.execute("INSERT INTO matches (id, league, season, date,"
+        " home_team_id, away_team_id, raw_line)"
+        " VALUES (1, 'E0', 2023, '2024-04-20', 1, 2, '{}')")
+    conn.execute(
+        "INSERT INTO retro_attributions (batch_id, match_id, league,"
+        " season, date, selector, status, harness, input_pack_path,"
+        " tag_set_version, created_at)"
+        " VALUES (1, 1, 'E0', 2023, '2024-04-20', 'manual', 'ok',"
+        " 'hermes', 'p.json', 'v1', '2026-09-04T00:00:00Z')")
+    conn.commit()
+    conn.close()
+    init_db(db)                                   # v4 -> v5
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT version FROM schema_version"
+                            ).fetchone()["version"] == 5
+        cols = {c["name"] for c in conn.execute(
+            "PRAGMA table_info(retro_attributions)")}
+        assert "attributor" in cols
+        assert conn.execute("SELECT attributor FROM retro_attributions"
+                            ).fetchone()["attributor"] == 1
+    finally:
+        conn.close()

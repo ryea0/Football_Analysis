@@ -124,10 +124,11 @@ CREATE INDEX IF NOT EXISTS idx_bets_status ON bets (status);
 # A 线复盘归因子线两表（spec docs/superpowers/specs/2026-09-04-retro-attribution-design.md
 # §7）。物理隔离：retro 对 recommendations/bets 无任何代码通路。selector 词表含
 # S2/S3 的 paper_t1 / agentline_aligned——SQLite 无法后补 CHECK，趁表空一次到位。
-# is_control 是后补列（2026-09-04 终审）：纯加列 + DEFAULT 0，**不 bump
-# SCHEMA_VERSION**——生产库仍 v3，经 _migrate_up 全新建表即含该列；CREATE
-# TABLE IF NOT EXISTS 对已存在的 v4 库不生效，但见过的旧 v4 只有已作废的
-# worktree 快照（data/fa.db 快照与旧表结构不匹配属预期）。
+# is_control 是后补列（2026-09-04 终审）：纯加列 + DEFAULT 0——生产库经
+# fa init 逐级迁移（_migrate_up），本表随版本演进纯加列（v5 attributor
+# 列同法：新建 DDL 含列、迁移走 ALTER，见 _migrate_up 幂等护栏）；CREATE
+# TABLE IF NOT EXISTS 对已存在的库不生效，存量库加列一律经 ALTER 路径
+# （旧 worktree 快照库与现表结构不匹配属预期）。
 # 契约字段（miss_tags 等）在 status != 'ok' 的行上为 NULL（parse_fail 只留审计
 # 字段；原始输出留档属下个计划，spec §15 待办）。
 _RETRO_TABLE = """
@@ -154,6 +155,7 @@ CREATE TABLE IF NOT EXISTS retro_attributions (
     date            TEXT NOT NULL,
     selector        TEXT NOT NULL
         CHECK (selector IN ('divergence', 'manual', 'paper_t1', 'agentline_aligned')),
+    attributor     INTEGER NOT NULL DEFAULT 1,  -- 成员 1..N；聚合行 0（ensemble，spec §3）
     is_control      INTEGER NOT NULL DEFAULT 0,  -- 病例=0/对照=1（divergence 选择器产出）
     miss_tags_json  TEXT,            -- JSON 数组；status != ok 时 NULL
     primary_tag     TEXT,
@@ -294,8 +296,9 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     v1->v2 新增 backtest_predictions；v2->v3 新增 B 线五表
     （fixtures / odds_snapshots / runs / recommendations / bets）；v3->v4 新增
     retro 两表（retro_runs / retro_attributions，A 线复盘归因子线）；
-    v4->v5 新增范式对比线两表（agentline_predictions / agentline_runs），
-    v5 分层由 2026-09-04 并行分支合并产生（retro 与本线同日各自 bump v4）。"""
+    v4->v5 新增范式对比线两表（agentline_predictions / agentline_runs）并给
+    retro_attributions 加 attributor 列——v5 分层由 2026-09-04 并行分支合并产生
+    （retro ensemble 与 agentline 同日各自 bump v4，合并时统一为单一 v5）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -304,6 +307,17 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
         conn.executescript(_RETRO_TABLE)
     if from_v < 5:
         conn.executescript(_AL_TABLE)
+        # ALTER 纯加法：attributor 无 CHECK 可安全 ADD COLUMN（词表一次到位
+        # 教训只约束带 CHECK 的列）；存量行 DEFAULT 1 = 单成员语义不变。
+        # 幂等护栏（必要）：init_db 先跑 _SCHEMA（_RETRO_TABLE 新 DDL 已含该
+        # 列），v3 及更老的库此时经 IF NOT EXISTS 重建即带列，无条件 ALTER 会
+        # 炸 duplicate column；v4 真库无此列，ALTER 照走。
+        has_col = any(r["name"] == "attributor" for r in conn.execute(
+            "PRAGMA table_info(retro_attributions)"))
+        if not has_col:
+            conn.execute(
+                "ALTER TABLE retro_attributions ADD COLUMN"
+                " attributor INTEGER NOT NULL DEFAULT 1")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
