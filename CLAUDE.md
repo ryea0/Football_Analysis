@@ -28,5 +28,5 @@
 
 ## 环境
 
-- Hermes **TG 平台未配置**（2026-09-03 E2E 实测：`~/.hermes/.env` 全注释、无任何 token，`hermes send --to telegram` 报 `Platform 'telegram' is not configured`）；配好后 `fa` 的推送自动恢复，代码侧降级路径已验证（`runs.summary` 记推送失败、不中断 run）；`hermes -z` headless 一次性运行；默认模型 ark-code-latest（火山方舟，跑现有额度）
+- Hermes **TG 平台已配置**（M4 E2E 2026-09-04 实证：`~/.hermes/.env` 有 18 行非注释凭证含 `TELEGRAM_BOT_TOKEN`，`hermes status` 显示 Telegram ✓ configured，实跑② TG 推送实送成功送达 home channel——docs/m4-report.md §3.8）；`api.telegram.org` **直连不通，必须走 Clash 代理 127.0.0.1:7890**（hermes 侧按 `TELEGRAM_PROXY` → `HTTPS_PROXY/HTTP_PROXY/ALL_PROXY` → 系统代理顺序解析，代理附加失败告警后回退直连，M5 建议在 fa 侧显式设 `TELEGRAM_PROXY`）；`hermes -z` headless 一次性运行（推理可用）；默认模型 ark-code-latest（火山方舟，跑现有额度）；代码侧推送失败降级路径已验证（`runs.summary` 记推送失败、不中断 run）
 - `ODDS_API_KEY` 走环境变量（`.env`，gitignore）

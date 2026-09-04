@@ -99,7 +99,7 @@ spec §10 M4 行：**「5 personas、契约校验、降级、A/B 双轨｜mock +
 
 - 库：主 checkout `data/fa.db` 在线备份（`sqlite3 .backup`，源库不停写）到本 worktree；快照内 `model_only` 共 **50 行**：run #4（**pm**，14 行/9 场）+ run #5（am，36 行/25 场，M4 期间另跑，不在本探针范围）。**brief 预期「M3 的 14 条在 run #3/#4 且 phase=am」与实库不符**：M3 时推荐落库于 run #4/pm（run #3 仅 runs.summary 记 recs=14，recommendations 表无其行），探针以「14 行」口径动态锁定 run #4，不硬编码 id。
 - 库内**无任何 model_persona 行**（run #4 是 M3 单轨产物），而 `build_input` 只读该轨作 candidates——事务内按 T11 双落语义镜像补 14 行（数字全同、`final_stake_frac=kelly` 中性初始），跑完 ROLLBACK：被测的是 build_input 真实代码路径，库终态不变（实测回滚后 model_persona 计数 0、总行数 50、`integrity_check=ok`）。
-- schema v3 → v4（`fa init` 加法迁移）；备份快照为 2026-09-04 06:43 UTC 状态。
+- schema v3 → v4（`fa init` 加法迁移）；备份快照为 2026-09-04 06:43（北京时间 UTC+8，= 2026-09-03T22:43Z）状态。
 - **零 Odds API 额度**：全程未触 /events、/odds；ark 推理额度项目确认可忽略（27 次调用）。
 - 探针脚本：`.superpowers/sdd/2026-09-04-m4-persona/probe_real.py`（gitignore）；逐场原文落 `probe_real_{r1,r2,r3}.jsonl`。
 
@@ -355,7 +355,7 @@ run 内实测（当时输出，含 P2 待修的百分比缺陷）：
 
 ## 4. 人格产物质量
 
-（本节综合 T9/T10 冒烟与实跑①② 的 69 次真实调用。）
+（本节综合 T9/T10 冒烟与实跑①② 的 67 次真实调用：T9=3 + T10=4 + 实跑①=36（修复前 27 + 修复后 9）+ 实跑②=24。）
 
 - **人格文件**：5 个（D1 老凯 / E0 薇拉 / SP1 马诺罗 / I1 焦尔乔 / F1 克莱尔），每人 6 条知识域（brief 要求 5–7）+ 八条判断纪律（八条逐字同源，`diff` 实证）。德甲打样在前（T9），四联赛铺开在后（T10），与设计文档「德甲打样在前」的顺序一致。
 - **冒烟**：T9 brief 原文人格 0/2（同型 web_search derail）→ 修改后 1/1；T10 四联赛首跑 4/4、零重试；四份原始 stdout 无一含 `seed:tool_call` 标记（T10 时点禁工具条款尚未上 prompt，靠纪律第 8 条自我拉回）。
