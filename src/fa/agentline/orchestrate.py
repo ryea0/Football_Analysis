@@ -9,8 +9,9 @@ from pathlib import Path
 
 from fa.agentline import runner as runner_mod
 from fa.agentline.contract import parse_prediction
+from fa.agentline.debate import run_match_debate
 from fa.agentline.runner import _PROFILE_LINE, build_prompt
-from fa.agentline.store import save_prediction, save_run
+from fa.agentline.store import save_debate_round, save_prediction, save_run
 
 # 审计常量（设计 §6 harness/model 列）：值来自 Task 2 spike 实测（附录 A）——
 # dsh 版本 0.1.1-rc.2（npm 钉死版，见附录 A.1）；模型为 ARK plan 端点的
@@ -103,4 +104,54 @@ def run_multi(conn: sqlite3.Connection, info_dir: Path, members: int = 3,
     save_run(conn, "A_multi", profile, MODEL, counts,
              {"n_todo": len(todo), "members": members,
               "info_dir": str(info_dir)})
+    return counts
+
+
+def run_debate(conn: sqlite3.Connection, info_dir: Path,
+               limit: int | None = None) -> dict:
+    """A_debate（2026-09-05 设计 §2）：单场生成者-批评者-修订链 ≤2 轮。
+
+    幂等：line='A_debate' 且 attributor=1 已 ok 的场次跳过（rounds 行不判重
+    ——重跑覆盖，与 run_multi 成员行语义一致）。批中崩溃也留台账再抛
+    （run_line 同型：防「predictions>0 且 runs=0」无痕中断）。
+    """
+    profile = _PROFILE_LINE["A_base"]
+    done = {r["match_id"] for r in conn.execute(
+        "SELECT match_id FROM agentline_predictions"
+        " WHERE line='A_debate' AND attributor=1 AND status='ok'")}
+    todo = sorted(int(p.stem) for p in info_dir.glob("*.json")
+                  if p.stem.isdigit() and int(p.stem) not in done)
+    if limit is not None:
+        todo = todo[:limit]
+    counts = {"ok": 0, "parse_fail": 0, "timeout": 0, "error": 0}
+    agg = {"n_calls": 0, "budget_exhausted": 0, "early_stop": 0}
+    from fa.agentline.store import _now
+    t0 = _now()
+    summary = {"n_todo": len(todo), "info_dir": str(info_dir)}
+    try:
+        for mid in todo:
+            info = json.loads((info_dir / f"{mid}.json").read_text(
+                encoding="utf-8"))
+            res = run_match_debate(
+                lambda p: runner_mod.run_headless(p, profile), info)
+            for row in res["rounds"]:
+                save_debate_round(conn, mid, row["round"], row["role"],
+                                  row["payload"], row["raw"], row["status"],
+                                  row["dur"], _HARNESS, MODEL)
+            save_prediction(conn, mid, "A_debate", res["final"], "",
+                            _HARNESS, MODEL,
+                            sum(r["dur"] for r in res["rounds"]),
+                            attributor=1,
+                            budget_exhausted=res["budget_exhausted"])
+            counts[res["final"]["status"]] += 1
+            agg["n_calls"] += res["n_calls"]
+            agg["budget_exhausted"] += res["budget_exhausted"]
+            agg["early_stop"] += res["early_stop"]
+    except Exception:
+        save_run(conn, "A_debate", profile, MODEL, counts,
+                 {**summary, **agg, "interrupted_match_id": mid},
+                 started_at=t0)
+        raise
+    save_run(conn, "A_debate", profile, MODEL, counts, {**summary, **agg},
+             started_at=t0)
     return counts

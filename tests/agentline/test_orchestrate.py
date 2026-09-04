@@ -213,3 +213,60 @@ def test_cli_run_rejects_members_lt_two():
     res = CliRunner().invoke(app, ["agentline", "run", "--line", "A_multi",
                                    "--members", "1"])
     assert res.exit_code == 2
+
+
+# ---- A_debate（生成者-批评者-修订）：run_debate 批编排 -----------------------
+# 夹具沿用本文件既有 conn/info_dir（run_multi 段）；OK0/ATK 字面量与
+# tests/agentline/test_debate.py 同源复制（同一份 ok 预测/攻击语义）。
+
+
+_DEB_OK0 = json.dumps({"p_home": 0.5, "p_draw": 0.3, "p_away": 0.2,
+                       "p_over25": 0.5, "confidence": 0.6,
+                       "reasoning_digest": "d", "sources": []})
+_DEB_ATK = json.dumps({"attacks": [{"label": "overconfidence", "reason": "r",
+                                    "severity": 0.8}]})
+
+
+def test_run_debate_happy_and_idempotent(conn, info_dir, monkeypatch):
+    from fa.agentline.orchestrate import run_debate
+    seq = [_DEB_OK0, _DEB_ATK, "垃圾"]   # v0 ok → 批评 ok → 修订失败 → 终版=v0
+    monkeypatch.setattr(runner_mod, "run_headless",
+                        lambda p, prof, timeout_s=None: (seq.pop(0), None, 0.01))
+    counts = run_debate(conn, info_dir, limit=None)
+    assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+    row = conn.execute("SELECT budget_exhausted, p_home FROM"
+                       " agentline_predictions WHERE line='A_debate'"
+                       " AND attributor=1").fetchone()
+    assert row["budget_exhausted"] == 1 and abs(row["p_home"] - 0.5) < 1e-9
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_debate_rounds").fetchone()["c"] == 3
+    run2 = conn.execute("SELECT COUNT(*) c FROM agentline_runs"
+                        " WHERE line='A_debate'").fetchone()["c"]
+    # 幂等重跑：ok 行已存在 → 无新调用、无新轮行（run 台账照记）
+    counts2 = run_debate(conn, info_dir)
+    assert counts2["ok"] == 0
+    assert len(seq) == 0                # 首跑恰好消费 3 次调用，无多余 dsh 调用
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_debate_rounds").fetchone()["c"] == 3
+    assert conn.execute("SELECT COUNT(*) c FROM agentline_runs"
+                        " WHERE line='A_debate'").fetchone()["c"] == run2 + 1
+
+
+def test_run_debate_summary_carries_budget_and_early_stop(conn, info_dir,
+                                                          monkeypatch):
+    """runs.summary 须含批级 n_calls / budget_exhausted / early_stop 计数。"""
+    from fa.agentline import orchestrate
+    seq = [_DEB_OK0, _DEB_ATK, _DEB_OK0]     # v1==v0：delta 0 < ε → 提前终止
+    monkeypatch.setattr(orchestrate.runner_mod, "run_headless",
+                        lambda p, prof, timeout_s=None: (seq.pop(0), None, 0.01))
+    counts = orchestrate.run_debate(conn, info_dir, limit=None)
+    assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+    run_row = conn.execute("SELECT * FROM agentline_runs"
+                           " WHERE line='A_debate'").fetchone()
+    summary = json.loads(run_row["summary"])
+    assert summary["n_calls"] == 3 and summary["early_stop"] == 1
+    assert summary["budget_exhausted"] == 0
+    assert summary["n_todo"] == 1
+    pred = conn.execute("SELECT budget_exhausted FROM agentline_predictions"
+                        " WHERE line='A_debate'").fetchone()
+    assert pred["budget_exhausted"] == 0
