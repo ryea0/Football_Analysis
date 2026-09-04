@@ -850,11 +850,12 @@ def evolve_reflect_cmd(
                                     help="校准模式：不落库、产物进 calibration 目录"),
 ) -> None:
     """手动反思一个窗口"""
+    from fa.evolve import EvolutionError
     from fa.evolve.runner import run_reflect
     conn = connect()
     try:
         out = run_reflect(conn, window, league, calibrate=calibrate)
-    except ValueError as exc:
+    except (ValueError, EvolutionError) as exc:
         typer.echo(f"参数错误：{exc}")
         raise typer.Exit(code=1)
     finally:
@@ -864,9 +865,9 @@ def evolve_reflect_cmd(
                    " evolution/proposals/calibration-*/，未落任何 DB 行")
     else:
         for r in out["results"]:
+            reason = r.get("no_change_reason")   # already 跳过行无该键
             typer.echo(f"w{out['window']} {r['league']}：{r['status']}"
-                       + (f"（{r['no_change_reason']}）"
-                          if r["no_change_reason"] else ""))
+                       + (f"（{reason}）" if reason else ""))
         typer.echo("fa evolve review 人审 → merge/reject/shelve 裁定")
 
 

@@ -134,3 +134,43 @@ def test_run_reflect_calibrate_writes_no_db_rows(conn, seeded, monkeypatch, herm
     assert conn.execute("SELECT COUNT(*) FROM evolution_windows").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM evolution_runs").fetchone()[0] == 0
     assert (seeded / "evolution" / "proposals").exists()
+
+
+def test_run_reflect_rerun_skips_call_and_raises(conn, seeded, monkeypatch, hermes_ok):
+    """重跑守卫：已反思联赛不重调 hermes、不覆盖暂存区；全跳过 → ValueError。"""
+    monkeypatch.setattr(runner, "_today", lambda: date(2026, 10, 20))
+    runner.run_reflect(conn, 1, "E0")
+    monkeypatch.setenv("HERMES_BIN", "/nonexistent/hermes")   # 重调即暴露
+    with pytest.raises(ValueError, match="已全部反思"):
+        runner.run_reflect(conn, 1, "E0")
+    rows = conn.execute("SELECT league, status FROM evolution_runs").fetchall()
+    assert [r["status"] for r in rows] == ["ok"]     # 无第二行（UNIQUE 不触雷）
+
+
+def test_tick_self_heals_half_reflected_window(conn, seeded, monkeypatch, hermes_ok):
+    """tick 中途崩溃残留（窗口行在、部分联赛缺行、reflected_at 空）→ 只补缺的联赛。"""
+    monkeypatch.setattr(runner, "_today", lambda: date(2026, 10, 20))
+    wid = conn.execute("INSERT INTO evolution_windows (idx, opened_at, closes_at)"
+                       " VALUES (1, '2026-09-04', '2026-10-16')").lastrowid
+    conn.execute(
+        "INSERT INTO evolution_runs (window_id, league, kb_hash_before, status,"
+        " no_change_reason, proposal_path, duration_s, created_at)"
+        " VALUES (?, 'E0', 'h', 'ok', NULL, NULL, 0.1, datetime('now'))", (wid,))
+    conn.commit()
+    out = runner.run_tick(conn)
+    rows = conn.execute("SELECT league FROM evolution_runs WHERE window_id=?",
+                        (wid,)).fetchall()
+    assert len(rows) == 5                       # 缺的四联赛补齐，E0 不重跑
+    assert conn.execute("SELECT reflected_at FROM evolution_windows"
+                        " WHERE id=?", (wid,)).fetchone()["reflected_at"]
+    assert "E0=already" in out
+
+
+def test_tick_all_due_already_reflected(conn, seeded, monkeypatch, hermes_ok):
+    """到期但均已反思 → 报「到期窗口均已反思」，不误报「无到期窗口」。"""
+    monkeypatch.setattr(runner, "_today", lambda: date(2026, 10, 20))
+    runner.run_tick(conn)
+    monkeypatch.setattr(runner, "_today", lambda: date(2026, 10, 25))
+    out = runner.run_tick(conn)                  # w1 仍是唯一到期窗、已反思
+    assert "到期窗口均已反思" in out
+    assert "无到期窗口" not in out and "顺延" not in out
