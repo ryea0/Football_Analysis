@@ -109,9 +109,13 @@ def test_run_multi_members_and_aggregate(conn, info_dir, monkeypatch):
     """3 成员行（attributor 1..3）+ 1 聚合行（attributor 0，中位数概率）。"""
     from fa.agentline import orchestrate
     outs = iter([_AM_OK, _AM_OK, _AM_OK2])
-    monkeypatch.setattr(orchestrate.runner_mod, "run_headless",
-                        lambda prompt, profile, timeout_s=None:
-                        (next(outs), None, 1.0))
+    calls = []
+
+    def fake_run(prompt, profile, timeout_s=None):
+        calls.append((prompt, profile))
+        return (next(outs), None, 1.0)
+
+    monkeypatch.setattr(orchestrate.runner_mod, "run_headless", fake_run)
     counts = orchestrate.run_multi(conn, info_dir, members=3, limit=1)
     assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
     rows = conn.execute(
@@ -119,6 +123,11 @@ def test_run_multi_members_and_aggregate(conn, info_dir, monkeypatch):
         " WHERE line='A_multi' ORDER BY attributor").fetchall()
     assert [r["attributor"] for r in rows] == [0, 1, 2, 3]
     assert rows[0]["p_home"] == pytest.approx(0.4)   # 中位数（0.4,0.4,0.5）
+    # spec 不变量（AM-T3 审查裁定顺入）：成员必须 A_base profile 且 prompt 无检索
+    # ——两者同源（A_enh profile 会带「网络检索」后缀），一并钉死防回归。
+    assert len(calls) == 3
+    assert {profile for _, profile in calls} == {"fa-agent-base"}
+    assert all("网络检索" not in prompt for prompt, _ in calls)
 
 
 def test_run_multi_all_failed_aggregate_error(conn, info_dir, monkeypatch):
