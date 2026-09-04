@@ -6,6 +6,7 @@ fa 模块（写库 / hermes / 网络）；指标公式一律复用 fa.backtest.*
 """
 import json
 import sqlite3
+from datetime import timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -14,6 +15,9 @@ from fa.backtest.metrics import by_group, calibration, evaluate, fetch_predictio
 from fa.backtest.simulate import (ODDS_MAX, ODDS_MIN, candidates, simulate_flat,
                                   simulate_kelly)
 from fa.config import db_path
+
+# 北京日界（spec §9.6 全项目口径；固定 +8 无夏令时）——日期过滤/选项统一用它
+_BEIJING = timezone(timedelta(hours=8))
 
 
 # 全站表列名双语映射（2026-09-04 用户实测反馈：推荐表列名全英文——补全为
@@ -152,21 +156,30 @@ def b_bets(conn: sqlite3.Connection) -> pd.DataFrame:
 
 def by_date(df: pd.DataFrame, column: str, choice) -> pd.DataFrame:
     """页 2/4 的日期过滤纯函数：``choice`` 为 None /「全部…」→ 全量；否则按
-    ``column``（ISO 串）的 ``YYYY-MM-DD`` 前缀命中。页内 selectbox 的选项由
-    :func:`date_choices` 生成，口径同源（「全部」前缀即全量，容「全部 All」）。"""
+    ``column``（ISO 串）的**北京日**（spec §9.6 全项目口径）命中。
+
+    日界按北京时间而非存储的 UTC 串——实害案例（2026-09-04）：4 注结算时间
+    ``2026-09-03T22:09:33Z`` 是北京 09-04 06:09，UTC 前缀桶会把它分到 09-03，
+    「结算日 09-04」找不到当天收支。页内 selectbox 选项由 :func:`date_choices`
+    生成，口径同源（「全部」前缀即全量，容「全部 All」）。"""
     if choice is None or str(choice).startswith("全部"):
         return df
     if column not in df.columns or df.empty:
         return df.iloc[0:0]
-    mask = df[column].astype(str).str.startswith(choice)
-    return df[mask]
+    return df[_bj_days(df, column) == choice]
 
 
 def date_choices(df: pd.DataFrame, column: str) -> list[str]:
-    """``column`` 的去重日期选项（降序——最近在前），供 selectbox。"""
+    """``column`` 的去重**北京日**选项（降序——最近在前），供 selectbox。"""
     if column not in df.columns or df.empty:
         return []
-    return sorted({str(v)[:10] for v in df[column] if v}, reverse=True)
+    return sorted(_bj_days(df, column).dropna().unique(), reverse=True)
+
+
+def _bj_days(df: pd.DataFrame, column: str) -> pd.Series:
+    """ISO 串列（带 Z 或裸——裸按 UTC）→ 北京日 ``YYYY-MM-DD``；解析失败 NaT。"""
+    parsed = pd.to_datetime(df[column], errors="coerce", utc=True)
+    return parsed.dt.tz_convert(_BEIJING).dt.strftime("%Y-%m-%d")
 
 
 def b_ab_tracks(conn: sqlite3.Connection) -> dict:
