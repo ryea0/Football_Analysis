@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from loaders import paper_sim
+from queries import COL_BILINGUAL
 
 st.header("A 线 · 模拟盘回测（flat / ¼ Kelly）Backtest Simulation")
 try:
@@ -48,10 +49,12 @@ right.plotly_chart(f2, use_container_width=True)
 c3, c4 = st.columns(2)
 with c3:
     st.subheader("分市场 By Market")
-    st.dataframe(pd.DataFrame(s["by_market"]).T, use_container_width=True)
+    st.dataframe(pd.DataFrame(s["by_market"]).T.rename(columns=COL_BILINGUAL),
+                 use_container_width=True)
 with c4:
     st.subheader("分赔率区间 By Odds Band")
-    st.dataframe(pd.DataFrame(s["by_band"]).T, use_container_width=True)
+    st.dataframe(pd.DataFrame(s["by_band"]).T.rename(columns=COL_BILINGUAL),
+                 use_container_width=True)
 
 st.caption("成交价 = Pinnacle 收盘价（保守）；O2.5 缺收盘赔率，回测候选不含该市场"
            "（candidates 口径）；与 M2 报告同源同口径。"

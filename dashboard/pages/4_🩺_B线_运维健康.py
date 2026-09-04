@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import streamlit as st
 
 from loaders import runs, unknown
-from queries import by_date, date_choices
+from queries import COL_BILINGUAL, by_date, date_choices
 
 st.header("B 线 · 运维健康 Ops Health")
 try:
@@ -36,15 +36,16 @@ if df.empty:
 else:
     day = st.selectbox("日期（启动日）Date (started)",
                        ["全部 All", *date_choices(df, "started_at")])
-    st.dataframe(by_date(df, "started_at", day), use_container_width=True,
-                 hide_index=True)
+    st.dataframe(by_date(df, "started_at", day).rename(columns=COL_BILINGUAL),
+                 use_container_width=True, hide_index=True)
 
 st.subheader("队名隔离表（unknown_names）Quarantined Names")
 if unk.empty:
     st.success("隔离表为空——所有实时盘队名均已对齐（spec §3.3）"
                " / Quarantine empty — all names aligned")
 else:
-    st.dataframe(unk, use_container_width=True, hide_index=True)
+    st.dataframe(unk.rename(columns=COL_BILINGUAL), use_container_width=True,
+                 hide_index=True)
     st.caption("处理方式：uv run fa data aliases 逐条看建议，"
                "fa data aliases --confirm \"TEAM_ID=别名\" 确认写入（页面保持只读）"
                " / resolve via `fa data aliases --confirm \"TEAM_ID=alias\"`")

@@ -9,6 +9,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from loaders import calibration, overview
+from queries import COL_BILINGUAL
 
 st.header("A 线 · 校准曲线（十分位）Calibration")
 try:
@@ -43,4 +44,5 @@ for tab, (key, _) in zip(tabs, _MARKETS):
                           yaxis_title="实际频率 Empirical rate", xaxis_range=[0, 1],
                           yaxis_range=[0, 1], margin=dict(t=30, b=20))
         st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(df, use_container_width=True, hide_index=True)
+        st.dataframe(df.rename(columns=COL_BILINGUAL), use_container_width=True,
+                     hide_index=True)

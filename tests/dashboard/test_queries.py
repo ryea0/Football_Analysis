@@ -508,3 +508,37 @@ def test_by_date_filter_helper(db):
     assert list(only_12th["id"]) == [11, 10]                 # 两注都落在这天
     assert by_date(df, "settled_at", "2026-09-06")["id"].tolist() == [10]
     assert by_date(df, "placed_at", "1999-01-01").empty
+
+
+def test_col_bilingual_covers_all_table_columns(db, tmp_path):
+    """全站列名双语映射（COL_BILINGUAL）完备性钉测：主要查询输出的每一列
+    都必须有双语名——无豁免清单，漏译即测试红（用户实测反馈：推荐表列名
+    全英文，2026-09-04）。"""
+    from queries import (COL_BILINGUAL, b_bets, b_recommendations, b_runs,
+                         b_unknown_names)
+
+    _seed_rec_chain(db)                     # B 线查询用主夹具库
+    for fn in (b_recommendations, b_bets, b_runs, b_unknown_names):
+        missing = set(fn(db).columns) - set(COL_BILINGUAL)
+        assert not missing, f"{fn.__name__} 有列未双语: {sorted(missing)}"
+    # 页5/6/7 的指标键源自 backtest 预测行——独立库种 bp 行（避免与 B 线种子
+    # 撞队名 UNIQUE）
+    adb = connect(tmp_path / "a.db")
+    try:
+        init_db(tmp_path / "a.db")
+        _seed_bp_rows(adb)
+        from queries import a_overview, a_calibration, a_paper_sim
+        o = a_overview(adb)
+        assert not o["empty"]
+        missing5 = set(o["overall"]) - set(COL_BILINGUAL)
+        assert not missing5, f"页5 指标键未双语: {sorted(missing5)}"
+        buckets = a_calibration(adb).get("H") or []
+        if buckets:
+            missing6 = set(buckets[0]) - set(COL_BILINGUAL)
+            assert not missing6, f"页6 校准桶键未双语: {sorted(missing6)}"
+        s = a_paper_sim(adb)
+        if not s["empty"]:
+            missing7 = (set(s["flat"]) | set(s["kelly"])) - set(COL_BILINGUAL)
+            assert not missing7, f"页7 模拟键未双语: {sorted(missing7)}"
+    finally:
+        adb.close()

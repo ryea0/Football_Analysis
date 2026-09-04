@@ -16,6 +16,51 @@ from fa.backtest.simulate import (ODDS_MAX, ODDS_MIN, candidates, simulate_flat,
 from fa.config import db_path
 
 
+# 全站表列名双语映射（2026-09-04 用户实测反馈：推荐表列名全英文——补全为
+# 中英并列）。页面在**展示前**统一 ``df.rename(columns=COL_BILINGUAL)``；
+# 过滤/透视仍用原列名（先滤后改名）。完备性由
+# test_col_bilingual_covers_all_table_columns 钉死：查询输出的每一列都必须
+# 在此映射内，漏译即测试红。
+COL_BILINGUAL = {
+    # 通用键
+    "id": "编号 id", "status": "状态 status", "mode": "模式 mode",
+    "type": "类型 type", "phase": "相位 phase", "strategy": "策略 strategy",
+    "market": "市场 mkt", "league": "联赛 league",
+    "created_at": "创建 created", "started_at": "启动 started",
+    "finished_at": "完成 finished", "kickoff_utc": "开赛 kickoff",
+    "placed_at": "落注 placed", "settled_at": "结算 settled",
+    "bookmaker": "庄家 book", "home": "主队 home", "away": "客队 away",
+    "event_key": "事件 event", "source": "来源 source",
+    "name": "名称 name", "first_seen": "首见 first seen",
+    # 推荐列
+    "model_p": "模型概率 model_p", "market_p": "市场概率 market_p",
+    "best_odds": "最优价 best odds", "edge": "优势 edge", "ev": "EV",
+    "kelly_stake_frac": "kelly 仓位 kelly", "verdict": "判决 verdict",
+    "confidence_delta": "信心增量 Δconf", "final_stake_frac": "终仓 final stake",
+    "key_factors": "关键因素 factors", "report_md": "点评 report",
+    # 注列
+    "odds_taken": "拿价 odds", "stake": "注金 stake",
+    "return_amt": "回报 return", "pnl": "盈亏 pnl",
+    "closing_odds": "收盘 close", "closing_source": "基准 source", "clv": "CLV",
+    # runs 展开键
+    "credits_before": "额度前 credits before",
+    "credits_after": "额度后 credits after", "summary": "摘要 summary",
+    "fixtures": "场次 fixtures", "aligned": "对齐 aligned", "bets": "落注 bets",
+    "degraded": "降级 degraded", "degraded_reasons": "降级原因 reasons",
+    # 页5 回测指标键（evaluate）
+    "n": "样本 n", "model_ll": "模型LL model_ll", "market_ll": "市场LL market_ll",
+    "ratio": "比值 ratio", "degradation_pct": "劣化% degr.",
+    "model_brier": "模型Brier", "market_brier": "市场Brier",
+    "cal_home": "校准cal_home",
+    # 页6 校准桶键
+    "lo": "下界 lo", "hi": "上界 hi", "avg_p": "平均概率 avg_p",
+    "emp": "实际频率 emp",
+    # 页7 模拟键（simulate_flat / simulate_kelly）
+    "staked": "投注额 staked", "returned": "回收 returned", "roi": "ROI",
+    "final_bankroll": "终值 final", "max_drawdown_pct": "最大回撤 max DD",
+}
+
+
 def connect_ro(path: Path | None = None) -> sqlite3.Connection:
     """只读连接（mode=ro）：dashboard 的任何 bug 都写不了库。
 

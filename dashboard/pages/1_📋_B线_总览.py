@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from loaders import runs, summary
+from queries import COL_BILINGUAL
 
 st.header("B 线 · 总览（paper 运营）Overview")
 try:
@@ -39,4 +40,5 @@ st.subheader("最近 run Recent Runs")
 df = runs().head(5)
 if df.empty:
     st.caption("暂无 run 记录 / No runs yet")
-st.dataframe(df, use_container_width=True, hide_index=True)
+st.dataframe(df.rename(columns=COL_BILINGUAL), use_container_width=True,
+             hide_index=True)

@@ -12,6 +12,7 @@ import plotly.express as px
 import streamlit as st
 
 from loaders import overview
+from queries import COL_BILINGUAL
 
 st.header("A 线 · 回测总览（walk-forward，历史回测）Backtest Overview")
 try:
@@ -56,8 +57,8 @@ st.plotly_chart(fig, use_container_width=True)
 
 st.subheader("分联赛 / 分赛季 By League / Season")
 tab1, tab2 = st.tabs(["联赛 league", "赛季 season"])
-tab1.dataframe(pd.DataFrame(o["by_league"]).T.drop(columns=["cal_home"]),
-               use_container_width=True)
-tab2.dataframe(pd.DataFrame(o["by_season"]).T.drop(columns=["cal_home"]),
-               use_container_width=True)
+tab1.dataframe(pd.DataFrame(o["by_league"]).T.drop(columns=["cal_home"])
+                 .rename(columns=COL_BILINGUAL), use_container_width=True)
+tab2.dataframe(pd.DataFrame(o["by_season"]).T.drop(columns=["cal_home"])
+                 .rename(columns=COL_BILINGUAL), use_container_width=True)
 st.caption("A 线为历史回测证据，与 B 线前向运营结论分账（spec §12.3），互不冒充。")
