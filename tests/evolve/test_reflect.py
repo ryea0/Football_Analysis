@@ -260,6 +260,23 @@ def test_reflect_league_hermes_missing_degrades(conn, seeded, monkeypatch):
     assert not (seeded / "evolution" / "proposals").exists()   # 暂存区零写入
 
 
+def test_reflect_league_broken_kb_degrades_not_raises(conn, seeded, tmp_path,
+                                                      monkeypatch):
+    """M6 终审 F1：活知识文件语法破损 → 该联赛 status='error'（理由 kb parse:），
+    不炸 reflect、暂存区零写入（降级语义同 OSError 分支，同一 6 键返回形状）；
+    hermes 照常被调到（回合法契约）——失败点确在 parse 而非调用。"""
+    (seeded / "personas" / "knowledge" / "epl.md").write_text(
+        "## 时效\n- [E0-T3|2026-09-04|90d] 序号一位即语法破损\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_BIN", _echo_script(_VALID, tmp_path))
+    out = R.reflect_league(conn, window_bounds(1), "E0")
+    assert out["status"] == "error"
+    assert (out["no_change_reason"] or "").startswith("kb parse:")
+    assert out["proposal_path"] is None
+    assert out["league"] == "E0" and out["duration_s"] >= 0
+    assert out["kb_hash_before"] == K.personas_tree_hash(seeded / "personas")
+    assert not (seeded / "evolution" / "proposals").exists()
+
+
 def test_reflect_league_no_sample_skips_call(conn, root, tmp_path, monkeypatch):
     """窗口内该联赛 0 判决样本 → 不调 hermes，直接 no_change（R7）。"""
     monkeypatch.setenv("HERMES_BIN", _hermes(_NO_CALL, tmp_path))

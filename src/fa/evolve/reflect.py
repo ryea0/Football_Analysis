@@ -287,7 +287,15 @@ def reflect_league(conn: sqlite3.Connection, w: Window, league: str) -> dict:
     except Exception:
         return {**base, "status": "extract", "no_change_reason": None,
                 "duration_s": round(time.monotonic() - started, 3)}
-    kb = K.parse_kb(kb_text or "", league)
+    try:
+        kb = K.parse_kb(kb_text or "", league)
+    except EvolutionError as exc:
+        # M6 终审 F1：活知识文件语法破损只降**本联赛**（status='error' 静默停摆，
+        # 词表语义同上面的 OSError 分支），不炸 tick / 其余四联赛——同一 6 键
+        # 返回形状，runner 落行照常。
+        return {**base, "status": "error",
+                "no_change_reason": f"kb parse: {exc}"[:500],
+                "duration_s": round(time.monotonic() - started, 3)}
     errs = validate_contract(contract, kb, league)
     if errs:
         return {**base, "status": "contract",

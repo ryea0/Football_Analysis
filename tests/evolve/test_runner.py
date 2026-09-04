@@ -127,6 +127,24 @@ def test_tick_prunes_ttl_before_reflect(conn, seeded_kb_expired, monkeypatch, he
                             / "epl.md").read_text()
 
 
+def test_tick_broken_kb_file_degrades_league_only(conn, seeded, monkeypatch,
+                                                  hermes_ok):
+    """M6 终审 F1：坏知识文件不再炸 tick——修剪前置步逐联赛容错（摘要显式报
+    「修剪异常」），该联赛反思落 status='error'，其余四联赛照常反思。"""
+    monkeypatch.setattr(runner, "_today", lambda: date(2026, 10, 20))
+    (seeded / "personas" / "knowledge" / "epl.md").write_text(
+        "## 时效\n- [E0-T3|2026-09-04|90d] 序号一位即语法破损\n", encoding="utf-8")
+    out = runner.run_tick(conn)                     # 不抛
+    assert "修剪异常" in out and "w1" in out
+    rows = conn.execute("SELECT league, status FROM evolution_runs").fetchall()
+    by = {r["league"]: r["status"] for r in rows}
+    assert len(rows) == 5                            # 五联赛全部落行
+    assert by["E0"] == "error"
+    assert all(by[lg] != "error" for lg in ("SP1", "D1", "I1", "F1"))
+    assert conn.execute("SELECT reflected_at FROM evolution_windows"
+                        " WHERE idx=1").fetchone()["reflected_at"] is not None
+
+
 def test_run_reflect_calibrate_writes_no_db_rows(conn, seeded, monkeypatch, hermes_ok):
     monkeypatch.setattr(runner, "_today", lambda: date(2026, 10, 20))
     out = runner.run_reflect(conn, 1, "E0", calibrate=True)

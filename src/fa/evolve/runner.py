@@ -20,6 +20,14 @@ def _today() -> date:
     return W.beijing_today()
 
 
+def _prune_brief(league: str, anchors: list[str]) -> str:
+    """tick 摘要里的修剪项：锚点列表照常计数；``<`` 开头的哨兵（prune_live_files
+    的逐联赛容错，M6 终审 F1）不冒充「修剪了 N 条」，原样透出错误文本。"""
+    if anchors and anchors[0].startswith("<"):
+        return f"{league} 修剪异常：{'；'.join(anchors)}"
+    return f"{league}×{len(anchors)}"
+
+
 def _ensure_window_row(conn, w: W.Window) -> int:
     row = conn.execute("SELECT id FROM evolution_windows WHERE idx=?",
                        (w.idx,)).fetchone()
@@ -90,7 +98,7 @@ def run_tick(conn: sqlite3.Connection, today: date | None = None) -> str:
         lines.append(f"w{w.idx} 反思完成：" + "，".join(
             f"{o['league']}={o['status']}" for o in outs))
     lines.insert(0, f"tick @ {d.isoformat()}：TTL 修剪 "
-                 + ("；".join(f"{lg}×{len(a)}" for lg, a in pruned) if pruned
+                 + ("；".join(_prune_brief(lg, a) for lg, a in pruned) if pruned
                     else "无"))
     if not due:
         lines.append("无到期窗口")
