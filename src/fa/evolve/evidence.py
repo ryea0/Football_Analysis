@@ -93,7 +93,7 @@ def _kills(conn, opened: str, closes: str, league: str) -> list[dict]:
         "SELECT r.fixture_id, r.market, r.verdict, r.final_stake_frac"
         " FROM recommendations r JOIN fixtures f ON f.id = r.fixture_id"
         f" WHERE f.league=? AND r.strategy='model_persona'"
-        " AND r.verdict IN ('veto','downweight') AND {_WINDOW}"
+        f" AND r.verdict IN ('veto','downweight') AND {_WINDOW}"
         " ORDER BY r.fixture_id, r.market", (league, opened, closes)).fetchall()
     out = []
     for r in rows:
@@ -147,7 +147,7 @@ def window_evidence(conn: sqlite3.Connection, w: Window, league: str) -> dict:
         " JOIN recommendations r ON r.id = b.recommendation_id"
         " JOIN fixtures f ON f.id = r.fixture_id"
         f" WHERE b.mode='paper' AND b.status='pending' AND f.league=?"
-        " AND r.strategy IN ('model_persona','model_persona_nokb') AND {_WINDOW}",
+        f" AND r.strategy IN ('model_persona','model_persona_nokb') AND {_WINDOW}",
         (league, opened, closes)).fetchone()["n"]
     return {"league": league,
             "window": {"idx": w.idx, "from": opened, "to": closes},
