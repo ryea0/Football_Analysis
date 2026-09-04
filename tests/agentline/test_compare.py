@@ -1,8 +1,10 @@
 """三线对比：复用 evaluate/simulate，行 schema 适配正确性是核心。"""
+import json
+
 import pytest
 from typer.testing import CliRunner
 
-from fa.agentline.compare import compare_lines, merge_rows, render_report
+from fa.agentline.compare import compare_lines, debate_gain, merge_rows, render_report
 from fa.db import connect, init_db
 
 _runner = CliRunner()
@@ -218,3 +220,131 @@ def test_report_renders_amulti_row(conn_amulti, tmp_path):
     # 成员披露行（成员级计分入口）必须在脚注前出现
     assert ("A_multi 为多成员确定性聚合（分量中位数）" in text
             and "本批成员 3 行 / ok 2" in text)
+
+
+# ---- A_debate（生成者-批评者-修订）：五对照 + 修订增益 -----------------------
+# 夹具沿用本文件 db_three / conn_amulti 的造数方式（foreign_keys=OFF + 同款
+# bp INSERT）；rounds 行 payload 与 test_orchestrate 的 _DEB_OK0/_DEB_ATK 同源
+# （round=0 generator = parse_prediction 形态、critic = attacks+severity 形态）。
+
+def _deb_round(conn, mid, round_no, role, payload):
+    conn.execute(
+        "INSERT INTO agentline_debate_rounds (match_id, round, role,"
+        " payload_json, raw_output, status, duration_s, harness, model,"
+        " created_at)"
+        " VALUES (?, ?, ?, ?, 'raw', 'ok', 0.1, 'h', 'm', '2026-09-05')",
+        (mid, round_no, role, payload))
+
+
+def _deb_seed(conn, mid, ph_v0, ph_fin, sev, with_critic=True):
+    """一场完整辩论链：bp 行 + A_debate 终版 ok 行 + round0 生成行（+批评行）。"""
+    conn.execute(
+        "INSERT INTO backtest_predictions (league, season, week_index,"
+        " match_id, date, p_home, p_draw, p_away, p_over25, p_under25,"
+        " mkt_home, mkt_draw, mkt_away, mkt_over25, odds_home, odds_draw,"
+        " odds_away, outcome, total_goals)"
+        " VALUES ('E0', 2023, 1, ?, '2024-02-01', 0.4, 0.3, 0.3, 0.5, 0.5,"
+        " 0.45, 0.28, 0.27, 0.55, 2.2, 3.5, 3.6, 'H', 3)", (mid,))
+    conn.execute(
+        "INSERT INTO agentline_predictions (match_id, line, p_home,"
+        " p_draw, p_away, p_over25, confidence, reasoning_digest,"
+        " sources_json, raw_output, status, repaired, created_at)"
+        " VALUES (?, 'A_debate', ?, 0.3, ?, 0.5, 0.5, 'r', '[]', 'raw',"
+        " 'ok', 0, '2026-09-05')", (mid, ph_fin, 1 - ph_fin - 0.3))
+    _deb_round(conn, mid, 0, "generator", json.dumps(
+        {"p_home": ph_v0, "p_draw": 0.3, "p_away": 1 - ph_v0 - 0.3,
+         "p_over25": 0.5, "confidence": 0.5, "reasoning_digest": "d",
+         "sources": []}))
+    if with_critic:
+        _deb_round(conn, mid, 1, "critic", json.dumps(
+            {"attacks": [{"label": "overconfidence", "reason": "r",
+                          "severity": sev}]}))
+
+
+def _conn_with(tmp_path, name, seed):
+    init_db(tmp_path / f"{name}.db")
+    conn = connect(tmp_path / f"{name}.db")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    seed(conn)
+    conn.commit()
+    yield conn
+    conn.close()
+
+
+@pytest.fixture()
+def conn_debate(tmp_path):
+    """3 场完整辩论链。两处方向性钉死：终版比 v0 更贴 outcome='H'
+    （修订必须真增益）；批评 severity 0.2/0.5/0.8 与修订幅度同向单调
+    （批评越狠改得越多）→ 三对即可钉出 ρ=+1 的强信号。"""
+    def seed(conn):
+        for mid, ph_v0, ph_fin, sev in ((1, 0.34, 0.40, 0.2),
+                                        (2, 0.34, 0.50, 0.5),
+                                        (3, 0.34, 0.66, 0.8)):
+            _deb_seed(conn, mid, ph_v0, ph_fin, sev)
+    yield from _conn_with(tmp_path, "deb", seed)
+
+
+@pytest.fixture()
+def conn_debate_nocritic(tmp_path):
+    """1 场只有 round0 生成行、无批评行 → 无可比对 → ρ=None（n_rho=0）。"""
+    def seed(conn):
+        _deb_seed(conn, 1, 0.34, 0.40, 0.0, with_critic=False)
+    yield from _conn_with(tmp_path, "debnc", seed)
+
+
+@pytest.fixture()
+def conn_empty(tmp_path):
+    """空表库：迁移齐全、零行。"""
+    init_db(tmp_path / "empty.db")
+    conn = connect(tmp_path / "empty.db")
+    yield conn
+    conn.close()
+
+
+def test_compare_lines_includes_debate(conn_debate):
+    cmp = compare_lines(conn_debate)
+    assert "A_debate" in cmp and cmp["A_debate"]["n"] >= 1
+    assert "debate" in cmp and cmp["debate"]["n"] >= 1
+
+
+def test_debate_gain_v0_vs_final_and_rho(conn_debate):
+    g = debate_gain(conn_debate)
+    assert g["n"] == 3 and g["n_rho"] == 3
+    assert g["v0_ll"] > 0 and g["final_ll"] > 0
+    # 终版比 v0 更贴 outcome='H'：修订必须真增益（方向钉死，防 v0/终版对调）
+    assert g["final_ll"] < g["v0_ll"]
+    # severity 0.2/0.5/0.8 与修订幅度同向单调 → Spearman 恰 +1
+    assert g["rho"] == pytest.approx(1.0)
+
+
+def test_debate_gain_no_critic_rows_yields_rho_none(conn_debate_nocritic):
+    g = debate_gain(conn_debate_nocritic)
+    assert g["n"] == 1 and g["rho"] is None and g["n_rho"] == 0
+
+
+def test_debate_gain_empty(conn_empty):
+    assert debate_gain(conn_empty) == {"n": 0}
+
+
+def test_report_renders_debate_row_and_revision_gain(conn_debate, tmp_path):
+    cmp = compare_lines(conn_debate)
+    out = tmp_path / "r.md"
+    render_report(cmp, out)
+    text = out.read_text(encoding="utf-8")
+    assert "| A_debate |" in text
+    d = cmp["debate"]
+    assert "A_debate 修订增益" in text
+    assert (f"v0 ll={d['v0_ll']:.4f}" in text
+            and f"终版 ll={d['final_ll']:.4f}" in text)
+    assert "ρ=+1.00" in text and "固执" in text and "无主见" in text
+    # 修订增益段必须在全局免责脚注之前（脚注前追加，不吞掉既有小样本免责）
+    assert (text.index("A_debate 修订增益")
+            < text.index("各行比值在其自身 n 场子集内计算"))
+
+
+def test_report_omits_debate_gain_when_absent(tmp_path):
+    # 旧形态 dict（无 debate 键）不得炸 render_report，也不得虚报修订增益
+    out = tmp_path / "r.md"
+    render_report(_fake_cmp(enh_sources=0), out)
+    text = out.read_text(encoding="utf-8")
+    assert "修订增益" not in text and "| A_debate |" not in text
