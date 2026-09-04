@@ -318,7 +318,9 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     v6->v7 重建 agentline_predictions——line 词表加 'A_multi'、加 attributor 列、
     UNIQUE 扩成三元组：带 CHECK 的列与约束无法 ALTER 后补，唯一路径是
     rename-copy-drop（存量行全列保全、attributor 回填 DEFAULT 1，A_multi 计划
-    T1，2026-09-04）。"""
+    T1，2026-09-04）。重建各步被 executescript 隐式提交逐个落盘，半途失败留下
+    影子表 agentline_predictions_v6 时，重试弃掉半建活动表、从影子重放恢复
+    （影子恢复优先于幂等跳过）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -366,18 +368,30 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
                     "ALTER TABLE recommendations ADD COLUMN report_md TEXT")
     if from_v < 7:
         # v7：agentline_predictions 加 attributor + A_multi 词表 + 三元 UNIQUE。
-        # CHECK 无法后补——唯一路径是重建（rename-copy-drop）。幂等护栏：
-        # attributor 已在（新库先经 _SCHEMA 建出即含列）则只做 nothing。
+        # CHECK 无法后补——唯一路径是重建（rename-copy-drop）。重建各步经
+        # executescript 的隐式提交逐一落盘，半途失败会把存量困在影子表
+        # agentline_predictions_v6——所以**影子恢复优先于一切跳过/幂等判定**：
+        # 影子在，就弃掉半建的活动表、从影子重放；只有影子不在且 attributor
+        # 已在（重建早已完成）才真正跳过。
+        has_shadow = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table'"
+            " AND name='agentline_predictions_v6'").fetchone() is not None
         acols = {r["name"] for r in conn.execute(
             "PRAGMA table_info(agentline_predictions)")}
-        if acols and "attributor" not in acols:
-            # 前置：idx_alp_line 会随旧表改名、继续占住该索引名——不先摘，
-            # 下方 _AL_TABLE 的 CREATE INDEX IF NOT EXISTS 会静默跳过，DROP
-            # 旧表时索引随之消失（重建库丢索引）。autoindex 随表走，无需处理。
+        if has_shadow or (acols and "attributor" not in acols):
+            # 前置：idx_alp_line 占名——rename 路径里它随旧表改名后继续占住
+            # 该名，恢复路径的崩溃态也可能占名；两条路都在建新表前摘掉（活动
+            # 表反正要弃）。autoindex 随表走，无需处理。
             conn.execute("DROP INDEX IF EXISTS idx_alp_line")
-            conn.executescript(
-                "ALTER TABLE agentline_predictions RENAME TO"
-                " agentline_predictions_v6;")
+            if has_shadow:
+                # 影子是唯一数据源：窗 A（rename 后新表未建，init 先兜出的
+                # 空壳）、窗 B（新表建好、复制未做）、复制半途——半建的活动表
+                # 一律弃掉重放，不做任何幂等短路。
+                conn.execute("DROP TABLE IF EXISTS agentline_predictions")
+            else:
+                conn.executescript(
+                    "ALTER TABLE agentline_predictions RENAME TO"
+                    " agentline_predictions_v6;")
             conn.executescript(_AL_TABLE)       # 新形状（含 attributor）
             conn.execute(
                 "INSERT INTO agentline_predictions (match_id, line, p_home,"
@@ -390,7 +404,7 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
                 " FROM agentline_predictions_v6;")
             # INSERT..SELECT 在外键开启下逐行校验 match_id→matches：真库存量
             # 全经 save_prediction（FK ON）写入、必然有效；真有脏行就在这里
-            # fail-fast，不静默吞掉（宁可迁移失败也不悄悄丢/改数据）。
+            # fail-fast——影子表原样保留，重试复现同一错误，不丢数据。
             conn.execute("DROP TABLE agentline_predictions_v6;")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 

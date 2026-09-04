@@ -1,7 +1,7 @@
 """agentline 两表（设计 §6）：v4 新建与 v3 迁移路径表结构一致。"""
 import sqlite3
 
-from fa.db import _migrate_up, connect, init_db, SCHEMA_VERSION
+from fa.db import _AL_TABLE, _migrate_up, connect, init_db, SCHEMA_VERSION
 
 
 def _cols(conn, table):
@@ -168,5 +168,91 @@ def test_v6_migrates_to_v7_rebuild(tmp_path):
         idx = {r["name"] for r in conn.execute("PRAGMA index_list("
                                                "agentline_predictions)")}
         assert "idx_alp_line" in idx
+    finally:
+        conn.close()
+
+
+# -- v7 重建的崩溃恢复（R1）：executescript 隐式提交让 rename / 建新表各自落盘，
+#    半途失败会把存量困在影子表 agentline_predictions_v6——重试必须从影子重放，
+#    不得因活动表「形状已对」而幂等跳过（否则 0 行 v7 假装迁移成功）。
+
+
+def _seed_shadow(conn):
+    """给影子表塞 2 行 FK 有效的 v6 形状存量（迁移的 INSERT..SELECT 在 FK ON
+    下逐行校验，父行须先备好——与真库一致：存量全经 save_prediction 写入）。"""
+    conn.execute(
+        "INSERT INTO teams (id, league, name) VALUES (1, 'E0', 'Arsenal')")
+    conn.execute(
+        "INSERT INTO matches (id, league, season, date, home_team_id,"
+        " away_team_id, raw_line) VALUES (1, 'E0', 2025, '2025-08-16', 1, 1,"
+        " '{}'), (2, 'E0', 2025, '2025-08-17', 1, 1, '{}')")
+    for i in (1, 2):
+        conn.execute(
+            "INSERT INTO agentline_predictions_v6 (match_id, line, p_home,"
+            " p_draw, p_away, p_over25, confidence, reasoning_digest,"
+            " sources_json, raw_output, status, repaired, harness, model,"
+            " duration_s, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (i, "A_base", 0.4, 0.3, 0.3, 0.5, 0.6, "d", "[]", "r", "ok",
+             0, "dsh", "m", 1.0, "2026-09-04T00:00:00Z"))
+
+
+def _assert_shadow_recovered(conn):
+    """恢复成功的统一定义：版本 7、2 行保全回填 1、影子已清、命名索引在。"""
+    assert conn.execute("SELECT version FROM schema_version"
+                        ).fetchone()["version"] == 7
+    rows = conn.execute("SELECT match_id, attributor FROM"
+                        " agentline_predictions ORDER BY match_id").fetchall()
+    assert [(r["match_id"], r["attributor"]) for r in rows] == [(1, 1), (2, 1)]
+    names = {r["name"] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "agentline_predictions_v6" not in names
+    assert "idx_alp_line" in {r["name"] for r in conn.execute(
+        "PRAGMA index_list(agentline_predictions)")}
+
+
+def test_v7_resume_window_b_created_not_copied(tmp_path):
+    """窗 B：新表已建（attributor 在）、复制未做——不能幂等跳过，须从影子重放。"""
+    from fa.db import connect, init_db
+    db = tmp_path / "winb.db"
+    init_db(db)
+    conn = connect(db)
+    # 复刻迁移前半段（DROP INDEX → rename → 建新表），停在复制之前——
+    # 即 executescript 隐式提交后真实可能存在的崩溃中间态
+    conn.execute("DROP INDEX IF EXISTS idx_alp_line")
+    conn.executescript(
+        "ALTER TABLE agentline_predictions RENAME TO agentline_predictions_v6;")
+    conn.executescript(_AL_TABLE)
+    _seed_shadow(conn)
+    conn.execute("UPDATE schema_version SET version=6")
+    conn.commit()
+    conn.close()
+    init_db(db)                                     # 重试：影子数据必须回来
+    conn = connect(db)
+    try:
+        _assert_shadow_recovered(conn)
+    finally:
+        conn.close()
+
+
+def test_v7_resume_window_a_renamed_not_created(tmp_path):
+    """窗 A：rename 已提交、新表未建（活动表缺失）——init 先兜出的空壳必须被
+    弃掉，数据仍从影子恢复，而不是因空壳 attributor 已在而跳过。"""
+    from fa.db import connect, init_db
+    db = tmp_path / "wina.db"
+    init_db(db)
+    conn = connect(db)
+    conn.execute("DROP INDEX IF EXISTS idx_alp_line")
+    conn.executescript(
+        "ALTER TABLE agentline_predictions RENAME TO agentline_predictions_v6;")
+    _seed_shadow(conn)
+    conn.execute("UPDATE schema_version SET version=6")
+    conn.commit()
+    conn.close()
+    # 此刻活动表不存在；init_db 的 _SCHEMA 先兜出空壳（新形状、0 行），恢复
+    # 路径必须丢壳从影子重放
+    init_db(db)
+    conn = connect(db)
+    try:
+        _assert_shadow_recovered(conn)
     finally:
         conn.close()
