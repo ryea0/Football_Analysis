@@ -46,3 +46,8 @@
 - 三条 job（北京时间）：daily 06:30 / matchday-am 11:00 / matchday-pm 17:00；入口 `scripts/fa_cron.sh`，日志 `logs/cron/`
 - **当前激活载体：system crontab**（`crontab -l` 可见 `# BEGIN fa-cron-m5` 标记块）；切到 hermes 载体：`scripts/cron_install.sh --remove && scripts/hermes_cron_install.sh`（后者需 `hermes gateway` 在跑）
 - 失败告警：job 失败 → `fa ops alert` 即时 TG；daily 漏跑/连续失败（最近两次成功间隔 >25h）→ `fa ops watchdog` 告警（仅 daily wrapper 收尾调一次）
+
+### 本地只读看板（v0.6，`dashboard/`）
+
+- 启动：`uv run --group dashboard streamlit run dashboard/app.py` → 浏览器开 http://localhost:8501（streamlit/plotly 走 `dashboard` 依赖组，首次自动安装；后台常驻可 `nohup … &`）
+- 只读：`connect_ro` 连生产库 `data/fa.db`，不写任何表；A 线 3 页（回测总览/校准/模拟盘）+ B 线 4 页（总览/推荐台账/AB 双轨/运维健康）
