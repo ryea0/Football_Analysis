@@ -51,8 +51,16 @@ else:
            "落注日 placed": "placed_at"}[basis]
     day = c2.selectbox("日期 Date", ["全部 All", *date_choices(bets, col)])
     view = by_date(bets, col, day)
-    st.dataframe(view.rename(columns=COL_BILINGUAL), use_container_width=True,
-                 hide_index=True)
+    # 钱列前置（用户实测：盈亏排在 23 列最右端，屏幕内看不到）：盈亏/回报/
+    # CLV/收盘紧跟识别列，模型诊断列（概率/edge/EV）殿后；映射外或新增列
+    # 自动缀尾，不丢列。
+    front = ["id", "status", "market", "home", "away", "odds_taken", "stake",
+             "return_amt", "pnl", "clv", "closing_odds", "closing_source",
+             "kickoff_utc", "settled_at", "placed_at", "strategy", "phase"]
+    ordered = [c for c in front if c in view.columns] + \
+              [c for c in view.columns if c not in front]
+    st.dataframe(view[ordered].rename(columns=COL_BILINGUAL),
+                 use_container_width=True, hide_index=True)
     st.caption("clv = 拿价/收盘价 − 1，正=买在收盘前更优价。收盘基准链（spec §7.3）："
                "Pinnacle 优先、缺失 fallback Betfair 交易所，基准列 source 记账实际"
                "所用。盈亏三态：won/lost=回报−注金、void=0（零损益）、pending=—"
