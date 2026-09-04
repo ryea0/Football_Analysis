@@ -616,7 +616,7 @@ def test_is_control_column_pinned(tmp_path):
 
 def test_v3_migrates_to_current(tmp_path):
     """老库（v3）经 init_db 升级到当前版本，retro 表出现且 version==SCHEMA_VERSION
-    （v4=retro 两表、v5=agentline 两表，见 _migrate_up docstring）。"""
+    （v4=retro 两表、v5=agentline 两表+retro attributor 列，见 _migrate_up docstring）。"""
     from fa.db import SCHEMA_VERSION, connect, init_db
     db = tmp_path / "old.db"
     init_db(db)
