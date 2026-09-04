@@ -73,6 +73,17 @@ def test_critic_fail_aborts_round_with_budget_exhausted():
     assert [r["role"] for r in res["rounds"]] == ["generator", "critic"]
 
 
+def test_critic_dsh_fail_cause_lands_in_payload():
+    """批评者 dsh 层失败：真实根因入 payload（生成者侧 _status_of 同式），
+    不能只剩契约解析错误掩盖 dsh 失败。"""
+    seq = iter([(OK0, None, 0.01), (None, "dsh 退出码 1：boom", 0.5)])
+    res = run_match_debate(lambda p: next(seq), INFO)
+    critic = next(r for r in res["rounds"] if r["role"] == "critic")
+    assert critic["status"] == "error"
+    assert "dsh 失败" in critic["payload"] and "boom" in critic["payload"]
+    assert res["budget_exhausted"] == 1 and res["early_stop"] == 0
+
+
 def test_revision_fail_takes_last_ok():
     res = run_match_debate(_call_seq([OK0, ATK, "垃圾"]), INFO)
     assert abs(res["final"]["p_home"] - 0.5) < 1e-9

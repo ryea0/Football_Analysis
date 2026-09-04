@@ -101,7 +101,10 @@ def run_match_debate(call, info: dict) -> dict:
         n_calls += 1
         atk = parse_attack(out or "")
         if err is not None:
-            atk = {**atk, "status": "timeout" if "超时" in err else "error"}
+            # 真实失败原因入 payload（生成者侧 _status_of 同式）——否则审计只
+            # 能看到契约解析错误，掩盖 dsh 层失败根因。
+            atk = {**atk, "status": "timeout" if "超时" in err else "error",
+                   "error": f"dsh 失败：{err}"}
         _record(r, "critic", atk, out or "", dur)
         if atk["status"] != "ok":
             budget_exhausted = 1
