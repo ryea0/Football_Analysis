@@ -214,5 +214,5 @@ def test_report_renders_amulti_row(conn_amulti, tmp_path):
     assert "| A_multi |" in text
     assert "A_multi" in text.split("## 平注 ROI")[1]  # ROI 段也含该线
     # 成员披露行（成员级计分入口）必须在脚注前出现
-    assert ("A_multi 为 3 成员确定性聚合（分量中位数）" in text
+    assert ("A_multi 为多成员确定性聚合（分量中位数）" in text
             and "本批成员 3 行 / ok 2" in text)

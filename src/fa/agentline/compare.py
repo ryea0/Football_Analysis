@@ -92,7 +92,7 @@ _FOOTNOTE = ("> 各行比值在其自身 n 场子集内计算，跨线直比无�
 def render_report(cmp: dict, out_path: Path) -> None:
     """滚动对比报告（设计 §8）：诚实标注增强层泄漏限制与小样本边界。"""
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    lines = [f"# 双路对比滚动报告（生成于 {now}）", "",
+    lines = [f"# 多线对比滚动报告（生成于 {now}）", "",
              f"样本 n={cmp['n']}（线 P 与线 A 交集见各线 n）", "",
              "| 线 | n | log-loss | Brier | 子集市场 ll | vs 子集市场 |",
              "|---|---|---|---|---|---|"]
@@ -125,7 +125,7 @@ def render_report(cmp: dict, out_path: Path) -> None:
     # 落库、可单独计分；audit 无该线数字（旧形态 dict）时以「—」占位不虚报。
     audit = cmp.get("audit", {})
     mm, mo = audit.get("multi_members"), audit.get("multi_member_ok")
-    lines += ["", f"> A_multi 为 3 成员确定性聚合（分量中位数）；成员行单独落库"
+    lines += ["", f"> A_multi 为多成员确定性聚合（分量中位数）；成员行单独落库"
                   f"可计分（本批成员 {mm if mm is not None else '—'} 行 / "
                   f"ok {mo if mo is not None else '—'}）"]
     lines += ["", _FOOTNOTE, ""]
