@@ -18,6 +18,7 @@ import re
 import sqlite3
 import subprocess
 import time
+from datetime import date
 
 from fa import config
 from fa.config import KB_MAX_CHARS
@@ -117,15 +118,32 @@ def build_reflect_prompt(league: str, kb_text: str | None, evidence: dict) -> st
 """
 
 
+def _valid_date(value) -> bool:
+    """YYYY-MM-DD 且为真实日历日（``2026-13-45`` 过正则但炸 prune 的
+    ``date.fromisoformat``——修复轮 1 F3，格式与合法性一起查）。"""
+    s = str(value)
+    if not _DATE_RE.match(s):
+        return False
+    try:
+        date.fromisoformat(s)
+    except ValueError:
+        return False
+    return True
+
+
 def _section_field_errs(tag: str, section: str, d, ttl) -> list[str]:
     """date/ttl 的分段规则（§4 语法，与 parse_kb 同口径）——Ruling 2 三分。
 
     S（结构性认知）：date、ttl_days 双禁；T（时效）：date、正 ttl_days 双必；
     L（教训）：date 必带、ttl_days 禁带。``tag`` 定位违规条目（含锚点时
     关卡人审能直接定位到具体旧条目）。
+
+    ttl_days 须**真整数**：bool 是 int 子类，``True`` 会渲染成 ``|Trued`` 并在
+    下一窗 ``prune_live_files`` 的 fromisoformat 处炸掉——显式排除（F2）；
+    S/L 分支的 ``ttl is not None`` 判定本就把 bool 计为「带 ttl_days」违规。
     """
     if section == "时效":
-        if d and isinstance(ttl, int) and ttl > 0:
+        if d and isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0:
             return []
         return [f"{tag} 时效段须带 date 与正 ttl_days"]
     if section == "教训":
@@ -141,53 +159,95 @@ def _section_field_errs(tag: str, section: str, d, ttl) -> list[str]:
 
 
 def validate_contract(contract: dict, kb: K.KnowledgeFile, league: str) -> list[str]:
-    """六条校验（设计档 §6.3）；返回违规清单（空 = 通过）。"""
+    """六条校验（设计档 §6.3）；返回违规清单（空 = 通过）。
+
+    本函数是唯一执法点（Ruling 3，T5-review 指针）：对**任意** JSON 输入必须
+    全程不抛——字段类型错一律记违规降级，让 tick 不被 AttributeError/TypeError
+    打断（修复轮 1 F1：三列表字段、条目对象、evidence 对象、不可哈希 target、
+    非字符串 text/reason；F2 bool ttl；F3 真实日历日；F4 fixtures 整数）。
+    """
     errs: list[str] = []
     if contract.get("league") != league:
         return [f"league 不匹配：{contract.get('league')!r} != {league!r}"]
-    appends = contract.get("appends") or []
-    amendments = contract.get("amendments") or []
-    deprecations = contract.get("deprecations") or []
+    sections: dict[str, list] = {}
+    for key in ("appends", "amendments", "deprecations"):
+        raw = contract.get(key)
+        if isinstance(raw, list):
+            sections[key] = raw
+        elif raw is None:
+            sections[key] = []
+        else:                       # "none" 之类按字符迭代必炸 → 降级不抛（F1）
+            errs.append(f"{key} 须为列表：{str(raw)[:80]!r}")
+            sections[key] = []
+    appends = sections["appends"]
+    amendments = sections["amendments"]
+    deprecations = sections["deprecations"]
     anchors = {e.anchor: e for e in kb.entries}
     changes = bool(appends or amendments or deprecations)
     ncr = contract.get("no_change_reason")
     if changes == bool(ncr):
         errs.append("变更与 no_change_reason 必须二选一（同时给或同时缺=违规）")
+    if ncr is not None and not isinstance(ncr, str):
+        # 非 dict 合同体（dict/list）会让 runner 的 INSERT 绑定炸
+        # sqlite3.InterfaceError——同 F1 类，校验层拦截降级（控制者追加）
+        errs.append("no_change_reason 须为字符串")
     for i, ap in enumerate(appends):
+        if not isinstance(ap, dict):
+            errs.append(f"appends[{i}] 须为对象：{str(ap)[:80]!r}")
+            continue
         section = ap.get("section")
         if section not in K.SECTIONS:
             errs.append(f"appends[{i}].section 非法：{section!r}")
             continue
         d, ttl = ap.get("date"), ap.get("ttl_days")
         errs.extend(_section_field_errs(f"appends[{i}]", section, d, ttl))
-        if d is not None and not _DATE_RE.match(str(d)):
+        if d is not None and not _valid_date(d):
             errs.append(f"appends[{i}].date 格式非法：{d!r}")
-        if not (ap.get("text") or "").strip():
-            errs.append(f"appends[{i}].text 为空")
-        ev = ap.get("evidence") or {}
-        if not ev.get("fixtures"):
-            errs.append(f"appends[{i}].evidence.fixtures 为空（防事后诸葛强制项）")
+        text = ap.get("text")
+        if not isinstance(text, str) or not text.strip():
+            errs.append(f"appends[{i}].text 须为非空字符串")
+        ev = ap.get("evidence")
+        if not isinstance(ev, dict):
+            errs.append(f"appends[{i}].evidence 须为对象（含 fixtures/stat）")
+            continue
+        fx = ev.get("fixtures")
+        if not (isinstance(fx, list) and fx and all(
+                isinstance(f, int) and not isinstance(f, bool) for f in fx)):
+            errs.append(f"appends[{i}].evidence.fixtures 须为非空整数列表"
+                        "（防事后诸葛强制项）")
     for i, am in enumerate(amendments):
+        if not isinstance(am, dict):
+            errs.append(f"amendments[{i}] 须为对象：{str(am)[:80]!r}")
+            continue
         target = am.get("target")
-        if target not in anchors:
+        if not isinstance(target, str) or target not in anchors:
             errs.append(f"amendments[{i}].target 不存在：{target!r}")
             continue
         d, ttl = am.get("date"), am.get("ttl_days")
         errs.extend(_section_field_errs(f"amendments[{i}]({target})",
                                         anchors[target].section, d, ttl))
-        if not (am.get("text") or "").strip():
-            errs.append(f"amendments[{i}].text 为空")
-        if d is not None and not _DATE_RE.match(str(d)):
+        if d is not None and not _valid_date(d):
             errs.append(f"amendments[{i}].date 格式非法：{d!r}")
+        text = am.get("text")
+        if not isinstance(text, str) or not text.strip():
+            errs.append(f"amendments[{i}].text 须为非空字符串")
     for i, dep in enumerate(deprecations):
-        if dep.get("target") not in anchors:
-            errs.append(f"deprecations[{i}].target 不存在：{dep.get('target')!r}")
-        if not (dep.get("reason") or "").strip():
-            errs.append(f"deprecations[{i}].reason 为空")
+        if not isinstance(dep, dict):
+            errs.append(f"deprecations[{i}] 须为对象：{str(dep)[:80]!r}")
+            continue
+        target = dep.get("target")
+        if not isinstance(target, str) or target not in anchors:
+            errs.append(f"deprecations[{i}].target 不存在：{target!r}")
+        reason = dep.get("reason")
+        if not isinstance(reason, str) or not reason.strip():
+            errs.append(f"deprecations[{i}].reason 须为非空字符串")
     if not errs and changes:
         try:
             new_kb = K.apply_contract(kb, contract)
-            text = K.render_kb(new_kb, generated="probe", digest="probe")
+            # 探针渲染须与真实 merge 同长口径（generated 10 字符 + digest 12
+            # 字符）——原 "probe"×2 少 12 字符，上限边缘会误放行（F5）
+            text = K.render_kb(new_kb, generated="2026-01-01",
+                               digest="0123456789ab")
             if K.kb_over_cap(text):
                 errs.append(f"渲染后全文超 KB_MAX_CHARS={KB_MAX_CHARS} 上限")
         except EvolutionError as exc:

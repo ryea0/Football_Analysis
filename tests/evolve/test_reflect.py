@@ -178,6 +178,58 @@ def test_validate_contract_cap_exceeded():
     assert any("KB_MAX_CHARS" in e or "上限" in e for e in errs)
 
 
+def test_validate_contract_type_confusion_degrades():
+    """F1–F4：类型错契约一律记违规清单，绝不抛（reflect_league 才能降级，
+    tick 不被 AttributeError/TypeError 打断在窗中途）。"""
+    kb = K.parse_kb(KB, "E0")
+    ap = _VALID["appends"][0]
+    # F1：三列表字段给了字符串（"none" 按字符迭代会 AttributeError）
+    assert any("appends" in e and "列表" in e
+               for e in R.validate_contract(dict(_VALID, appends="none"), kb, "E0"))
+    assert any("amendments" in e and "列表" in e for e in R.validate_contract(
+        dict(_VALID, amendments="x"), kb, "E0"))
+    assert any("deprecations" in e and "列表" in e for e in R.validate_contract(
+        dict(_VALID, deprecations="x"), kb, "E0"))
+    # F1：条目非对象
+    assert any("appends[0] 须为对象" in e for e in
+               R.validate_contract(dict(_VALID, appends=["x"]), kb, "E0"))
+    # F1：target 不可哈希（dict 成员测试会 TypeError）
+    bad_target = dict(_VALID, appends=[], amendments=[
+        {"target": ["E0-S01"], "text": "x", "date": None, "ttl_days": None,
+         "reason": "r"}])
+    assert any("E0-S01" in e for e in R.validate_contract(bad_target, kb, "E0"))
+    # F1：text / evidence 非字符串标量
+    assert any("text" in e for e in R.validate_contract(
+        dict(_VALID, appends=[dict(ap, text=123)]), kb, "E0"))
+    assert any("evidence" in e for e in R.validate_contract(
+        dict(_VALID, appends=[dict(ap, evidence="s")]), kb, "E0"))
+    # F2：ttl_days=true（bool 是 int 子类，True 会渲染成 |Trued 炸下窗修剪）
+    assert any("ttl_days" in e for e in R.validate_contract(
+        dict(_VALID, appends=[dict(ap, section="时效", date="2026-10-16",
+                                   ttl_days=True)]), kb, "E0"))
+    assert any("ttl_days" in e for e in R.validate_contract(
+        dict(_VALID, appends=[dict(ap, ttl_days=True)]), kb, "E0"))
+    # F3：过正则的非法日历日（prune 的 fromisoformat 会炸）
+    assert any("date" in e for e in R.validate_contract(
+        dict(_VALID, appends=[dict(ap, date="2026-13-45")]), kb, "E0"))
+    assert any("date" in e for e in R.validate_contract(
+        dict(_VALID, appends=[dict(ap, section="时效", date="2026-02-30",
+                                   ttl_days=30)]), kb, "E0"))
+    # F4：fixtures 须非空整数列表（探针文档口径）
+    assert any("整数" in e for e in R.validate_contract(
+        dict(_VALID, appends=[dict(ap, evidence={"fixtures": ["1"],
+                                                 "stat": "s"})]), kb, "E0"))
+    assert any("整数" in e for e in R.validate_contract(
+        dict(_VALID, appends=[dict(ap, evidence={"fixtures": [1, True],
+                                                 "stat": "s"})]), kb, "E0"))
+    # F1 同族（控制者追加）：no_change_reason 非字符串 → runner INSERT 绑定
+    # dict 会炸 sqlite3.InterfaceError，校验层拦截降级
+    assert "no_change_reason 须为字符串" in R.validate_contract(
+        dict(_VALID, appends=[], no_change_reason={"why": "x"}), kb, "E0")
+    # 反向：真合法契约在这些守卫下零回归
+    assert R.validate_contract(_VALID, kb, "E0") == []
+
+
 def test_call_reflect_raises_with_reason(tmp_path, monkeypatch):
     """exit 99 → reason="exit"；0.05s 超时护栏撞上 sleep 2 → reason="timeout"。"""
     monkeypatch.setenv("HERMES_BIN", _hermes(_NO_CALL, tmp_path))
