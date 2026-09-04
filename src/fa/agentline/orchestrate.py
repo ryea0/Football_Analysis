@@ -75,7 +75,9 @@ def run_multi(conn: sqlite3.Connection, info_dir: Path, members: int = 3,
     三元 upsert 语义与单跑一致）。
     """
     from fa.agentline.ensemble import aggregate_predictions
+    from fa.agentline.store import _now
     profile = _PROFILE_LINE["A_base"]
+    t0 = _now()                       # 台账起点＝批次起点，非批尾落库时刻
     done = {r["match_id"] for r in conn.execute(
         "SELECT match_id FROM agentline_predictions"
         " WHERE line='A_multi' AND attributor=0 AND status='ok'")}
@@ -103,7 +105,7 @@ def run_multi(conn: sqlite3.Connection, info_dir: Path, members: int = 3,
         counts["ok" if agg["status"] == "ok" else "error"] += 1
     save_run(conn, "A_multi", profile, MODEL, counts,
              {"n_todo": len(todo), "members": members,
-              "info_dir": str(info_dir)})
+              "info_dir": str(info_dir)}, started_at=t0)
     return counts
 
 

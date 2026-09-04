@@ -164,6 +164,11 @@ def test_run_multi_members_and_aggregate(conn, info_dir, monkeypatch):
         return (next(outs), None, 1.0)
 
     monkeypatch.setattr(orchestrate.runner_mod, "run_headless", fake_run)
+    # 台账起点＝批起点（终审 Important #2 微任务，run_line 同式）：递增时钟
+    # 钉死 started_at 取 run_multi 开头时刻，而非批尾 save_run 落库时刻。
+    from fa.agentline import store as store_mod
+    clock = iter(f"2026-09-05T00:00:{i:02d}+00:00" for i in range(99))
+    monkeypatch.setattr(store_mod, "_now", lambda: next(clock))
     counts = orchestrate.run_multi(conn, info_dir, members=3, limit=1)
     assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
     rows = conn.execute(
@@ -176,6 +181,10 @@ def test_run_multi_members_and_aggregate(conn, info_dir, monkeypatch):
     assert len(calls) == 3
     assert {profile for _, profile in calls} == {"fa-agent-base"}
     assert all("网络检索" not in prompt for prompt, _ in calls)
+    run_row = conn.execute("SELECT started_at, finished_at FROM agentline_runs"
+                           " WHERE line='A_multi'").fetchone()
+    assert run_row["started_at"] == "2026-09-05T00:00:00+00:00"   # 批首时钟
+    assert run_row["finished_at"] > run_row["started_at"]          # 批尾≠起点
 
 
 def test_run_multi_all_failed_aggregate_error(conn, info_dir, monkeypatch):
