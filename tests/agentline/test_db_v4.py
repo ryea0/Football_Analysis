@@ -154,8 +154,9 @@ def test_v6_migrates_to_v7_rebuild(tmp_path):
     init_db(db)                                     # v6 -> v7 重建
     conn = connect(db)
     try:
+        # 钉 SCHEMA_VERSION 而非字面量：v8 起 fa 版本继续上移，本用例只关心升到位
         assert conn.execute("SELECT version FROM schema_version"
-                            ).fetchone()["version"] == 7
+                            ).fetchone()["version"] == SCHEMA_VERSION
         cols = {r["name"] for r in conn.execute(
             "PRAGMA table_info(agentline_predictions)")}
         assert "attributor" in cols
@@ -197,9 +198,10 @@ def _seed_shadow(conn):
 
 
 def _assert_shadow_recovered(conn):
-    """恢复成功的统一定义：版本 7、2 行保全回填 1、影子已清、命名索引在。"""
+    """恢复成功的统一定义：版本升到 SCHEMA_VERSION、2 行保全回填 1、影子已清、
+    命名索引在。"""
     assert conn.execute("SELECT version FROM schema_version"
-                        ).fetchone()["version"] == 7
+                        ).fetchone()["version"] == SCHEMA_VERSION
     rows = conn.execute("SELECT match_id, attributor FROM"
                         " agentline_predictions ORDER BY match_id").fetchall()
     assert [(r["match_id"], r["attributor"]) for r in rows] == [(1, 1), (2, 1)]
