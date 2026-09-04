@@ -160,7 +160,7 @@ def add_run(c, phase="am"):
 
 
 def recs(c, fixture_id, market=None, strategy="model_only"):
-    """取该 fixture 的推荐行。A1 双落后每个 (fixture, market, phase) 有两轨行——
+    """取该 fixture 的推荐行。同刻三落后每个 (fixture, market, phase) 有三轨行——
     既有断言锚定的是 model_only 轨（M3 语义），故默认过滤到该轨；跨轨/全轨
     断言显式传 ``strategy=None``（空集断言一律走 None，保持「一行都没有」强度）。"""
     q = "SELECT * FROM recommendations WHERE fixture_id=?"
@@ -227,7 +227,7 @@ def test_in_gate_writes_h_and_o25_recommendations(priced):
     assert all(r["phase"] == "am" for r in mine)
     assert all(r["run_id"] == run for r in mine)
     assert all(r["created_at"] for r in mine)
-    assert len(ids) == 12                            # 3 场 × 2 market × 2 轨（A1 双落）
+    assert len(ids) == 18                            # 3 场 × 2 market × 3 轨（同刻三落）
 
 
 def test_model_p_matches_library_training_data(priced):
@@ -319,7 +319,7 @@ def test_out_of_gate_no_recommendation(priced):
     assert ev_of(probs["H"], o["home"]) < EV_MIN            # EV 同样不过
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
     assert recs(c, fid) == []
-    assert recs(c, fid, strategy=None) == []                # 两轨都没有
+    assert recs(c, fid, strategy=None) == []                # 三轨都没有
 def test_edge_gate_inclusive_at_exact_boundary(priced, monkeypatch):
     """把 EDGE_MIN monkeypatch 到**逐位等于**该边界的值，钉死 >=（含端点）。"""
     c, fx, probs = priced
@@ -331,7 +331,7 @@ def test_edge_gate_inclusive_at_exact_boundary(priced, monkeypatch):
     monkeypatch.setattr(value, "EDGE_MIN", math.nextafter(edge, math.inf))
     c.execute("DELETE FROM recommendations")
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
-    assert recs(c, fx["in"], "H", strategy=None) == []      # 阈值高 1 ulp 即剔除（两轨皆无）
+    assert recs(c, fx["in"], "H", strategy=None) == []      # 阈值高 1 ulp 即剔除（三轨皆无）
 
 
 def test_ev_gate_inclusive_at_exact_boundary(priced, monkeypatch):
@@ -344,7 +344,7 @@ def test_ev_gate_inclusive_at_exact_boundary(priced, monkeypatch):
     monkeypatch.setattr(value, "EV_MIN", math.nextafter(ev, math.inf))
     c.execute("DELETE FROM recommendations")
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
-    assert recs(c, fx["in"], "H", strategy=None) == []      # 两轨皆无
+    assert recs(c, fx["in"], "H", strategy=None) == []      # 三轨皆无
 
 
 def test_odds_band_gates_isolated(priced, monkeypatch):
@@ -379,7 +379,7 @@ def test_52h_window_inclusive_lower_and_upper(priced):
     assert recs(c, fx["in"])                                # 窗口内
     assert recs(c, fx["at0"])                               # 恰 now（下端点，含）
     assert recs(c, fx["at52"])                              # 恰 52h（上端点，含）
-    assert recs(c, fx["at53"], strategy=None) == []         # 53h → 出窗（两轨皆无）
+    assert recs(c, fx["at53"], strategy=None) == []         # 53h → 出窗（三轨皆无）
     assert recs(c, fx["past"], strategy=None) == []         # 已开球（now−1h）→ 出窗
 
 
@@ -390,7 +390,7 @@ def test_window_lower_endpoint_is_exactly_now(priced):
     assert recs(c, fx["at0"])                               # 有盘口、对齐、恰在下端点
     assert {r["market"] for r in recs(c, fx["at0"])} == {"H", "O2.5"}
     assert {r["id"] for r in recs(c, fx["at0"])} <= set(ids)
-    # 阳性对照：出窗侧在完全相同的盘口下确实为空（排除「靠缺价误绿」，两轨皆无）
+    # 阳性对照：出窗侧在完全相同的盘口下确实为空（排除「靠缺价误绿」，三轨皆无）
     assert recs(c, fx["at53"], strategy=None) == []
     assert recs(c, fx["past"], strategy=None) == []
 
@@ -398,7 +398,7 @@ def test_window_lower_endpoint_is_exactly_now(priced):
 def test_unaligned_fixture_never_recommended(priced):
     c, fx, probs = priced
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
-    assert recs(c, fx["unaligned"], strategy=None) == []    # 有盘口也不推荐（两轨皆无）
+    assert recs(c, fx["unaligned"], strategy=None) == []    # 有盘口也不推荐（三轨皆无）
 
 
 def test_league_without_training_data_is_skipped(priced):
@@ -433,7 +433,7 @@ def test_model_is_fitted_once_per_league_per_run(priced, monkeypatch):
     monkeypatch.setattr(value, "fit_league", counting)
     ids = generate_recommendations(c, [LEAGUE], "am", add_run(c))
     assert calls == [LEAGUE]                                # 恰 1 次，且是该联赛
-    assert len(ids) == 12                            # 拟合结果被全部候选复用（3 场×2 市场×2 轨）
+    assert len(ids) == 18                      # 拟合结果被全部候选复用（3 场×2 市场×3 轨）
 
 
 # ---------------------------------------------------------------- UNIQUE 刷新
@@ -498,8 +498,9 @@ def test_quotes_within_same_batch_still_compete(priced):
 # ---------------------------------------------------------------- 双轨同刻双落（A1，§6.6）
 
 
-def test_generate_writes_both_tracks_single_commit(priced):
-    """每个过门槛候选写 model_only + model_persona 两行：同数字、persona 轨中性初始。"""
+def test_generate_writes_three_tracks_single_commit(priced):
+    """每个过门槛候选写三轨行（§6.6 双轨 + §12.7 nokb 对照轨）：数字全同、
+    persona 两轨中性初始（final = kelly）、model_only 退回 kelly（NULL）。"""
     c, fx, probs = priced
     run = add_run(c)
     ids = generate_recommendations(c, [LEAGUE], "am", run)
@@ -508,15 +509,16 @@ def test_generate_writes_both_tracks_single_commit(priced):
         (run,)).fetchall()
     mo = [r for r in rows if r["strategy"] == "model_only"]
     mp = [r for r in rows if r["strategy"] == "model_persona"]
-    assert len(mo) == len(mp) > 0 and len(rows) == 2 * len(mo)
-    assert {r["id"] for r in rows} == set(ids)              # 返回 ids 含两轨
-    for a, b in zip(mo, mp):                                # 同数字、两轨
+    nk = [r for r in rows if r["strategy"] == "model_persona_nokb"]
+    assert len(mo) == len(mp) == len(nk) > 0 and len(rows) == 3 * len(mo)
+    assert {r["id"] for r in rows} == set(ids)              # 返回 ids 含三轨
+    for a, b, n in zip(mo, mp, nk):                         # 同数字、三轨
         for col in ("fixture_id", "market", "phase", "run_id", "model_p",
                     "market_p", "best_odds", "bookmaker", "edge", "ev",
                     "kelly_stake_frac"):
-            assert a[col] == b[col], col
+            assert a[col] == b[col] == n[col], col
         assert a["final_stake_frac"] is None                # model_only：退回 kelly（M3 语义）
-    for r in mp:                                            # persona 轨中性初始
+    for r in mp + nk:                                       # persona 两轨中性初始
         assert r["final_stake_frac"] == r["kelly_stake_frac"]
         assert r["verdict"] is None and r["confidence_delta"] is None
         assert r["key_factors"] is None and r["report_md"] is None

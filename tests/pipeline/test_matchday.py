@@ -263,21 +263,29 @@ def test_am_full_chain(env):
     out = matchday.run_matchday(c, "am", [LEAGUE])
 
     assert out["status"] == "ok" and out["phase"] == "am"
-    # A1 双落：1 个过门槛 market × 2 轨 = 2 条推荐；落注双轨各一注（D2 分轨；
-    # persona 轨判决 = fixture 脚本的 agree，final = kelly×(1+δ) 仍 >0 → 照落，
-    # veto 则该轨不落——见 test_am_veto_drops_persona_track_bet）
-    assert out["fixtures"] == 1 and out["recs"] == 2 and out["bets"] == 2
+    # §6.6 同刻三落（M6 §12.7 加 nokb 对照轨）：1 个过门槛 market × 3 轨 = 3 条推荐；
+    # 落注分轨各一注（D2 分账）：model_only 退回 kelly、persona/nokb 判决 =
+    # fixture 脚本的 agree → final = kelly×(1+δ) 仍 >0 → 照落（veto 轨不落——
+    # 见 test_am_veto_drops_persona_track_bet）
+    assert out["fixtures"] == 1 and out["recs"] == 3 and out["bets"] == 3
     assert out["quota_left"] == QUOTA
     assert out["degraded"] is False and out["sent"] is True
     assert out["am_run_id"] is None
     assert env.fetch == [LEAGUE]
 
-    rec = dict(c.execute("SELECT * FROM recommendations WHERE market='H'").fetchone())
+    rec = dict(c.execute("SELECT * FROM recommendations"
+                         " WHERE market='H' AND strategy='model_only'").fetchone())
     assert rec["run_id"] == out["run_id"] and rec["phase"] == "am"
     assert rec["strategy"] == "model_only"
+    # 三轨全量归因：每个过门槛 market 的三行都归本 run、am 相位
+    assert {r["strategy"] for r in c.execute(
+        "SELECT strategy FROM recommendations")} == {
+            "model_only", "model_persona", "model_persona_nokb"}
+    assert all(r["run_id"] == out["run_id"] and r["phase"] == "am" for r in c.execute(
+        "SELECT run_id, phase FROM recommendations"))
 
     bets = bets_of(c)
-    assert len(bets) == 2                                     # 双轨各一注
+    assert len(bets) == 3                                     # 三轨各一注
     assert {b["market"] for b in bets} == {"H"}
     assert {b["recommendation_id"] for b in bets} == {
         r["id"] for r in c.execute("SELECT id FROM recommendations")}
@@ -293,12 +301,14 @@ def test_am_full_chain(env):
     summary = summary_of(c, out["run_id"])
     assert summary["train_n"] >= 64                 # T8 报告消费的样本量键
     assert summary["half_life"] == FitConfig().half_life_days
-    assert summary["fixtures"] == 1 and summary["recs"] == 2 and summary["bets"] == 2
+    assert summary["fixtures"] == 1 and summary["recs"] == 3 and summary["bets"] == 3
     assert summary["unknown"] == []
-    # 组合风控三参数观测快照（§5.3 v0.10）：每次 matchday run 必落（布线钉测）
+    # 组合风控三参数观测快照（§5.3 v0.10）：每次 matchday run 必落（布线钉测）；
+    # risk_gates 遍历 STRATEGIES 单源 → 三轨键全在（M6 nokb 对照轨自动入列）
     gates = summary["risk_gates"]
     assert gates["enforced"] is False                # paper 期仅记录
-    assert set(gates["by_strategy"]) >= {"model_only", "model_persona"}
+    assert set(gates["by_strategy"]) == {"model_only", "model_persona",
+                                         "model_persona_nokb"}
     assert gates["by_strategy"]["model_only"]["pending_stake"] >= 0.0
     assert summary["telegram"] == {"sent": True, "error": None}
     assert summary["report"] == "matchday"
@@ -368,7 +378,7 @@ def test_persisted_window_fixture_skips_probe_and_syncs(env):
 
     assert env.events == []                          # 探测被跳过（零额外请求）
     assert env.fetch == [LEAGUE]
-    assert out["status"] == "ok" and out["recs"] == 2 and out["bets"] == 2  # A1 双落×双轨
+    assert out["status"] == "ok" and out["recs"] == 3 and out["bets"] == 3  # 同刻三落×分轨落注
     assert "probe" not in summary_of(c, out["run_id"])
 
 
@@ -381,7 +391,7 @@ def test_probe_finding_event_triggers_full_sync(env):
 
     assert env.events == [LEAGUE]
     assert env.fetch == [LEAGUE]                     # 有赛事 → 照常计费拉盘
-    assert out["status"] == "ok" and out["recs"] == 2 and out["bets"] == 2  # A1 双落×双轨
+    assert out["status"] == "ok" and out["recs"] == 3 and out["bets"] == 3  # 同刻三落×分轨落注
     assert out["fixtures"] == 1
     assert summary_of(c, out["run_id"])["probe"] == "found"
 
@@ -484,7 +494,7 @@ def test_exception_mid_run_rolls_back_stage_writes(env, monkeypatch):
     # 已提交的阶段产物不受回滚影响（sync/推荐各自 commit 过）
     assert reader.execute("SELECT COUNT(*) c FROM fixtures").fetchone()["c"] == 1
     assert reader.execute(
-        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 2  # A1 双落
+        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 3  # 同刻三落
     row = reader.execute(
         "SELECT status, summary FROM runs ORDER BY id DESC LIMIT 1").fetchone()
     assert row["status"] == "failed" and "落注炸了" in row["summary"]
@@ -697,7 +707,7 @@ def test_pm_degraded_reuses_am_snapshots_and_skips_fetch(env):
     assert out["status"] == "degraded_ok" and out["degraded"] is True
     assert out["fixtures"] == 0 and out["bets"] == 0
     assert out["am_run_id"] == am["run_id"]
-    assert len(bets_of(c)) == 2                      # 同场同市场不重下（T7 去重，双轨各一）
+    assert len(bets_of(c)) == 3                      # 同场同市场不重下（T7 去重，分轨各一）
     assert env.update == [{"am_run_id": am["run_id"], "pm_run_id": out["run_id"],
                            "quota_left": 80, "degraded": True}]
     assert env.render == []
@@ -725,7 +735,7 @@ def test_pm_full_chain_diffs_against_am_and_places_new_market(env):
     assert out["status"] == "ok" and out["degraded"] is False
     assert out["region_merged"] is False and out["snapshot_reused"] is False
     assert out["am_run_id"] == am["run_id"]
-    assert out["bets"] == 2                          # 只落新增市场（双轨各一注）
+    assert out["bets"] == 3                          # 只落新增市场（三轨各一注）
     assert {b["market"] for b in bets_of(c)} == {"H", "O2.5"}
     assert env.update == [{"am_run_id": am["run_id"], "pm_run_id": out["run_id"],
                            "quota_left": QUOTA, "degraded": False}]
@@ -769,14 +779,15 @@ def test_same_phase_rerun_refreshes_run_id_attribution(env):
     env.fetch.clear()
     second = matchday.run_matchday(c, "am", [LEAGUE])
 
-    assert second["status"] == "ok" and second["recs"] == 2   # A1 双落
+    assert second["status"] == "ok" and second["recs"] == 3   # 同刻三落
     rows = [dict(r) for r in c.execute(
         "SELECT id, run_id, strategy FROM recommendations WHERE phase='am'")]
-    assert len(rows) == 2                                     # 两轨各一行，原地刷新
-    assert {r["strategy"] for r in rows} == {"model_only", "model_persona"}
+    assert len(rows) == 3                                     # 三轨各一行，原地刷新
+    assert {r["strategy"] for r in rows} == {"model_only", "model_persona",
+                                             "model_persona_nokb"}
     assert all(r["run_id"] == second["run_id"] != first["run_id"] for r in rows)
     bets = bets_of(c)
-    assert len(bets) == 2                                     # 双轨各一注（D2）
+    assert len(bets) == 3                                     # 三轨各一注（D2）
     assert {b["recommendation_id"] for b in bets} == {r["id"] for r in rows}
 
 
@@ -853,7 +864,7 @@ def test_pm_propagates_am_verdict_with_zero_calls(env):
     assert rows and all(r["verdict"] == "agree" for r in rows.values())
     # am 的行 kelly 与 pm 相同 → final 一致（传播按各行 kelly 重算的旁证）
     assert {m: r["final_stake_frac"] for m, r in rows.items()} == am_final
-    assert len(bets_of(c)) == 2                             # am 的注不重下
+    assert len(bets_of(c)) == 3                             # am 的注不重下（分轨各一）
 
 
 def test_persona_degradation_never_fails_run(env, monkeypatch):
@@ -871,7 +882,8 @@ def test_persona_degradation_never_fails_run(env, monkeypatch):
     assert out["persona"]["degraded"][0]["reason"] == "timeout"
     assert summary_of(c, out["run_id"])["persona"]["attempted"]
     assert all(r["verdict"] is None for r in _persona_recs(c))   # 回退纯模型
-    assert out["bets"] == 2                                      # 中性 kelly 照落
+    assert out["bets"] == 3                                      # 中性 kelly 照落（三轨：
+                                                                 #  nokb 判决前也是中性初始）
 
 
 def test_am_veto_drops_persona_track_bet(env, tmp_path, monkeypatch):
@@ -909,7 +921,7 @@ def test_sync_failure_degrades_to_existing_snapshots(env):
 
     assert out["status"] == "degraded_ok"
     assert out["degraded"] is True and out["fixtures"] == 0
-    assert out["recs"] == 2                          # 旧快照照常出推荐（A1 双落）
+    assert out["recs"] == 3                          # 旧快照照常出推荐（同刻三落）
     assert out["snapshot_reused"] is True            # 拉盘失败＝本窗无实时盘
     assert any("Odds API" in r
                for r in summary_of(c, out["run_id"])["degraded_reasons"])
@@ -964,10 +976,10 @@ def test_tg_failure_does_not_lose_recs_or_bets(env, monkeypatch):
     out = matchday.run_matchday(c, "am", [LEAGUE])
 
     assert out["status"] == "ok" and out["sent"] is False
-    assert out["recs"] == 2 and out["bets"] == 2     # A1 双落 × 双轨落注
+    assert out["recs"] == 3 and out["bets"] == 3     # 同刻三落 × 分轨落注
     assert c.execute(
-        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 2
-    assert len(bets_of(c)) == 2
+        "SELECT COUNT(*) c FROM recommendations").fetchone()["c"] == 3
+    assert len(bets_of(c)) == 3
     assert summary_of(c, out["run_id"])["telegram"] == {
         "sent": False, "error": "exit 1: send failed"}
     assert run_row(c, out["run_id"])["status"] == "ok"
@@ -994,9 +1006,11 @@ def test_run_summary_carries_personas_hash_and_window(env):
     assert isinstance(summary["personas_hash"], str) and len(summary["personas_hash"]) == 64
     assert isinstance(summary["kb_window"], int) and summary["kb_window"] >= 1
     assert set(summary["git"]) == {"git_rev", "git_dirty"}
-    assert (c.execute("SELECT DISTINCT personas_hash FROM recommendations"
-                      " WHERE run_id=?", (out["run_id"],)).fetchone()
-            is not None)
+    # 跨表同源（版本戳闭包，T4 审查补钉）：本 run **全部**推荐行的戳 == summary
+    # 的戳——不只是「存在一个非 NULL 值」。行戳与判决语境必须可对账（§12.7）。
+    assert {r["personas_hash"] for r in c.execute(
+        "SELECT personas_hash FROM recommendations WHERE run_id=?",
+        (out["run_id"],))} == {summary["personas_hash"]}
 
 
 # ---------------------------------------------------------------- 报告接缝
@@ -1178,7 +1192,7 @@ def test_cli_matchday_reports_counts_and_push(tmp_path, monkeypatch):
 
         assert result.exit_code == 0, result.output
         assert "am" in result.output and "ok" in result.output
-        assert "推荐 2 条" in result.output and "落注 2 注" in result.output  # A1 双落×双轨
+        assert "推荐 3 条" in result.output and "落注 3 注" in result.output  # 同刻三落×分轨落注
         assert "推送" in result.output
     finally:
         c.close()
