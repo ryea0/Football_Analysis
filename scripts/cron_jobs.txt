@@ -5,3 +5,4 @@ daily	30 6 * * *	daily
 am	0 11 * * *	am
 pm	0 17 * * *	pm
 weekly	0 7 * * 1	weekly
+evolve	17 3 * * 0	evolve

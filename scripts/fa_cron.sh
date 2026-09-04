@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fa 定时 job 唯一入口（system crontab 与 hermes cron 双载体共用，spec §9.6）
 #
-# 用法：fa_cron.sh <daily|am|pm>
+# 用法：fa_cron.sh <daily|am|pm|weekly|evolve>
 #
 # 职责（与载体无关）：
 #   1. 环境补齐：PATH 补 ~/.local/bin（uv 所在，cron 默认 PATH 没有）；
@@ -16,8 +16,8 @@
 set -u
 
 JOB="${1:-}"
-if [[ "$JOB" != daily && "$JOB" != am && "$JOB" != pm && "$JOB" != weekly ]]; then
-  echo "用法: $0 <daily|am|pm|weekly>" >&2
+if [[ "$JOB" != daily && "$JOB" != am && "$JOB" != pm && "$JOB" != weekly && "$JOB" != evolve ]]; then
+  echo "用法: $0 <daily|am|pm|weekly|evolve>" >&2
   exit 64
 fi
 
@@ -35,6 +35,11 @@ case "$JOB" in
   am)     CMD=(fa run matchday --phase am) ;;
   pm)     CMD=(fa run matchday --phase pm) ;;
   weekly) CMD=(fa ops weekly) ;;   # 周一 07:00：daily 结算后的上周小结（空周静默）
+  # M6（§12.7）：C 线周检——窗口收口才触发反思，否则一行日志空转退出 0。
+  # 周日 03:17（事实单 scripts/cron_jobs.txt）：避开 daily/am/pm/weekly。
+  # 失败告警沿用本 wrapper 的 fa ops alert（「静默停摆」=不触碰 A/B 线，
+  # 不指对运维静默——设计档 R7）
+  evolve)  CMD=(fa evolve tick) ;;
 esac
 
 cd "$PROJECT_ROOT"

@@ -165,3 +165,31 @@ def test_cli_ops_watchdog_exit_1_when_alert_push_fails(env):
     result = runner.invoke(app, ["ops", "watchdog"])
     assert result.exit_code == 1
     assert "30.0h" in result.output
+
+
+# ---------------------------------------------------------------- M6 evolve job
+
+
+def test_cron_wrapper_accepts_evolve_job():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "fa_cron.sh").read_text()
+    assert '"$JOB" != evolve' in script
+    assert "evolve)  CMD=(fa evolve tick) ;;" in script
+
+
+def test_cron_jobs_file_has_evolve_weekly_slot():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    jobs = (root / "scripts" / "cron_jobs.txt").read_text()
+    line = next(l for l in jobs.splitlines() if l.startswith("evolve\t"))
+    assert line.split("\t")[1] == "17 3 * * 0"
+
+
+def test_cron_wrapper_evolve_branch_bash_syntax():
+    import subprocess
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    proc = subprocess.run(["bash", "-n", str(root / "scripts" / "fa_cron.sh")],
+                          capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
