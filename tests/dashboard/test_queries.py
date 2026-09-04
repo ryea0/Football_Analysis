@@ -505,9 +505,35 @@ def test_by_date_filter_helper(db):
     assert len(by_date(df, "placed_at", None)) == 2
     assert len(by_date(df, "placed_at", "全部")) == 2
     only_12th = by_date(df, "placed_at", "2026-09-04")
-    assert list(only_12th["id"]) == [11, 10]                 # 两注都落在这天
+    assert only_12th["id"].tolist() == [10]                  # 12:00Z=北京 20:00 同日
+    assert by_date(df, "placed_at", "2026-09-05")["id"].tolist() == [11]  # 18:00Z 跨北京日
     assert by_date(df, "settled_at", "2026-09-06")["id"].tolist() == [10]
     assert by_date(df, "placed_at", "1999-01-01").empty
+
+
+def test_by_date_uses_beijing_day_boundary(db):
+    """日期过滤的日界 = 北京时间（spec §9.6 全项目口径），非存储的 UTC 串。
+
+    实害案例（2026-09-04）：4 注结算时间存 ``2026-09-03T22:09:33Z``（北京
+    09-04 06:09 今晨结算）——UTC 桶把它们分到 09-03，用户在「结算日 09-04」
+    找不到今天的收支。钉死：``22:09Z 属北京次日``。
+    """
+    import pandas as pd
+
+    from queries import by_date, date_choices
+
+    df = pd.DataFrame({
+        "settled_at": ["2026-09-03T22:09:33Z",   # 北京 09-04 06:09
+                       "2026-09-04T06:30:00Z",    # 北京 09-04 14:30
+                       "2026-09-04T17:00:00Z"],   # 北京 09-05 01:00（跨日）
+    })
+    assert date_choices(df, "settled_at") == ["2026-09-05", "2026-09-04"]  # 降序
+    got = by_date(df, "settled_at", "2026-09-04")
+    assert len(got) == 2 and got["settled_at"].tolist()[:2] == [
+        "2026-09-03T22:09:33Z", "2026-09-04T06:30:00Z"]
+    assert len(by_date(df, "settled_at", "2026-09-03")) == 0   # UTC 日界不再生效
+    assert by_date(df, "settled_at", "2026-09-05")["settled_at"].tolist() == \
+        ["2026-09-04T17:00:00Z"]
 
 
 def test_col_bilingual_covers_all_table_columns(db, tmp_path):
