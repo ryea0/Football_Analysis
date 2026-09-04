@@ -167,3 +167,11 @@ class TestSelectPaperT1:
         _seed_t1(conn)
         cands, meta = select_paper_t1(conn, "2024-04-21")
         assert cands == [] and meta["n_fixtures"] == 0
+
+    def test_div_present_for_pack_contract(self, conn):
+        """build_pack 读 cand['div']（export.py 既有契约）——paper_t1 行同须
+        带上，否则 CLI 批跑在写信息集时 KeyError（设计 §5.3 分歧摘要）。"""
+        _seed_t1(conn)
+        cands, _ = select_paper_t1(conn, "2024-04-20")
+        assert cands[0]["div"] == pytest.approx(math.log(0.52 / 0.45),
+                                                abs=1e-9)

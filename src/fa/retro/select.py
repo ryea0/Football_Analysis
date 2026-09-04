@@ -153,6 +153,9 @@ def select_paper_t1(conn, target_date: str) -> tuple[list[dict], dict]:
         row = dict(p)
         row["home"] = names.get(m["home_team_id"])
         row["away"] = names.get(m["away_team_id"])
+        # build_pack 契约：信息集「分歧摘要」（设计 §5.3）读 cand['div']——
+        # 复用 divergence 同一 _divergence 定义（单一事实源），缺概率记 0
+        row["div"] = _divergence(p)
         row["is_control"] = False
         cands.append(row)
     cands.sort(key=lambda r: r["match_id"])
