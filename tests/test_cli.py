@@ -332,6 +332,31 @@ def test_status_b_line_two_track_lines(tmp_path, monkeypatch):
     assert "注数=0" in tracks[1] and "bankroll=未初始化" in tracks[1]
 
 
+def test_status_pct_scales_fraction_values(tmp_path, monkeypatch):
+    """`paper_summary` 的 roi / clv_median 是**分数**（全输 = -1.0，clv = 价差/收盘-1），
+    `fa status` 的 `_pct` 必须先 ×100 再挂百分号——否则一注全输显示成
+    「ROI=-1.00%」（真值 -100%），把最刺眼的信号缩水 100 倍（T16 审查 P2）。
+
+    种子：1 注 stake 20 全输 → roi=-1.0 → 须显示 -100.00%（且不得出现 -1.00%）；
+    clv 同口径：odds_taken 2.0 / closing 2.5 → clv=-0.2 → 须显示 -20.00%。
+    """
+    db, recs = _seed_rec_for_bet(tmp_path, monkeypatch)
+    conn = connect(db)
+    assert place_paper_bets(conn, recs[0]) == 1
+    conn.execute(
+        "UPDATE bets SET status='lost', settled_at='2026-09-04T09:00:00Z',"
+        " return_amt=0, closing_odds=2.5, clv=-0.2")
+    conn.commit()
+    conn.close()
+
+    result = runner.invoke(app, ["status"])
+    assert result.exit_code == 0, result.output
+    tracks = [l for l in result.output.splitlines() if l.startswith("[model_")]
+    assert "ROI=-100.00%" in tracks[0], result.output
+    assert "ROI=-1.00%" not in tracks[0]           # 分数直出的旧缺陷形态
+    assert "CLV 中位数=-20.00%" in tracks[0], result.output
+
+
 def test_status_limits_runs_to_three(tmp_path, monkeypatch):
     db = _use_tmp_db(tmp_path, monkeypatch)
     conn = connect(db)

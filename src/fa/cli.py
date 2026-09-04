@@ -237,8 +237,14 @@ _SETTLE_STATUSES = ("won", "lost", "void")   # db.py bets.status CHECK 的人工
 
 
 def _pct(value: float | None) -> str:
-    """比率 → 带符号百分比；None（无可算样本）→ 「—」，不冒充 0。"""
-    return "—" if value is None else f"{value:+.2f}%"
+    """**分数** → 带符号百分比（×100）；None（无可算样本）→ 「—」，不冒充 0。
+
+    入参口径：`paper_summary` 的 roi / clv_median 都是比率分数（全输 roi=-1.0、
+    clv=odds_taken/closing−1），故必须 ×100 再挂百分号——直出会把 -100% 显示成
+    -1.00%（T16 审查 P2）。本文件的 `degradation_pct` 等字段是真百分数，且走
+    f-string 内联格式、不经本函数，勿混用。
+    """
+    return "—" if value is None else f"{value * 100:+.2f}%"
 
 
 def _money(value: float | None) -> str:
