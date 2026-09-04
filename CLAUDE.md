@@ -11,7 +11,7 @@
 - **M2（模型 + 回测评估）完成，判决 NO-GO**（2026-09-03）：劣化 +3.02%（判据 ≤1%），四重稳健性证据全部 NO-GO——`docs/m2-verdict.md`
 - **spec v0.5 双线并存协议（2026-09-03 启用）**：A 线（研究评测，已建成）与 B 线（M3-M5 paper 运营）同程序并存、结论分账（§12）；项目负责人显式推翻「M2 止步」的顺序约束（决策记录 §12.4），**真实下注依然禁止**；B 线预注册判据见 §12.3
 - **M3（B 线运营栈）完成**（2026-09-04，docs/m3-report.md）：真跑实测 102 fixtures→14 推荐→14 paper 注、/events 探测实证免费、额度 40/日（500/月档）；对齐为候选池瓶颈（30 项 ≥0.60 待 `fa data aliases --confirm`，2 真歧义）；**M5 首务=额度节流**（单 region/pm 限比赛日），否则第 13 天耗尽免费额度
-- **M4（persona 接入）完成**（2026-09-04，docs/m4-report.md）：实跑①契约合规 51.9%→禁工具条款后 100%（9/9），实跑②比赛日 E2E 判决 ok（persona 24 场 called/24 ok/1 veto/0 降级，双轨 64 行、paper 32+31 注，额度 440→420）；**veto 首例抓到候选池跨联赛队名错位**（fixture 100，F1 挂 I1 的 Treviso）；TG 推送经代理实测可达（`hermes status` Telegram ✓ configured，run 内 1 次瞬态失败按设计降级）；遗留与 M5 建议见 m4-report §7
+- **M4（persona 接入）完成**（2026-09-04，docs/m4-report.md）：实跑①契约合规 51.9%→禁工具条款后 100%（9/9），实跑②比赛日 E2E 判决 ok（persona 24 场 called/24 ok/1 veto/0 降级，双轨 64 行、run#7 实落 32 注=A 轨 1+B 轨 31——A 轨候选多被遗留注幂等去重，额度 440→420）；**veto 首例抓到候选池跨联赛队名错位**（fixture 100，F1 挂 I1 的 Treviso）；TG 推送经代理实测可达（`hermes status` Telegram ✓ configured，run 内 1 次瞬态失败按设计降级）；A/B 同刻对照本库不可得、对比只从结算期分轨 pnl 取（m4-report §7.2）；遗留与 M5 建议见 m4-report §7
 
 ## 关键约束（详见 spec 对应章节）
 

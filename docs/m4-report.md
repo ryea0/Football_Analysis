@@ -75,15 +75,15 @@ spec §10 M4 行：**「5 personas、契约校验、降级、A/B 双轨｜mock +
 | 5 personas | ✅ 5 文件入库（D1 老凯打样 `5bc634e` → E0 薇拉 / SP1 马诺罗 / I1 焦尔乔 / F1 克莱尔 `ed095e0`），纪律八条与知识域标题 `diff` 实证逐字同源 | `git ls-files personas/` 5 行；T9 冒烟 1/1、T10 四联冒烟 4/4（task-9/10-report） |
 | 契约校验 | ✅ 严格校验不修号（唯一例外 veto 置 0）；实跑① 36 次调用 0 例「理解契约但填错」，实跑② 24 场 0 例违规——生产路径 key_factors ≤5 条（最长 43 字 ≤50）、report_md ≤500 字（最长 335） | §2.1/§2.2/§3.6；`tests/persona/test_contract_output.py` 拒收矩阵 |
 | 降级 | ✅ 四类失败（timeout/exit/extract/contract）场次级降级、三列中性、`runs.summary.persona.degraded` 记因、报告 ⚪ 行；实跑② degraded=0/24（降级路径由单测覆盖：`tests/persona/test_apply.py` 16 项 + `tests/pipeline/test_matchday.py` 39 项，实跑未触发属正常） | task-8/task-13-report；`uv run pytest tests/persona/test_apply.py tests/pipeline/test_matchday.py` = 55 passed |
-| A/B 双轨 | ✅ value 同刻双落 32+32；paper 分轨 32 注 / 31 注（veto 场仅 persona 轨跳过）；bankroll 双键各就位；`fa status` 双行 | §3.3 / §3.4；`tests/pipeline/test_value.py`、`test_paper.py` |
-| mock + 实跑测试通过 | ✅ 全量 `uv run pytest -q` = **501 passed**（0 failed / 0 error，5.36s）；实跑① 27+9 次真调、实跑② 24 场真调 | §2、§3；T15 预注册跑法 |
-| A/B 数据落库 | ✅ run #7：双轨 64 行、双轨 paper 注 63 注（519.29 / 485.53）、分轨 bankroll 双键、结算通道分轨就绪（M5 daily 起按轨回写） | §3.3 / §3.4 |
+| A/B 双轨 | ✅ value 同刻双落 32+32；paper 落注 B 轨 31 注（veto 场跳过）+ A 轨 **1 注**（其余 31 条 A 轨候选已有在途注被幂等去重，§3.3）；bankroll 双键各就位；`fa status` 双行 | §3.3 / §3.4；`tests/pipeline/test_value.py`、`test_paper.py` |
+| mock + 实跑测试通过 | ✅ 全量 `uv run pytest -q` = **502 passed**（0 failed / 0 error；501 + T16 审查新增 1 条 `_pct` 回归）；实跑① 27+9 次真调、实跑② 24 场真调 | §2、§3；T15 预注册跑法 |
+| A/B 数据落库 | ✅ run #7：双轨 64 行、**新落 paper 注 32**（A 轨 1 + B 轨 31）；台账口径 run#7 名下挂 63 注（含 31 条遗留注改挂，§3.3）；分轨 bankroll 双键、结算通道分轨就绪（M5 daily 起按轨回写） | §3.3 / §3.4 |
 
 设计文档 §8 验收清单（五项）：
 
 | # | 清单项 | 状态 |
 | --- | --- | --- |
-| 1 | 全量测试绿 | ✅ 501 passed |
+| 1 | 全量测试绿 | ✅ 502 passed（含 T16 审查新增 `_pct` 回归 1 条） |
 | 2 | 实跑①（D4）：库内 9 场候选真调 hermes -z，产出真实不合规率/降级率 | ✅ §2.1（51.9%）/ §2.2（100%，9/9） |
 | 3 | 实跑②（D4）：比赛日完整 `fa run matchday --phase am`，双轨推荐/注落库、报告含 persona 段、分轨 bankroll、`fa status` 两行 | ✅ §3（run #7） |
 | 4 | spec 修订落库（§9）+ CLAUDE.md Hermes 声明修正 | ✅/⚠️ spec §6.5 场次级（`053a93f`）+ §7.3 分轨口径（同 commit）已落库；**CLAUDE.md 的 Hermes 行（TG 未配置）未在本任务改写**——主 checkout 该文件有并行会话修改，为避免合并冲突本任务只在「当前状态」节加 M4 行（行内带上最新事实），旧行修正留待合并时处理（详见 §5.2） |
@@ -204,7 +204,7 @@ JSON 式（r2 / fixture 13 → 表面记 contract；r3 / fixture 99 同型）：
 - **样本量警示**：单遍 9 次调用，100% 是小样本点估计，**不与修复前 51.9% 做显著性比较**——修复前三遍本身就在 33.3%–66.7% 间波动，采样噪声与条款效应在本样本量下不可分。机械面结论（0 超时/0 exit/0 真契约违规两阶段一致）比合规率数字更稳。
 - 成本：ark 推理 9 次；Odds API 0 次。
 
-## 3. 实跑②：比赛日完整 E2E（Task 16，2026-09-04，run #7）
+## 3. 实跑②：比赛日完整 E2E（Task 16，run #7）
 
 **判决：ok。** 全链真实跑通：拉盘 → 对齐 → 双轨推荐 → persona 逐场真调 → 分轨落注 → 渲染 → TG 推送（失败按设计降级）。无重跑、无凑数；0 推荐的备选叙述未用上（窗内有真实候选）。
 
@@ -212,7 +212,7 @@ JSON 式（r2 / fixture 13 → 表面记 contract；r3 / fixture 99 同型）：
 
 - 库：worktree 本地库（T15 自主库在线备份的快照 + `fa init` v4 迁移），**非主库**；跑前状态：额度 440、`paper_bankroll` 单键 940.95 待迁移、`model_only` 50 行、schema v4。
 - 环境：`.env` 有 `ODDS_API_KEY`；`FA_PERSONA_SEARCH` 未设（禁工具过渡条款默认生效路径，prompt 内实证含「本环境无网络搜索可用：不要调用任何工具」）；TG 推送带 Clash 代理（`https_proxy=http://127.0.0.1:7890`，进程内实测代理监听在、经代理 `curl api.telegram.org` = 302、直连超时）。
-- 比赛日有效性：2026-09-04（周五）23:22 UTC 启动，52h 窗内 28 场五大联赛（周六 09-05 为主力），`window_hours=52`。
+- 比赛日有效性：run 启动于 **2026-09-03T23:22:45Z（北京时间 09-04 07:22，周五）**，52h 窗内 28 场五大联赛（周六 09-05 为主力），`window_hours=52`。
 
 CLI 原文（唯一一次运行，未重跑）：
 
@@ -238,21 +238,29 @@ CLI 原文（唯一一次运行，未重跑）：
 -- SQL1：两轨行数 / 已判
 model_only|32|0          -- A 轨 persona 盲视，verdict 恒 NULL ✔
 model_persona|32|32      -- B 轨 32 行全部已判 ✔ 两轨行数相等 ✔
--- SQL2：分轨落注（全库 paper）
-model_only|37|589.07     -- 37 = M3 存量 5 + 本次 32
-model_persona|31|485.53  -- 31 = 32 − 1 veto ✔ veto 行无 bets ✔
+-- SQL2：分轨落注（全库 paper，台账口径）
+model_only|37|589.07     -- 37 = 14（14:58 期）+ 22（18:20 期）+ 1（run#7 新落）
+model_persona|31|485.53  -- 31 = 32 − 1 veto ✔ veto 行无 bets ✔（全部 run#7 新落）
 -- SQL3：分轨 bankroll
 paper_bankroll:model_only|940.95      -- 旧单键 940.95 已迁移到此 ✔ 旧键已删除 ✔
 paper_bankroll:model_persona|1000.0   -- 惰性初始化 ✔
 ```
 
-本次 run 口径（run #7）：
+**落注口径（关键勘误，T16 审查修正）**：run#7 **实际新落 32 注** = A 轨 1 注（rec 68，fixture 61 Hoffenheim–Dortmund 客胜，stake 8.08，唯一一条此前无注的 A 轨候选）+ B 轨 31 注（485.53，全部新插）——CLI「落注 32 注」即此数。A 轨 32 条 run#7 候选里 31 条**已有在途注**（`bets UNIQUE(recommendation_id, mode)` 幂等去重，不重复落注），故 A 轨本 run 仅落 1 注。
 
-| 轨 | 推荐行 | paper 注 | 注金合计 | 说明 |
+**台账口径（另一套数字，勿与落注口径混用）**：按「rec 的 run_id=7」统计得 A 轨 32 注 / 519.29——但其中 **31 条是遗留注被改挂**，不是 run#7 落的。全库 68 条 paper 注按 `placed_at` 分三期：
+
+| 落注期 | track | 注数 | 注金 | 备注 |
 | --- | --- | --- | --- | --- |
-| model_only | 32 | 32 | 519.29 | 对照轨，judgement 盲视 |
-| model_persona | 32 | 31 | 485.53 | veto 场（fixture 100 平局）0 注 |
-| **差** | 0 | **−1** | **−33.76（−6.5%）** | persona 层当日净效应 |
+| 09-03 14:58（M3 首赛日，run#3 期） | model_only | 14 | 217.08 | bets 1–14 |
+| 09-03 18:20（M4 期间，run#5 期） | model_only | 22 | 363.91 | bets 15–36 |
+| 09-03 23:27（run#7，本次） | model_only / model_persona | 1 / 31 | 8.08 / 485.53 | bets 37–68 |
+
+36 条遗留注中 **31 条现挂 run#7 名下**（12 条 14:58 期 + 19 条 18:20 期），其余 5 条仍挂旧 rec（对应候选本 run 未再生成：fixture 96 H/D、14 O2.5、30 A/O2.5）。
+
+**改挂机制（M5 必须知道的归因语义）**：`value.py` 的候选 upsert 是 `ON CONFLICT(fixture_id, market, strategy, phase) DO UPDATE SET run_id=excluded.run_id, model_p=…, kelly_stake_frac=…, created_at=…`——**保留 rec 主键 id**，只刷新 run_id 与价格/仓位字段；骑在该 rec id 上的旧注因此被整体改挂到最新 run 名下（且旧注的 `stake/odds_taken` 仍是落注当时的旧值，rec 行上的数字却已是新值——同一条 rec 两套时刻的数字并存）。这是幂等刷新的既有设计（「刷新不清判决/注」），但意味着 **「run_id」不是可靠的落注归因键，`placed_at` 才是**。
+
+**A/B 同刻对照本 run 不存在（诚实记）**：初稿曾写「persona 净效应 −33.76（−6.5%）」，那是把 31 条遗留注当 A 轨新注的假对比（含价格刷新效应），**已撤回**。本 run 的 A 轨新注仅 1 注 8.08，无同刻 A/B 可言；A/B 对比只能取（a）A 轨无遗留注的干净库首跑，或（b）结算期分轨 pnl（§12.3 预注册判据本就是结算期口径）——已列入 §7 M5 建议。
 
 `runs.summary.persona`：`called=24, ok=24, veto=1, degraded=0`（attempted 24 场）。**24 场 × 候选市场 = 32 行**（17 场 1 市场 / 6 场 2 市场 / 1 场 3 市场）——判决按场广播到该场全部 market 行，故「已判行数 = called − degraded」在市场数 >1 的场次按行数放大，场级恒等式 24 = 24 − 0 成立。
 
@@ -292,9 +300,11 @@ paper_bankroll:model_persona|1000.0   -- 惰性初始化 ✔
 
 ### 3.5 veto 首例：persona 抓到候选池数据错误（非比赛判断）
 
-fixture 100（F1 Treviso – Monaco，09-04 19:05 UTC，平局候选 EV +54.26%、仓位顶格 2.00%）：克莱尔（法甲人格）以「主队 Treviso 是意大利球队、法甲无此队 → 本场输入不可信」为由 **veto 整场**，key_factors 三条全部指向数据错误而非比赛判断。
+fixture 100（F1 Treviso – Monaco，kickoff 09-04 19:05 UTC，平局候选 EV +54.26%、kelly 顶格 2.00%）：克莱尔（法甲人格）以「主队 Treviso 是意大利球队、法甲无此队 → 本场输入不可信」为由 **veto 整场**，key_factors 三条全部指向数据错误而非比赛判断。
 
-库内核实：`fixtures.league='F1'` 但 `home_team_id=187`，而 teams 表 id=187 的 Treviso 属 **I1**（意甲）——即 Odds API 事件的对阵名与联赛属性错位，属于候选池真实脏数据。该场若无人格层将以 **2% 顶格仓位、+54% EV 的表面最优候选** 落入 paper 账（对照轨 model_only 确实落了这注，id=47——这正是 A/B 设计要暴露的差异）。
+库内核实：`fixtures.league='F1'` 但 `home_team_id=187`，而 teams 表 id=187 的 Treviso 属 **I1**（意甲）——即 Odds API 事件的对阵名与联赛属性错位，属于候选池真实脏数据。
+
+**该场 A/B 对照的如实口径（勿夸大）**：A 轨账上确有该场平局 20.00 在途注（bet 33），但它落于 **09-03 18:20（run#5 期）**，早于本 run 5 小时，是遗留注被 upsert 改挂到 run#7 名下（§3.3）——本 run 的幂等去重下，A 轨本来也**不会再落新注**。因此 veto 的边际效果是「B 轨对该脏场零敞口」（本 run 不新增），而非「阻止了一笔即将发生的 2% 顶格落注」；后者只在干净库（A 轨无遗留注）的首跑里成立。
 
 如实记两点：① veto 触发条件是「压倒性证据」，此处触发的是**数据完整性证据**而非伤停/状态类比赛证据，属设计未列举但语义正确的用法，值得在 M5 把「输入自洽性检查」固化到确定性管线（不该由每场一次的 LLM 调用来兜底数据质量）；② 人格同时给出「建议核查别名映射表」的行动建议，方向正确。
 
@@ -315,12 +325,23 @@ fixture 100（F1 Treviso – Monaco，09-04 19:05 UTC，平局候选 EV +54.26%�
 
 ### 3.7 `fa status` 双轨行（§12.3 判据表就位）
 
+run 内实测（当时输出，含 P2 待修的百分比缺陷）：
+
 ```
 == B 线·运营模拟（paper） ==
 [model_only] 注数=37（pending 33）  已结算注金=59.05  回报=0.00  ROI=-1.00%  bankroll=940.95  CLV 中位数=—
 [model_persona] 注数=31（pending 31）  已结算注金=0.00  回报=0.00  ROI=—  bankroll=1000.00  CLV 中位数=—
 额度水位：余 420 次（meta odds_quota_remaining）
 ```
+
+- 注数为**台账口径**：model_only 37 = 14（14:58 期）+ 22（18:20 期）+ 1（run#7 新落）；model_persona 31 全部 run#7 新落（§3.3）。
+- **P2 修复（T16 审查）**：`_pct` 此前把 `paper_summary` 的分数直出为百分比——59.05 注金全损的真实 ROI 是 **−100%**，却显示成「−1.00%」（缩水 100 倍，把最刺眼的信号抹平）。修复为 `value*100` 后复跑：
+
+```
+[model_only] 注数=37（pending 33）  已结算注金=59.05  回报=0.00  ROI=-100.00%  bankroll=940.95  CLV 中位数=—
+```
+
+回归：`tests/test_cli.py::test_status_pct_scales_fraction_values`（1 注 stake 20 全输 → roi=-1.0 → 断言显示 `-100.00%` 且不出现 `-1.00%`；clv=-0.2 → `-20.00%`），全量 **502 passed**。同文件排查：`degradation_pct` 是真百分数但走 f-string 内联格式、不经 `_pct`，无双乘风险；`render_settlement_brief` 的 CLV 用 `{:+.2%}`（Python 百分号格式自带 ×100），语义本就正确。
 
 分轨账本、额度水位、最近 runs 一屏可读——M5 daily 结算起按轨回写 pnl 后即为 §12.3 预注册判据的直接读数表。
 
@@ -389,13 +410,16 @@ CLAUDE.md 环境节仍写「Hermes **TG 平台未配置**（2026-09-03 实测：
 | `f1ef878` | docs: m4-report §2.1 实跑①基线（三遍矩阵，51.9%） |
 | `5d24f13` | fix(persona): 禁工具过渡条款按 FA_PERSONA_SEARCH 条件拼接 |
 | `7448941` | docs: m4-report §2.2 实跑①修复后单遍（9/9） |
-| （本 commit） | docs: M4 验收报告完稿（§1/§3/§4/§5/§6）+ CLAUDE.md 状态更新 |
+| `3de1f95` | docs: M4 验收报告完稿（§1/§3/§4/§5/§6）+ CLAUDE.md 状态更新 |
+| `5bcb353` | fix(cli): `_pct` 分数×100（T16 审查 P2，含 `_pct` 回归测试，全量 502 passed） |
+| （本 commit） | docs: 注数归因勘误（P1）+ 时间戳口径（P3）——即本表所在提交 |
 
 ## 7. 遗留与 M5 建议（按优先级）
 
 1. **额度节流**（既有结论，M5 首务）：单 region/pm 限比赛日，否则第 13 天耗尽免费额度。
-2. **推送重试**：reporting 层推送失败重试 1 次（§3.8 瞬态失败的廉价吸收）。
-3. **输入自洽性检查**：fixture.league 与两端 team.league 一致性校验，脏场隔离（§3.5/§5.4 的根治）。
-4. **搜索后端 key**：配置后置 `FA_PERSONA_SEARCH=1`，恢复查证用例并在真检索环境重测合规率（§5.1）。
-5. **CLAUDE.md Hermes 旧行改写**：随合并处理（§5.2）。
-6. **pm 相位实跑**：M5 首个比赛日顺带实测（§5.5）。
+2. **A/B 归因口径（T16 审查提出，评估前必须解决）**：`value.py` 的 `DO UPDATE SET run_id=…` 保留 rec id，把骑在其上的遗留注整体改挂到最新 run 名下——`recommendations.run_id` 不可作落注归因键，`bets.placed_at` 才是。后果：**同刻 A/B 对照在本库已不可得**（A 轨 36 条遗留注占住了 32/36 候选位，新 run 的 A 轨几乎必然幂等去重）。二选一：① A/B 对比只从**结算期分轨 pnl** 取数（§12.3 预注册判据本就是结算期口径，推荐此项）；② 若要做「当日落注口径」的对照，需 A 轨无遗留注的干净库首跑（如另建 snapshot 库跑 A/B 对照实验）。
+3. **推送重试**：reporting 层推送失败重试 1 次（§3.8 瞬态失败的廉价吸收）。
+4. **输入自洽性检查**：fixture.league 与两端 team.league 一致性校验，脏场隔离（§3.5/§5.4 的根治）。
+5. **搜索后端 key**：配置后置 `FA_PERSONA_SEARCH=1`，恢复查证用例并在真检索环境重测合规率（§5.1）。
+6. **CLAUDE.md Hermes 旧行改写**：随合并处理（§5.2）。
+7. **pm 相位实跑**：M5 首个比赛日顺带实测（§5.5）。
