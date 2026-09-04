@@ -72,3 +72,87 @@ def test_cli_run_rejects_bad_line():
     from fa.cli import app
     res = CliRunner().invoke(app, ["agentline", "run", "--line", "B_line"])
     assert res.exit_code == 2
+
+
+# ---- A_multi（multi-brain）：run_multi 编排 ---------------------------------
+# 夹具沿用本文件既有 db 夹具的造数方式（foreign_keys=OFF，无需 backtest 行）。
+
+
+@pytest.fixture()
+def conn(tmp_path):
+    init_db(tmp_path / "multi.db")
+    c = connect(tmp_path / "multi.db")
+    c.execute("PRAGMA foreign_keys=OFF")
+    yield c
+    c.close()
+
+
+@pytest.fixture()
+def info_dir(tmp_path):
+    d = tmp_path / "info"
+    d.mkdir()
+    info = {"match": {"league": "E0", "season": 2023, "date": "2024-02-01",
+                      "home": "Arsenal", "away": "Chelsea"}, "odds": {}}
+    (d / "10.json").write_text(json.dumps(info), encoding="utf-8")
+    return d
+
+
+_AM_OK = json.dumps({"p_home": 0.4, "p_draw": 0.3, "p_away": 0.3,
+                     "p_over25": 0.5, "confidence": 0.6,
+                     "reasoning_digest": "m", "sources": []})
+_AM_OK2 = json.dumps({"p_home": 0.5, "p_draw": 0.3, "p_away": 0.2,
+                      "p_over25": 0.6, "confidence": 0.7,
+                      "reasoning_digest": "n", "sources": []})
+
+
+def test_run_multi_members_and_aggregate(conn, info_dir, monkeypatch):
+    """3 成员行（attributor 1..3）+ 1 聚合行（attributor 0，中位数概率）。"""
+    from fa.agentline import orchestrate
+    outs = iter([_AM_OK, _AM_OK, _AM_OK2])
+    monkeypatch.setattr(orchestrate.runner_mod, "run_headless",
+                        lambda prompt, profile, timeout_s=None:
+                        (next(outs), None, 1.0))
+    counts = orchestrate.run_multi(conn, info_dir, members=3, limit=1)
+    assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+    rows = conn.execute(
+        "SELECT attributor, status, p_home FROM agentline_predictions"
+        " WHERE line='A_multi' ORDER BY attributor").fetchall()
+    assert [r["attributor"] for r in rows] == [0, 1, 2, 3]
+    assert rows[0]["p_home"] == pytest.approx(0.4)   # 中位数（0.4,0.4,0.5）
+
+
+def test_run_multi_all_failed_aggregate_error(conn, info_dir, monkeypatch):
+    from fa.agentline import orchestrate
+    monkeypatch.setattr(orchestrate.runner_mod, "run_headless",
+                        lambda prompt, profile, timeout_s=None:
+                        (None, "dsh 退出码 1：boom", 0.5))
+    counts = orchestrate.run_multi(conn, info_dir, members=3, limit=1)
+    assert counts["error"] == 1
+    agg = conn.execute(
+        "SELECT status, p_home FROM agentline_predictions"
+        " WHERE line='A_multi' AND attributor=0").fetchone()
+    assert agg["status"] == "error" and agg["p_home"] is None
+
+
+def test_run_multi_idempotent_skips_done(conn, info_dir, monkeypatch):
+    from fa.agentline import orchestrate
+    calls = {"n": 0}
+
+    def fake(prompt, profile, timeout_s=None):
+        calls["n"] += 1
+        return (_AM_OK, None, 1.0)
+
+    monkeypatch.setattr(orchestrate.runner_mod, "run_headless", fake)
+    orchestrate.run_multi(conn, info_dir, members=3, limit=1)
+    first = calls["n"]
+    orchestrate.run_multi(conn, info_dir, members=3, limit=1)   # 聚合已 ok → 跳
+    assert calls["n"] == first
+
+
+def test_cli_run_rejects_members_lt_two():
+    """A_multi 低于两员不是 ensemble——入口即拒（不碰库）。"""
+    from typer.testing import CliRunner
+    from fa.cli import app
+    res = CliRunner().invoke(app, ["agentline", "run", "--line", "A_multi",
+                                   "--members", "1"])
+    assert res.exit_code == 2
