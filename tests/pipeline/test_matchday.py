@@ -997,8 +997,8 @@ def test_invalid_phase_is_rejected(env):
 
 
 def test_run_summary_carries_personas_hash_and_window(env):
-    """run 开始快照 personas 树内容 hash + 本窗知识快照：三键入 runs.summary，
-    且本 run 推荐行带同一戳（版本戳可归因，设计档 §3.1）。"""
+    """run 开始快照**所消费 personas 工件**内容 hash + 本窗知识快照序号：三键入
+    runs.summary，且本 run 推荐行带同一戳（版本戳可归因，设计档 §3.1）。"""
     c = env.conn
     out = matchday.run_matchday(c, "am", [LEAGUE])
     summary = json.loads(c.execute(
@@ -1011,6 +1011,34 @@ def test_run_summary_carries_personas_hash_and_window(env):
     assert {r["personas_hash"] for r in c.execute(
         "SELECT personas_hash FROM recommendations WHERE run_id=?",
         (out["run_id"],))} == {summary["personas_hash"]}
+    # M6 终审 F2：``personas_hash`` 语义 = 所消费工件 hash（活人格 + 本窗知识
+    # 快照），与 personas_consumed_hash(kb_window) 逐字同源。
+    from fa.evolve.knowledge import personas_consumed_hash
+    assert summary["personas_hash"] == personas_consumed_hash(summary["kb_window"])
+
+
+def test_personas_hash_stable_when_live_kb_changes_mid_window(env, tmp_path):
+    """M6 终审 F2（控制者裁定方案 a）：窗内合并落盘 / TTL 修剪改动活 knowledge
+    树，**不**动本窗版本戳——run 消费的是快照，戳与内容恒一致，归因不被合并
+    时点污染（旧实现盖活树 hash，同窗内 stamp≠content）。"""
+    kb = tmp_path / "personas" / "knowledge" / "epl.md"
+    kb.parent.mkdir(parents=True, exist_ok=True)
+    kb.write_text("## 教训\n- [E0-L01|2026-09-04] 初始教训\n", encoding="utf-8")
+
+    out1 = matchday.run_matchday(env.conn, "am", [LEAGUE])
+    s1 = json.loads(env.conn.execute(
+        "SELECT summary FROM runs WHERE id=?",
+        (out1["run_id"],)).fetchone()["summary"])
+
+    kb.write_text("## 教训\n- [E0-L01|2026-09-04] 初始教训\n"
+                  "- [E0-L02|2026-09-04] 窗内合并落盘的新教训\n", encoding="utf-8")
+    out2 = matchday.run_matchday(env.conn, "am", [LEAGUE])
+    s2 = json.loads(env.conn.execute(
+        "SELECT summary FROM runs WHERE id=?",
+        (out2["run_id"],)).fetchone()["summary"])
+
+    assert s1["kb_window"] == s2["kb_window"]        # 同窗（快照已冻结）
+    assert s1["personas_hash"] == s2["personas_hash"]
 
 
 # ---------------------------------------------------------------- 报告接缝

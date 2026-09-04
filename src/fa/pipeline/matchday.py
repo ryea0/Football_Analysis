@@ -50,11 +50,10 @@ import json
 import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
-from fa import config as _config
 from fa.config import odds_api_key
 from fa.db import get_meta, set_meta
 from fa.evolve.knowledge import (ensure_current_snapshot, git_aux,
-                                 personas_tree_hash)
+                                 personas_consumed_hash)
 from fa.model.fit import FitConfig, training_rows
 from fa.pipeline.fixtures import (DEFAULT_REGIONS, QUOTA_META_KEY,
                                   sync_fixtures)
@@ -110,10 +109,14 @@ def run_matchday(conn: sqlite3.Connection, phase: str,
 def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
          run_id: int) -> dict:
     now = _now()
-    # M6（§12.7）：run 开始快照 personas 树内容 hash（版本戳，可归因命根）；
-    # 确保本窗知识快照存在（幂等；persona 阶段的唯一 KB 读取口）
-    personas_hash = personas_tree_hash(_config.project_root() / "personas")
+    # M6（§12.7）：先确保本窗知识快照存在（幂等；persona 阶段的唯一 KB 读取口），
+    # 再取「所消费 personas 工件」内容 hash（M6 终审 F2 控制者裁定方案 a）——
+    # runs.summary 的 ``personas_hash`` 语义 = **本 run 实际读到的内容**：
+    # 活顶层人格文件 + 本窗知识快照（知识经快照消费，活 knowledge 树不是）。
+    # 顺序必须先快照后取 hash：快照不存在的窗口会当场建，取早了 hash 会漏掉
+    # knowledge 部分。窗口中途合并落盘也不再让戳与内容错位（归因命根）。
     kb_window = ensure_current_snapshot()
+    personas_hash = personas_consumed_hash(kb_window)
     quota_before = _quota_left(conn)
     if odds_api_key() is None:
         # 无 key：一行不拉、一场不落，runs 记 no_key（CLI exit 0，§12 冒烟口径）
@@ -216,7 +219,9 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         "degraded": bool(reasons),
         "degraded_reasons": reasons,
         "persona": persona_summary,
-        "personas_hash": personas_hash,       # M6 版本戳（recommendations 同值落行）
+        "personas_hash": personas_hash,       # M6 版本戳 = 所消费 personas 工件
+                                              # 内容 hash（活人格 + 本窗知识快照，
+                                              # 终审 F2；recommendations 同值落行）
         "kb_window": kb_window,               # 本窗快照序号（冻结钉版语境）
         "git": git_aux(),                     # 辅助信息（尽力而为）
         "train_n": _train_n(conn, leagues),

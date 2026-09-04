@@ -566,8 +566,9 @@ B 线消费的版本化工件（persona 知识库 `personas/knowledge/*.md`；�
 v1 不在反思契约内）。状态一律外置 git 版本化文件，agent 无记忆（hermes/dsh
 均纯函数调用）。进化事件离线独立调度（周检 tick，B 线 §12.3 前向窗口收口
 触发），只读 B 线台账、只写自有表与版本化工件，失败静默停摆（记
-`evolution_runs`）不影响 A/B 线。判决入账强制记 personas 树内容 hash
-（`recommendations.personas_hash`）；窗口冻结机械化为快照——B 线 prompt 只读
+`evolution_runs`）不影响 A/B 线。判决入账强制记所消费 personas 工件的内容
+hash（活人格文件 + 本窗知识快照；`recommendations.personas_hash`）；窗口冻结
+机械化为快照——B 线 prompt 只读
 `evolution/snapshots/w{idx}/`，合并最早于下一窗口生效，关卡逾期自然顺延。
 C 线对照采用生产第三轨 `model_persona_nokb`（人格无知识库、paper 独立
 bankroll、不进 TG 推送正文）；§12.3 判据口径不变。合并经人审关卡：暂存区

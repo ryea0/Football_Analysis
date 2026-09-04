@@ -19,6 +19,7 @@ monkeypatch 失效——计划 Global Constraints）。
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import shutil
 import subprocess
@@ -194,6 +195,39 @@ def personas_tree_hash(root: Path) -> str:
     return h.hexdigest()
 
 
+def personas_consumed_hash(kb_idx: int) -> str:
+    """run **实际消费**的 personas 工件内容 hash（M6 终审 F2，spec §12.7）。
+
+    与 :func:`personas_tree_hash` 同一 hashing 方案（稳定键排序后
+    ``键\\0全文\\x1e`` 串联 sha256），但键集是虚拟的两部分：
+
+    - ``personas/<name>``：活树顶层人格文件（真实被读进 prompt 的那份）
+    - ``knowledge@w{kb_idx}/<name>``：本窗知识快照文件——B 线唯一读取口，
+      知识消费的就是这份冻结拷贝
+
+    因此快照建好之后（``ensure_current_snapshot`` 先行）合并落盘、TTL 修剪
+    等**活 knowledge 树**的变更都不动这个戳——戳与 run 消费的内容恒一致，
+    跨窗归因不被合并时点污染。相对键自描述：拿到 digest 即知两部分构成。
+    """
+    root = config.project_root()
+    virtual: list[tuple[str, Path]] = []
+    personas_dir = root / "personas"
+    if personas_dir.is_dir():
+        virtual.extend((f"personas/{p.name}", p)
+                       for p in sorted(personas_dir.glob("*.md")) if p.is_file())
+    snap = snapshot_dir(kb_idx)
+    if snap.is_dir():
+        virtual.extend((f"knowledge@w{kb_idx}/{p.name}", p)
+                       for p in sorted(snap.glob("*.md")) if p.is_file())
+    h = hashlib.sha256()
+    for key, p in sorted(virtual):
+        h.update(key.encode())
+        h.update(b"\0")
+        h.update(p.read_bytes())
+        h.update(b"\x1e")
+    return h.hexdigest()
+
+
 def kb_path(league: str) -> Path:
     return (config.project_root() / "personas" / "knowledge"
             / config.PERSONA_FILES[league])
@@ -207,16 +241,30 @@ def ensure_window_snapshot(idx: int) -> Path:
     """本窗首个调用者把活知识文件拷入快照（幂等；已存在即复用）。
 
     cron 串行保证无并发竞态；无知识文件 → 目录空 = 空知识库（合法态）。
+
+    落盘**原子化**（M6 终审 F4）：先写 ``w{idx}.tmp-<pid>`` 暂存目录、拷完再
+    ``os.replace`` 改名为最终路径——中途被杀（cron 截断/断电）只会留下可识别
+    的 tmp 目录，绝不可能留下「读得像最终快照」的半成品（那会被 B 线钉版
+    六周）。残留 tmp（含上次中断的）一律先清；最终目录已存在则复用不覆盖。
     """
     dest = snapshot_dir(idx)
     if dest.exists():
         return dest
-    dest.mkdir(parents=True)
+    for stale in dest.parent.glob(f"w{idx}.tmp-*"):
+        shutil.rmtree(stale, ignore_errors=True)
+    tmp = dest.parent / f"w{idx}.tmp-{os.getpid()}"
+    tmp.mkdir(parents=True)
     src = config.project_root() / "personas" / "knowledge"
-    if src.is_dir():
-        for p in sorted(src.glob("*.md")):
-            shutil.copy2(p, dest / p.name)
-    return dest
+    try:
+        if src.is_dir():
+            for p in sorted(src.glob("*.md")):
+                shutil.copy2(p, tmp / p.name)
+        if dest.exists():                     # 跨进程先到先得：复用已落盘者
+            return dest
+        os.replace(tmp, dest)                 # 原子改名：终态目录只以完整形态出现
+        return dest
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)   # 改名成功后 tmp 已不存在，无害
 
 
 def ensure_current_snapshot() -> int:
@@ -236,15 +284,27 @@ def prune_live_files(today: date) -> list[tuple[str, list[str]]]:
     """进化事件时对全部联赛活文件做 TTL 修剪（写回；报告列明）。
 
     无知识文件的联赛跳过；快照钉版保证本窗 B 线不受影响。
+
+    **逐联赛容错**（M6 终审 F1）：单联赛文件语法破损 / 不可读写只记错、绝不
+    上抛——一个坏文件不再炸掉整个 tick 的修剪前置步。返回契约不变
+    （``(league, anchors)`` 列表，加键不破形）：错误以哨兵锚点
+    ``<parse-error: …>`` 混入该联赛的锚点表（``<`` 开头不与真实锚点
+    ``{LG}-{STL}{两位}`` 相撞），报告与 tick 摘要原样透出、其余联赛照常修剪。
     """
     out: list[tuple[str, list[str]]] = []
     for league in config.PERSONA_FILES:
         p = kb_path(league)
         if not p.is_file():
             continue
-        text = p.read_text(encoding="utf-8")
-        kb = parse_kb(text, league)
-        kept, pruned = prune_expired(kb, today)
+        try:
+            text = p.read_text(encoding="utf-8")
+            kb = parse_kb(text, league)
+            kept, pruned = prune_expired(kb, today)
+        except (EvolutionError, OSError, ValueError) as exc:
+            # ValueError 兜 prune_expired 的 date.fromisoformat（语法正则放行的
+            # 非法日历日，如 2026-13-45——解析层合法、修剪层炸）
+            out.append((league, [f"<parse-error: {exc}>"[:200]]))
+            continue
         if pruned:
             p.write_text(render_kb(kept, generated=today.isoformat(),
                                    digest=_text_digest(text)), encoding="utf-8")
