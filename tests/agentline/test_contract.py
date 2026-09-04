@@ -76,3 +76,52 @@ def test_parse_fail_carries_reason_not_numbers():
     r = parse_prediction("不是 JSON")
     assert r["p_home"] is None
     assert "原因" in r["reasoning_digest"] or r["reasoning_digest"]
+
+
+from fa.agentline.contract import ATTACK_LABELS, parse_attack
+
+
+def test_parse_attack_ok_all_labels():
+    items = [{"label": lb, "reason": "r", "severity": 0.5}
+             for lb in ATTACK_LABELS]
+    raw = json.dumps({"attacks": items})
+    got = parse_attack(raw)
+    assert got["status"] == "ok"
+    assert [a["label"] for a in got["attacks"]] == list(ATTACK_LABELS)
+
+
+def test_parse_attack_empty_attacks_legal():
+    got = parse_attack('{"attacks": []}')
+    assert got["status"] == "ok" and got["attacks"] == []
+
+
+def test_parse_attack_unknown_label_fails():
+    got = parse_attack('{"attacks": [{"label": "haha", "reason": "r",'
+                       ' "severity": 0.5}]}')
+    assert got["status"] == "parse_fail" and got["attacks"] == []
+
+
+def test_parse_attack_severity_bounds():
+    # 注：brief 原稿 f-string 中 {bad}}]}} 有未转义单 }（语法错误），且其后
+    # .replace("}}", "}") 恒为空转——此处按同一语义改写（产出串逐字符一致）。
+    for bad in ("-0.1", "1.1", "NaN", "Infinity"):
+        got = parse_attack('{"attacks": [{"label": "overconfidence",'
+                           f' "reason": "r", "severity": {bad}}}]')
+        assert got["status"] == "parse_fail", bad
+
+
+def test_parse_attack_probability_field_guard():
+    got = parse_attack('{"attacks": [], "p_home": 0.5}')
+    assert got["status"] == "parse_fail"
+    assert "概率" in got["error"]
+
+
+def test_parse_attack_fence_extraction_marks_repaired():
+    got = parse_attack('前言```json\n{"attacks": []}\n```后语')
+    assert got["status"] == "ok" and got["repaired"] is True
+
+
+def test_parse_attack_reason_truncated_to_200():
+    got = parse_attack('{"attacks": [{"label": "overconfidence",'
+                       ' "reason": "%s", "severity": 0.1}]}' % ("字" * 300))
+    assert len(got["attacks"][0]["reason"]) == 200
