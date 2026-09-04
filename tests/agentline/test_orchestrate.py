@@ -230,10 +230,18 @@ _DEB_ATK = json.dumps({"attacks": [{"label": "overconfidence", "reason": "r",
 def test_run_debate_happy_and_idempotent(conn, info_dir, monkeypatch):
     from fa.agentline.orchestrate import run_debate
     seq = [_DEB_OK0, _DEB_ATK, "垃圾"]   # v0 ok → 批评 ok → 修订失败 → 终版=v0
-    monkeypatch.setattr(runner_mod, "run_headless",
-                        lambda p, prof, timeout_s=None: (seq.pop(0), None, 0.01))
+    profiles = []
+
+    def fake_run(prompt, profile, timeout_s=None):
+        profiles.append(profile)
+        return (seq.pop(0), None, 0.01)
+
+    monkeypatch.setattr(runner_mod, "run_headless", fake_run)
     counts = run_debate(conn, info_dir, limit=None)
     assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+    # profile 透传（run_multi 同款不变量）：生成/批评/修订三次调用全走 A_base
+    assert len(profiles) == 3
+    assert set(profiles) == {"fa-agent-base"}
     row = conn.execute("SELECT budget_exhausted, p_home FROM"
                        " agentline_predictions WHERE line='A_debate'"
                        " AND attributor=1").fetchone()
@@ -270,3 +278,25 @@ def test_run_debate_summary_carries_budget_and_early_stop(conn, info_dir,
     pred = conn.execute("SELECT budget_exhausted FROM agentline_predictions"
                         " WHERE line='A_debate'").fetchone()
     assert pred["budget_exhausted"] == 0
+
+
+def test_run_debate_crash_leaves_run_row_with_partial_counts(conn, info_dir,
+                                                             monkeypatch):
+    """批中崩溃（info JSON 损坏致 json.loads 抛错）也必须先留 run 台账（中断位
+    + 已累计计数与批级 n_calls）再抛——run_line 同型（先例 4a8b05a），否则留下
+    「predictions>0 且 runs=0」的无痕中断。"""
+    from fa.agentline.orchestrate import run_debate
+    (info_dir / "11.json").write_text("{损坏:非 JSON", encoding="utf-8")
+    seq = [_DEB_OK0, _DEB_ATK, _DEB_OK0]     # 场 10 完整走完一轮辩论链
+    monkeypatch.setattr(runner_mod, "run_headless",
+                        lambda p, prof, timeout_s=None: (seq.pop(0), None, 0.01))
+    with pytest.raises(json.JSONDecodeError):
+        run_debate(conn, info_dir)                    # 异常照抛（不吞）
+    assert seq == []                                  # 场 10 的 3 次调用已发生
+    run_row = conn.execute("SELECT * FROM agentline_runs"
+                           " WHERE line='A_debate'").fetchone()
+    assert run_row is not None                        # 台账已留
+    assert run_row["n_ok"] == 1                       # 已完成场次如实计数
+    summary = json.loads(run_row["summary"])
+    assert summary["interrupted_match_id"] == 11      # 中断位可定位续跑
+    assert summary["n_calls"] == 3 and summary["n_todo"] == 2   # 批级计数照记
