@@ -14,6 +14,7 @@
 - **M4（persona 接入）完成**（2026-09-04，docs/m4-report.md）：实跑①契约合规 51.9%→禁工具条款后 100%（9/9），实跑②比赛日 E2E 判决 ok（persona 24 场 called/24 ok/1 veto/0 降级，双轨 64 行、run#7 实落 32 注=A 轨 1+B 轨 31）——A 轨候选多被遗留注幂等去重，额度 440→420）；**veto 首例抓到候选池跨联赛队名错位**（fixture 100，F1 挂 I1 的 Treviso）；TG 推送经代理实测可达；遗留与 M5 建议见 m4-report §7；**集成注（2026-09-04）**：M4 分支已并入本集成分支，persona 两列并入 schema v6
 - **M5 运营基建完成**（2026-09-04）：cron **双载体可切换**（§9.6，负责人裁定）——`scripts/fa_cron.sh` 为三 job 唯一入口（失败→`fa ops alert` TG 告警、daily 后 `fa ops watchdog` 查漏跑，风险 #6 落地），装配用 `scripts/cron_install.sh`（system crontab，**当前激活**）或 `scripts/hermes_cron_install.sh`（hermes cron，互斥切换）；「连续跑通一周」观察期进行中。**CLV 基准链修复**（spec v0.8，schema v6）：football-data 2025-12 起断供 Pinnacle → Betfair 交易所收盘 fallback（`closing_source` 记账），`fa data backfill-bfe` 回填 3,492 行、`fa ops backfill-clv` 补齐首批 4 注（CLV 中位 +2.9%）
 - **范式对比线（§12.5）立项**（2026-09-04）：线 A（dsh headless agent 当大脑）与线 P 长期并行滚动对比，不设样本上限；设计 `docs/superpowers/specs/2026-09-04-agentline-dual-track-design.md`，首批 E2E 完成（10 场×双线全 ok，快照库），滚动扩批中
+- **M6（C 线进化栈）立项**（2026-09-04，docs/superpowers/specs/2026-09-04-m6-evolution-line-design.md）：第三条顶层线路——知识库版本化外置 + hermes -z 反思纯函数 + 窗口冻结合并 + 版本戳入账；spec 增补草案取 §12.6（§12.5 为范式对比线占用）；实施依赖 M4 合并与 M5 节流落地（两者均已完成，已具备开工条件），未插队
 - **v0.6 本地只读看板**（§7.4，`dashboard/`，Streamlit）与 **retro 复盘归因子线**（`src/fa/retro/` + `fa retro`，设计 docs/superpowers/specs/2026-09-04-retro-attribution-design.md）已进主线
 
 ## 关键约束（详见 spec 对应章节）
