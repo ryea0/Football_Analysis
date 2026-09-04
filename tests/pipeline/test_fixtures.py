@@ -332,7 +332,8 @@ def test_empty_league_yield_writes_nothing(conn, replay, monkeypatch):
         lambda league, markets=("h2h", "totals"), regions=("eu", "uk"),
         refresh_quota=True: ([], 77))
     out = sync_fixtures(conn, ["E0"])
-    assert out == {"fixtures": 0, "aligned": 0, "unknown": [], "quota_left": 77}
+    assert out == {"fixtures": 0, "aligned": 0, "unknown": [],
+                   "league_mismatch": 0, "quota_left": 77}
     assert _fixtures(conn) == [] and _snapshots(conn) == []
 
 
@@ -438,4 +439,36 @@ def test_sync_never_writes_a_line_tables(conn, replay):
 
 def test_return_keys_are_exactly_the_brief_contract(conn, replay):
     out = sync_fixtures(conn, ["E0"])
-    assert set(out) == {"fixtures", "aligned", "unknown", "quota_left"}
+    assert set(out) == {"fixtures", "aligned", "unknown", "league_mismatch",
+                        "quota_left"}
+
+
+# ------------------------------------------------- 联赛自洽（M4 §7-4 纵深防御）
+# 落库前校验：align 给出的 team id 若不属于该 fixture 的联赛 → 该侧置 NULL
+# （不跳过整场）、队名进隔离表、摘要计 league_mismatch——根治在 resolve_team
+# 的别名收域，这里防人工确认错队与未来新路径再漏。
+
+def test_league_mismatch_side_nulls_quarantines_and_counts(conn, replay, monkeypatch):
+    """align 返回错联赛 team id（模拟别名错绑/人工确认错队）→ 校验拦下。"""
+    from fa.pipeline import fixtures as fx
+
+    wrong_id = get_or_create_team(conn, "I1", "Treviso")   # I1 的队
+    real_align = fx.align_fixture_teams
+
+    def hijacked(c, league, home, away, source="oddsapi"):
+        h, a = real_align(c, league, home, away, source)
+        return (wrong_id if h is not None else None), a    # 主队侧劫持为错联赛 id
+
+    monkeypatch.setattr(fx, "align_fixture_teams", hijacked)
+    out = sync_fixtures(conn, ["E0"], regions=("eu",))
+
+    row = conn.execute(
+        "SELECT home_team_id, away_team_id FROM fixtures WHERE event_key='ev1'"
+    ).fetchone()
+    assert row["home_team_id"] is None                # 错联赛侧拦下：NULL 不落脏 id
+    assert row["away_team_id"] is not None            # 对的一侧不受牵连
+    assert out["league_mismatch"] == 3                # ev1/ev2/ev3 主队各计一次
+    quarantined = {r["name"] for r in conn.execute(
+        "SELECT name FROM unknown_names")}
+    assert "Chelsea" in quarantined                   # 被拦队名进隔离表（可见）
+    assert out["aligned"] == 0                        # 拦下后双侧齐的场景为 0

@@ -325,8 +325,6 @@ def test_bline_vocab_accepts_all_legal_values(conn, bline_ids):
 def test_migrate_up_v1_adds_everything(tmp_path):
     """_migrate_up 单独跑就能把 v1 库补齐到当前版本（不依赖 _SCHEMA 兜底）。"""
 
-
-    """_migrate_up 单独跑就能把 v1 库补齐到 v4（不依赖 _SCHEMA 兜底）。"""
     p = tmp_path / "v1.db"
     _legacy_db(p, version=1, with_bp=False)
     c = connect(p)
@@ -870,3 +868,70 @@ def test_fresh_db_has_bfe_columns_at_v6(tmp_path):
             r["name"] for r in c.execute("PRAGMA table_info(bets)")}
     finally:
         c.close()
+
+
+# ------------------------------------- persona 两列（M4，v6 迁移链）
+
+
+
+
+
+def test_fresh_recommendations_has_persona_columns(tmp_path):
+    """全新库 recommendations 即含 persona 点评两列（可空、非主键，§6.3）。"""
+    init_db(tmp_path / "t.db")
+    c = connect(tmp_path / "t.db")
+    cols = _table_cols(c, "recommendations")
+    assert cols["key_factors"] == ("TEXT", 0, 0)
+    assert cols["report_md"] == ("TEXT", 0, 0)
+    order = list(cols)
+    assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
+        ["key_factors", "report_md"]
+    c.close()
+
+
+def test_v3_upgrades_to_current_preserves_m3_rows(tmp_path):
+    """v3→当前（经 v4/v5/v6 全链）：persona 两列补齐，M3 既有推荐行原样保留。"""
+    p = tmp_path / "t.db"
+    init_db(p)
+    c = connect(p)
+    run = c.execute(
+        "INSERT INTO runs (type, phase, started_at, status) VALUES "
+        "('matchday', 'am', '2026-09-03T11:00:00Z', 'ok')")
+    fx = c.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, status, "
+        "created_at) VALUES ('E0', 'ev-v3', 'oddsapi', '2026-09-04T14:00:00Z', "
+        "'scheduled', '2026-09-03T11:00:00Z')")
+    c.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " created_at) VALUES (?, ?, 'model_only', 'H', 'am', 0.55, 0.50, 2.10,"
+        " 'Pinnacle', 0.05, 0.155, 0.01, '2026-09-03T11:00:00Z')",
+        (run.lastrowid, fx.lastrowid))
+    c.commit(); c.close()
+
+    _strip_persona_columns(p)          # 模拟 M3 上线库：v3 形状 + 一行既有推荐
+    init_db(p)                         # 不抛异常即升级成功
+
+    c = connect(p)
+    assert c.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
+    r = c.execute("SELECT * FROM recommendations").fetchone()
+    assert (r["strategy"], r["market"], r["phase"]) == ("model_only", "H", "am")
+    assert r["model_p"] == 0.55 and r["kelly_stake_frac"] == 0.01
+    assert r["key_factors"] is None and r["report_md"] is None
+    assert r["verdict"] is None and r["confidence_delta"] is None \
+        and r["final_stake_frac"] is None
+    c.close()
+
+
+def test_v3_shape_matches_fresh_on_persona_columns(tmp_path):
+    """v3 升级库与全新库的 recommendations 形状（含类型）一致——ALTER 列序缀尾
+    与 fresh 列序不同属已知豁免（按名形状比对，M4 分叉合并为 v6 后两路同构）。"""
+    init_db(tmp_path / "a.db")
+    init_db(tmp_path / "b.db")
+    _strip_persona_columns(tmp_path / "b.db")
+    _set_version(tmp_path / "b.db", 3, drop=())
+    init_db(tmp_path / "b.db")
+    ca, cb = connect(tmp_path / "a.db"), connect(tmp_path / "b.db")
+    assert _table_cols(ca, "recommendations") == _table_cols(cb, "recommendations")
+    ca.close(); cb.close()

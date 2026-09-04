@@ -293,6 +293,7 @@ hermes cron（调度）
 | 累计 P&L | 累计净额 | 绝对量 |
 | **CLV** | odds_taken / 收盘价 − 1，按注中位数。**收盘基准链（2026-09-04 裁定）**：Pinnacle 收盘（`psc_*`，与 A 线回测同源）优先；缺失 fallback Betfair 交易所收盘（`bfe_*`，含佣金前置、略偏严）；实际所用记 `bets.closing_source`。背景：football-data.co.uk 自 2025-12 起断供 Pinnacle（2026-27 赛季连列已删），B 线不 fallback 则主判据失明 | **金标准**：持续买在收盘前且价格更好 = 长期正期望的信号，比短期盈亏更早暴露真相 |
 
+
 ### 7.4 本地只读看板（v0.6）
 
 - `dashboard/`（Streamlit 多页应用）：B 线运营监控 4 页 + A 线研究可视化 3 页，页面按 §12 双线分区，表边界同 §12.1（A 线页只读 `backtest_predictions`/`matches`）
