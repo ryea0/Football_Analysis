@@ -199,16 +199,24 @@ def agentline_export(league: str = typer.Option(...), season: int = typer.Option
 
 
 @agentline_app.command("run")
-def agentline_run(line: str = typer.Option(..., help="A_base 或 A_enh"),
-                  limit: int = typer.Option(None)) -> None:
+def agentline_run(line: str = typer.Option(..., help="A_base、A_enh 或 A_multi"),
+                  limit: int = typer.Option(None),
+                  members: int = typer.Option(3, help="A_multi 独立成员数（≥2）")) -> None:
     """跑一批线 A 预测（幂等续跑：只补无 ok 行的场次）"""
-    from fa.agentline.orchestrate import run_line
+    from fa.agentline.orchestrate import run_line, run_multi
     from fa.config import project_root
-    if line not in ("A_base", "A_enh"):
-        typer.echo(f"line 必须是 A_base 或 A_enh，收到 {line}")
+    if line not in ("A_base", "A_enh", "A_multi"):
+        typer.echo(f"line 必须是 A_base/A_enh/A_multi，收到 {line}")
+        raise typer.Exit(2)
+    if line == "A_multi" and members < 2:
+        typer.echo(f"--members 必须 ≥2（少于两员不是 ensemble），收到 {members}")
         raise typer.Exit(2)
     conn = connect()
-    counts = run_line(conn, line, project_root() / "data" / "agentline", limit)
+    if line == "A_multi":
+        counts = run_multi(conn, project_root() / "data" / "agentline",
+                           members=members, limit=limit)
+    else:
+        counts = run_line(conn, line, project_root() / "data" / "agentline", limit)
     conn.close()
     typer.echo(f"line={line} 完成：{counts}")
 

@@ -63,3 +63,44 @@ def run_line(conn: sqlite3.Connection, line: str, info_dir: Path,
         raise
     save_run(conn, line, profile, MODEL, counts, summary, started_at=t0)
     return counts
+
+
+def run_multi(conn: sqlite3.Connection, info_dir: Path, members: int = 3,
+              limit: int | None = None) -> dict:
+    """A_multi（multi-brain spec §3.1）：N 个独立会话同信息集各自预测 → 聚合。
+
+    成员用 A_base prompt/profile（无检索——异构/检索成员属 gated-2）。
+    幂等：聚合行已 ok 的场次跳过（成员行不判重——重跑会覆盖，ON CONFLICT
+    三元 upsert 语义与单跑一致）。
+    """
+    from fa.agentline.ensemble import aggregate_predictions
+    profile = _PROFILE_LINE["A_base"]
+    done = {r["match_id"] for r in conn.execute(
+        "SELECT match_id FROM agentline_predictions"
+        " WHERE line='A_multi' AND attributor=0 AND status='ok'")}
+    todo = sorted(int(p.stem) for p in info_dir.glob("*.json")
+                  if p.stem.isdigit() and int(p.stem) not in done)
+    if limit is not None:
+        todo = todo[:limit]
+    counts = {"ok": 0, "parse_fail": 0, "timeout": 0, "error": 0}
+    for mid in todo:
+        info = json.loads((info_dir / f"{mid}.json").read_text(encoding="utf-8"))
+        prompt = build_prompt(info, "A_base")
+        member_results = []
+        total_dur = 0.0
+        for i in range(members):
+            out, err, dur = runner_mod.run_headless(prompt, profile)
+            total_dur += dur
+            parsed = parse_prediction(out or "")
+            parsed, status = _status_of(parsed, err)
+            save_prediction(conn, mid, "A_multi", parsed, out or "",
+                            _HARNESS, MODEL, dur, attributor=i + 1)
+            member_results.append(parsed if status == "ok" else None)
+        agg = aggregate_predictions(member_results)
+        save_prediction(conn, mid, "A_multi", agg, "", _HARNESS, MODEL,
+                        total_dur, attributor=0)
+        counts["ok" if agg["status"] == "ok" else "error"] += 1
+    save_run(conn, "A_multi", profile, MODEL, counts,
+             {"n_todo": len(todo), "members": members,
+              "info_dir": str(info_dir)})
+    return counts

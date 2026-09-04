@@ -187,17 +187,16 @@ CREATE INDEX IF NOT EXISTS idx_retro_attr_match ON retro_attributions (match_id)
 # 范式对比线两表（spec §12.5 / 设计 §6）：线 A 专用，与 B 线表物理隔离——
 # 本模块的 B 线边界注释同样适用于这里：绝不写 recommendations / bets 等。
 # v4/v5 分层由并行分支合并产生（2026-09-04）：retro 先占 v4，本线抬 v5。
-# v7 补二期多脑预留（multi-brain 附录 §6 欠账）：line CHECK 加 'A_multi'、
-# attributor 列（成员 1..N / 聚合 0）、UNIQUE 抬三元组 (match_id, line,
-# attributor)——A_multi 同场四行并存的前提；A_base/A_enh 恒 attributor=1，
-# 语义不变。CHECK 与 UNIQUE 无法 ALTER，v7 走重建表迁移（见 _migrate_up）。
+# v7（A_multi 计划 T1）：line 词表加 'A_multi'、加 attributor 列、UNIQUE 扩成
+# 三元组——同一场同一 line 的 N 个成员行（1..N）与聚合行（0）共存；CHECK 无法
+# 后补，存量库走 _migrate_up 的重建路径（rename-copy-drop，数据保全）。
 _AL_TABLE = """
 CREATE TABLE IF NOT EXISTS agentline_predictions (
     id                INTEGER PRIMARY KEY,
     match_id          INTEGER NOT NULL REFERENCES matches(id),
     line              TEXT NOT NULL
         CHECK (line IN ('A_base', 'A_enh', 'A_multi')),
-    attributor        INTEGER NOT NULL DEFAULT 1,  -- 成员 1..N；聚合行 0（二期）
+    attributor        INTEGER NOT NULL DEFAULT 1,  -- 成员 1..N；聚合行 0（A_multi）
     p_home REAL, p_draw REAL, p_away REAL, p_over25 REAL,   -- parse_fail 时 NULL
     confidence        REAL,
     reasoning_digest  TEXT,
@@ -210,7 +209,7 @@ CREATE TABLE IF NOT EXISTS agentline_predictions (
     model             TEXT,
     duration_s        REAL,
     created_at        TEXT NOT NULL,
-    UNIQUE (match_id, line, attributor)   -- 幂等：一场一line一attributor一行
+    UNIQUE (match_id, line, attributor)   -- 幂等：一场一line一归因子一行
 );
 CREATE INDEX IF NOT EXISTS idx_alp_line ON agentline_predictions (line);
 
@@ -316,9 +315,12 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     断供应对，spec §7.3）；recommendations 补 persona 两列 key_factors /
     report_md（§6.3；M4 分支基于旧 main 原占 v4，集成时并入 v6——第三个
     并行撞号位，2026-09-04）；
-    v6->v7 agentline_predictions 重建表补二期多脑预留（line CHECK 加
-    'A_multi' + attributor 列 + UNIQUE 三元组）——本层例外非纯加法（CHECK/
-    UNIQUE 无法 ALTER），走建新表搬数据，存量行 attributor 回填 1。"""
+    v6->v7 重建 agentline_predictions——line 词表加 'A_multi'、加 attributor 列、
+    UNIQUE 扩成三元组：带 CHECK 的列与约束无法 ALTER 后补，唯一路径是
+    rename-copy-drop（存量行全列保全、attributor 回填 DEFAULT 1，A_multi 计划
+    T1，2026-09-04）。重建各步被 executescript 隐式提交逐个落盘，半途失败留下
+    影子表 agentline_predictions_v6 时，重试弃掉半建活动表、从影子重放恢复
+    （影子恢复优先于幂等跳过）。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -365,54 +367,45 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
                 conn.execute(
                     "ALTER TABLE recommendations ADD COLUMN report_md TEXT")
     if from_v < 7:
-        # agentline A_multi 预留（二期 multi-brain 附录 §6 欠账，v7）：CHECK 与
-        # UNIQUE 无法 ALTER → 建新表（_AL_TABLE 同一常量的形状）搬数据、改名。
-        # 幂等护栏（必要，同 v5 attributor 护卫理据）：init_db 先跑 _SCHEMA，
-        # v6 及更老的库此时表已存在 IF NOT EXISTS 不动它，照走重建；但迁移
-        # 半途断掉重跑（表已新形状、版本号未抬）时无条件重建会丢数据——按
-        # DDL 是否已含 'A_multi' 判定跳过。本表无入边 FK（叶子表），重建安全。
-        row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table'"
-            " AND name='agentline_predictions'").fetchone()
-        if row is not None and "'A_multi'" not in row["sql"]:
+        # v7：agentline_predictions 加 attributor + A_multi 词表 + 三元 UNIQUE。
+        # CHECK 无法后补——唯一路径是重建（rename-copy-drop）。重建各步经
+        # executescript 的隐式提交逐一落盘，半途失败会把存量困在影子表
+        # agentline_predictions_v6——所以**影子恢复优先于一切跳过/幂等判定**：
+        # 影子在，就弃掉半建的活动表、从影子重放；只有影子不在且 attributor
+        # 已在（重建早已完成）才真正跳过。
+        has_shadow = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table'"
+            " AND name='agentline_predictions_v6'").fetchone() is not None
+        acols = {r["name"] for r in conn.execute(
+            "PRAGMA table_info(agentline_predictions)")}
+        if has_shadow or (acols and "attributor" not in acols):
+            # 前置：idx_alp_line 占名——rename 路径里它随旧表改名后继续占住
+            # 该名，恢复路径的崩溃态也可能占名；两条路都在建新表前摘掉（活动
+            # 表反正要弃）。autoindex 随表走，无需处理。
             conn.execute("DROP INDEX IF EXISTS idx_alp_line")
+            if has_shadow:
+                # 影子是唯一数据源：窗 A（rename 后新表未建，init 先兜出的
+                # 空壳）、窗 B（新表建好、复制未做）、复制半途——半建的活动表
+                # 一律弃掉重放，不做任何幂等短路。
+                conn.execute("DROP TABLE IF EXISTS agentline_predictions")
+            else:
+                conn.executescript(
+                    "ALTER TABLE agentline_predictions RENAME TO"
+                    " agentline_predictions_v6;")
+            conn.executescript(_AL_TABLE)       # 新形状（含 attributor）
             conn.execute(
-                "CREATE TABLE agentline_predictions_v7 ("
-                " id                INTEGER PRIMARY KEY,"
-                " match_id          INTEGER NOT NULL REFERENCES matches(id),"
-                " line              TEXT NOT NULL"
-                "     CHECK (line IN ('A_base', 'A_enh', 'A_multi')),"
-                " attributor        INTEGER NOT NULL DEFAULT 1,"
-                " p_home REAL, p_draw REAL, p_away REAL, p_over25 REAL,"
-                " confidence        REAL,"
-                " reasoning_digest  TEXT,"
-                " sources_json      TEXT,"
-                " raw_output        TEXT NOT NULL,"
-                " status            TEXT NOT NULL"
-                "     CHECK (status IN ('ok', 'parse_fail', 'timeout',"
-                " 'error')),"
-                " repaired          INTEGER,"
-                " harness           TEXT,"
-                " model             TEXT,"
-                " duration_s        REAL,"
-                " created_at        TEXT NOT NULL,"
-                " UNIQUE (match_id, line, attributor))")
-            conn.execute(
-                "INSERT INTO agentline_predictions_v7 (id, match_id, line,"
-                " attributor, p_home, p_draw, p_away, p_over25, confidence,"
-                " reasoning_digest, sources_json, raw_output, status,"
-                " repaired, harness, model, duration_s, created_at)"
-                " SELECT id, match_id, line, 1, p_home, p_draw, p_away,"
-                " p_over25, confidence, reasoning_digest, sources_json,"
-                " raw_output, status, repaired, harness, model, duration_s,"
-                " created_at FROM agentline_predictions")
-            conn.execute("DROP TABLE agentline_predictions")
-            conn.execute(
-                "ALTER TABLE agentline_predictions_v7"
-                " RENAME TO agentline_predictions")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_alp_line"
-                " ON agentline_predictions (line)")
+                "INSERT INTO agentline_predictions (match_id, line, p_home,"
+                " p_draw, p_away, p_over25, confidence, reasoning_digest,"
+                " sources_json, raw_output, status, repaired, harness, model,"
+                " duration_s, created_at)"
+                " SELECT match_id, line, p_home, p_draw, p_away, p_over25,"
+                " confidence, reasoning_digest, sources_json, raw_output,"
+                " status, repaired, harness, model, duration_s, created_at"
+                " FROM agentline_predictions_v6;")
+            # INSERT..SELECT 在外键开启下逐行校验 match_id→matches：真库存量
+            # 全经 save_prediction（FK ON）写入、必然有效；真有脏行就在这里
+            # fail-fast——影子表原样保留，重试复现同一错误，不丢数据。
+            conn.execute("DROP TABLE agentline_predictions_v6;")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 

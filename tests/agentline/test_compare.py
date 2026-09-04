@@ -138,3 +138,83 @@ def test_cli_compare_unmigrated_db_friendly_exit(tmp_path, monkeypatch):
     res = _runner.invoke(app, ["agentline", "compare"])
     assert res.exit_code == 1, res.output
     assert "未迁移" in res.output
+
+
+# ---- A_multi（multi-brain）：五对照 + 成员级审计 -----------------------------
+# 夹具沿用本文件既有 db_three 的造数方式（foreign_keys=OFF + 同款 bp INSERT）。
+
+def _al(conn, attributor, ph, pd_, pa, po25, status):
+    """A_multi 行造数：attributor 区分聚合行（0）与成员行（1..N）。"""
+    conn.execute(
+        "INSERT INTO agentline_predictions (match_id, line, attributor,"
+        " p_home, p_draw, p_away, p_over25, confidence, reasoning_digest,"
+        " sources_json, raw_output, status, repaired, created_at)"
+        " VALUES (1, 'A_multi', ?, ?, ?, ?, ?, 0.5, 'r', '[]', 'raw', ?,"
+        " 0, '2026-09-04')", (attributor, ph, pd_, pa, po25, status))
+
+
+@pytest.fixture()
+def conn_amulti(tmp_path):
+    """1 场 bp 行 + A_multi 4 行：1 聚合 ok（成员中位数 0.6/0.25/0.15）+
+    3 成员行（2 ok 概率故意偏移 0.7/0.5 以证明排除 + 1 parse_fail）。
+    parse_fail 成员钉住「成员审计分母含非 ok 行」——否则失败被静默吞掉。"""
+    init_db(tmp_path / "am.db")
+    conn = connect(tmp_path / "am.db")
+    conn.execute("PRAGMA foreign_keys=OFF")
+    conn.execute(
+        "INSERT INTO backtest_predictions (league, season, week_index,"
+        " match_id, date, p_home, p_draw, p_away, p_over25, p_under25,"
+        " mkt_home, mkt_draw, mkt_away, mkt_over25, odds_home, odds_draw,"
+        " odds_away, outcome, total_goals)"
+        " VALUES ('E0', 2023, 1, 1, '2024-02-01', 0.4, 0.3, 0.3, 0.5, 0.5,"
+        " 0.45, 0.28, 0.27, 0.55, 2.2, 3.5, 3.6, 'H', 3)")
+    _al(conn, 0, 0.6, 0.25, 0.15, 0.575, "ok")      # 聚合行（attributor=0）
+    _al(conn, 1, 0.7, 0.2, 0.1, 0.6, "ok")          # 成员：概率故意偏移
+    _al(conn, 2, 0.5, 0.3, 0.2, 0.55, "ok")
+    _al(conn, 3, None, None, None, None, "parse_fail")
+    conn.commit()
+    yield conn
+    conn.close()
+
+
+def test_compare_includes_amulti_aggregate_only(conn_amulti):
+    """A_multi 只计 attributor=0；成员行（1..3）不得混入该线指标。"""
+    from fa.agentline.compare import compare_lines
+    cmp = compare_lines(conn_amulti)
+    assert cmp["A_multi"]["n"] == 1            # 3 条成员行（2 ok + 1 parse_fail）全被排除
+    # 成员行存在性（纪律 1：成员级计分的数据基础）
+    assert cmp["audit"]["multi_members"] == 3
+    assert cmp["audit"]["multi_member_ok"] == 2
+
+
+def test_amulti_metric_is_aggregate_row_not_members(conn_amulti):
+    """AM-T1 审查点实证：merge_rows 按 match_id 一对一折叠，n 恒为场数——
+    「n==1」区分不了成员是否混入，只有概率值能。A_multi 线指标必须逐位等于
+    只取 attributor=0 的重算值，且与混入成员行的重算值不同。"""
+    from fa.agentline.compare import _fetch_agent, compare_lines, merge_rows
+    from fa.backtest.metrics import evaluate, fetch_predictions
+    conn = conn_amulti
+    bp = fetch_predictions(conn, None, None)
+    agg = _fetch_agent(conn, "A_multi", None, None, attributor=0)
+    mem = [r for r in _fetch_agent(conn, "A_multi", None, None)
+           if r["attributor"] > 0]              # 无归因子过滤：ok 成员行在列
+    assert len(agg) == 1 and len(mem) == 2
+    cmp = compare_lines(conn)
+    assert cmp["A_multi"] == evaluate(merge_rows(bp, agg))
+    contaminated = evaluate(merge_rows(bp, agg + mem))
+    assert contaminated["n"] == cmp["A_multi"]["n"]      # n 无法区分两者
+    assert cmp["A_multi"]["model_ll"] != contaminated["model_ll"]
+
+
+def test_report_renders_amulti_row(conn_amulti, tmp_path):
+    from fa.agentline.compare import render_report
+    from fa.agentline.compare import compare_lines
+    cmp = compare_lines(conn_amulti)
+    out = tmp_path / "r.md"
+    render_report(cmp, out)
+    text = out.read_text(encoding="utf-8")
+    assert "| A_multi |" in text
+    assert "A_multi" in text.split("## 平注 ROI")[1]  # ROI 段也含该线
+    # 成员披露行（成员级计分入口）必须在脚注前出现
+    assert ("A_multi 为多成员确定性聚合（分量中位数）" in text
+            and "本批成员 3 行 / ok 2" in text)
