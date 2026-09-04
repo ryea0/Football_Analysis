@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | 项目名 | fa（Football Analysis） |
-| 版本 | v0.10（确认稿） |
+| 版本 | v0.11（确认稿） |
 | 日期 | 2026-09-04 |
 | 状态 | M1 完成；M2 判决 NO-GO（+3.02%，docs/m2-verdict.md）；**项目负责人批准 §12 双线并存协议——B 线（M3-M5 paper 模式）在推翻顺序关卡的前提下启动**（2026-09-03） |
 
@@ -16,6 +16,7 @@
 > v0.7 → v0.8 变更：CLV 收盘基准链（§3.2/§7.3）——football-data 自 2025-12 断供 Pinnacle，B 线收盘基准改为「Pinnacle 优先、缺失 fallback Betfair 交易所（`bfe_*`）」并以 `bets.closing_source` 记账（2026-09-04 负责人裁定）；matches 增 `bfe_*` 四列（schema v6——v5 已被范式对比线占用）、`fa data backfill-bfe` / `fa ops backfill-clv` 回填既有分区与台账；A 线回测基准不变。
 > v0.8 → v0.9 变更：周度小结（§9.6 weekly / §10）——`fa ops weekly` 上周双轨对照（落注/结算/ROI/CLV/bankroll）周一 07:00 推 TG，空周静默；§12.3 判据时钟裁定——6 周观察期自 cron 激活日起算，激活前数据留档不进预注册样本（2026-09-04 负责人裁定）。
 > v0.9 → v0.10 变更：组合风控三参数预注册（§5.3/§10 M5 入场前提）——总敞口 ≤30% bankroll、同场同轨 ≤2 注、峰值回撤 >20% 单注减半；paper 期仅观测（runs.summary.risk_gates）、实盘入场硬前提（2026-09-04 负责人裁定，参照交易实践的组合总热度/相关集群/回撤节流原则）。
+> v0.10 → v0.11 变更：新增 §12.7 进化线（C 线，M6）——知识库版本化外置 + hermes -z 反思纯函数 + 窗口快照冻结 + 人审关卡；B 线扩第三轨 model_persona_nokb（C 线同期对照，TG 推送保持双轨口径，§12.3 判据口径不变）；recommendations 增 personas_hash 版本戳（schema v8）（2026-09-04 设计评审，docs/superpowers/specs/2026-09-04-m6-evolution-implementation-design.md）。
 
 ---
 
@@ -277,6 +278,10 @@ hermes cron（调度）
 - 实盘按 model_persona 下注，但两套都跟踪命中 / 收盘对比
 - **用实盘数据回答「persona 到底加没加分」**——这是对方案 B 的诚实检验；样本量在 M5 结束时评估
 
+M6 起同刻三落（§12.7）：第三轨 `model_persona_nokb` 为 C 线对照轨（人格无
+知识库、paper 独立 bankroll）；TG 推送正文保持双轨口径（nokb 不进推送），
+§12.3 预注册判据的 A/B 对比口径不变（仍 model_only vs model_persona）。
+
 ---
 
 ## 7. 报告与投注追踪
@@ -465,6 +470,7 @@ LLM，gateway 亦无须配 TG 代理，告警走 fa 自己的推送路径）。�
 | M3 | 价值层 + TG 数字报告 + 投注追踪 | Odds API、去水/EV/Kelly、`hermes send`、bet 台账 + **模拟盘自动落注** | 比赛日端到端连续跑通一周；CLV 可计算；paper 模式每日自动落注与结算 | 报告暂无 persona 段 |
 | M4 | Hermes persona 接入 | 5 personas、契约校验、降级、A/B 双轨 | mock + 实跑测试通过；A/B 数据落库 | |
 | M5 | 实盘小注 4–6 周 | 小注运行、每日结算、周度小结 | 入场前提：**模拟盘 CLV 达标** + **组合风控三参数生效**（§5.3——总敞口 30%/同场 2 注/回撤 20% 节流，paper 期仅观测）；以 **CLV 为主、ROI 为辅**决策加码 / 维持 / 停止 / 滚球与平台对接二期立项 | 模拟盘数据自 M3 起积累 |
+| M6 | C 线进化栈 | C 线进化栈：知识库文件 + 反思任务（hermes -z 纯函数）+ 生产第三轨对照 + 版本戳入账 + 快照冻结 + 人审关卡 + 判据预注册 | 脚手架 E2E 全闭环（反思→diff→人审→合并→新窗口判决带新版本戳、nokb 轨无 KB）；降级路径实测三例（反思超时/契约破损/关卡拒绝）；校准实跑（真 hermes 真台账，预期 no_change）；C 线判据文档预注册存档。真实 W1 首合并（~2026-10-15）为监控点不阻塞验收 | 依赖：M4 合并✓、M5 节流✓ |
 
 **一句重申：M2 是诚实的关卡——如果模型 log-loss 跑不赢收盘盘，后面的钱和精力都应该省下来。**
 
@@ -552,3 +558,21 @@ docs/superpowers/specs/2026-09-04-multi-agent-charter.md。分期：统计分歧
 docs/superpowers/specs/2026-09-04-retro-attribution-design.md 与
 2026-09-04-retro-ensemble-design.md。编号协调：C 线（M6 进化线）宪章
 原拟 §12.6，改为 §12.7（其宪章明文「不抢号、跟随」）。
+
+### 12.7 进化线（C 线，M6）
+
+新增第三条顶层线路 C 线（进化线）：以「反思 → 提案 → 关卡 → 合并」闭环演进
+B 线消费的版本化工件（persona 知识库 `personas/knowledge/*.md`；人格文件
+v1 不在反思契约内）。状态一律外置 git 版本化文件，agent 无记忆（hermes/dsh
+均纯函数调用）。进化事件离线独立调度（周检 tick，B 线 §12.3 前向窗口收口
+触发），只读 B 线台账、只写自有表与版本化工件，失败静默停摆（记
+`evolution_runs`）不影响 A/B 线。判决入账强制记 personas 树内容 hash
+（`recommendations.personas_hash`）；窗口冻结机械化为快照——B 线 prompt 只读
+`evolution/snapshots/w{idx}/`，合并最早于下一窗口生效，关卡逾期自然顺延。
+C 线对照采用生产第三轨 `model_persona_nokb`（人格无知识库、paper 独立
+bankroll、不进 TG 推送正文）；§12.3 判据口径不变。合并经人审关卡：暂存区
+提案 + merge/reject/shelve 全量记 Ruling（note 强制）；v1 不设统计合并门槛
+（样本量不可达，诚实注册），统计判据为 ≥2 窗口后后续注册项。进化只沉淀
+定性知识，不做统计调参——数字归模型与 Python 主控。设计文档：
+docs/superpowers/specs/2026-09-04-m6-evolution-line-design.md 与
+2026-09-04-m6-evolution-implementation-design.md。
