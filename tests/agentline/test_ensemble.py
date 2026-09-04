@@ -56,6 +56,40 @@ def test_kl_nearest_digest_tie_lowest_index():
     assert m["reasoning_digest"] == "near"
 
 
+def test_kl_partial_zero_mass_no_crash():
+    """部分零：p_draw 两席 0、第三席 0.1（中位=0）——不崩，被罚 inf 成员不入选。"""
+    m = aggregate_predictions([
+        _ok(0.9, 0.0, 0.1, digest="zero-a"),
+        _ok(0.9, 0.0, 0.1, digest="zero-b"),
+        _ok(0.85, 0.1, 0.05, digest="nonzero")])
+    assert m["status"] == "ok"
+    assert m["p_draw"] == pytest.approx(0.0)
+    assert m["reasoning_digest"] == "zero-a"       # inf 永不顶替有限 KL
+
+
+def test_k_positive_zero_median_sum_returns_error():
+    """三个 one-hot 成员：三中位全 0（聚合退化）→ error 契约行，绝不抛异常。"""
+    m = aggregate_predictions([
+        _ok(1.0, 0.0, 0.0, digest="h"),
+        _ok(0.0, 1.0, 0.0, digest="d"),
+        _ok(0.0, 0.0, 1.0, digest="a")])
+    assert m["status"] == "error"
+    assert m["p_home"] is None and m["p_draw"] is None and m["p_away"] is None
+    assert m["p_over25"] is None and m["confidence"] is None
+    assert "中位和为 0" in m["reasoning_digest"]
+    assert m["sources_json"] == "[]"
+
+
+def test_kl_inf_first_never_displaces_finite():
+    """KL=inf 成员排首位也不顶替有限 KL 成员（inf 与严格 < 平票规则自洽）。"""
+    m = aggregate_predictions([
+        _ok(0.85, 0.1, 0.05, digest="penalized-first"),
+        _ok(0.9, 0.0, 0.1, digest="finite-a"),
+        _ok(0.9, 0.0, 0.1, digest="finite-b")])
+    assert m["status"] == "ok"
+    assert m["reasoning_digest"] == "finite-a"
+
+
 def test_sources_union_dedup_by_url():
     m = aggregate_predictions([
         _ok(0.4, 0.3, 0.3, sources=[{"title": "a", "date": "d1",
