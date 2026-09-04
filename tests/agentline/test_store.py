@@ -2,7 +2,7 @@
 import pytest
 
 from fa.agentline.contract import parse_prediction
-from fa.agentline.store import save_prediction, save_run
+from fa.agentline.store import save_debate_round, save_prediction, save_run
 from fa.db import connect, init_db
 
 
@@ -46,6 +46,30 @@ def test_save_prediction_attributor_members_coexist(db):
     rows = db.execute("SELECT attributor, raw_output FROM agentline_predictions"
                       " ORDER BY attributor").fetchall()
     assert len(rows) == 4 and rows[1]["raw_output"] == "raw1b"
+
+
+def test_save_prediction_budget_exhausted_flag(db):
+    parsed = {"status": "ok", "p_home": 0.5, "p_draw": 0.3, "p_away": 0.2,
+              "p_over25": 0.5, "confidence": 0.6, "reasoning_digest": "d",
+              "sources_json": "[]", "repaired": False}
+    save_prediction(db, 1, "A_debate", parsed, "raw", "h", "m", 1.0,
+                    attributor=1, budget_exhausted=1)
+    row = db.execute("SELECT budget_exhausted FROM agentline_predictions"
+                     " WHERE line='A_debate'").fetchone()
+    assert row["budget_exhausted"] == 1
+
+
+def test_save_debate_round_upsert(db):
+    save_debate_round(db, 1, 0, "generator", '{"a":1}', "raw", "ok",
+                      0.5, "h", "m")
+    save_debate_round(db, 1, 0, "generator", '{"a":2}', "raw2", "ok",
+                      0.6, "h", "m")            # 重跑覆盖
+    rows = db.execute("SELECT payload_json, raw_output FROM"
+                      " agentline_debate_rounds").fetchall()
+    assert len(rows) == 1 and rows[0]["payload_json"] == '{"a":2}'
+    save_debate_round(db, 1, 1, "critic", "[]", "raw3", "ok", 0.1, "h", "m")
+    assert db.execute("SELECT COUNT(*) c FROM"
+                      " agentline_debate_rounds").fetchone()["c"] == 2
 
 
 def test_save_run_counts(db):
