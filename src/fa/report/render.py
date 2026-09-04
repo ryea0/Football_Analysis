@@ -14,6 +14,7 @@ CLV 预览方向与 spec §7.3 一致：odds_taken / 收盘价 − 1。pm 视角
 给负 CLV。
 """
 import json
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 from fa.db import get_meta
@@ -511,3 +512,23 @@ def render_settlement_brief(settle):
     clv = settle.get("clv_median")
     clv_s = (f"CLV 中位 {clv:+.2%}" if _is_num(clv) else "CLV 无收盘价基准")
     return f"结算简报：结算 {settled} 注，中 {won}，P&L {pnl:+.2f}，{clv_s}"
+
+
+def render_retro_brief(rows, batch):
+    """daily 简报的复盘归因段落（Stage 2，设计 §3「日报摘要段落」）。
+
+    rows 为空返回空串——调用方据此不附加（昨日无可归因场次不是事件）。
+    digest 截 40 字：段落是摘要不是全文，全文在 retro_attributions。
+    """
+    if not rows:
+        return ""
+    lines = [f"复盘归因（paper T+1，批 #{batch['batch_id']}）："
+             f"昨日推荐 {batch['n_selected']} 场，归因 ok {batch['n_ok']} 场"]
+    for r in rows:
+        digest = (r["digest"] or "")[:40]
+        lines.append(f"  {r['date']} {r['league']} {r['primary_tag']}"
+                     f"（conf {r['tags_confidence']:.2f}）：{digest}")
+    parts = [f"{t}×{n}" for t, n in sorted(
+        Counter(r["primary_tag"] for r in rows).items())]
+    lines.append("  标签分布：" + "，".join(parts))
+    return "\n".join(lines)

@@ -34,7 +34,7 @@ def env(tmp_path, monkeypatch):
     box = SimpleNamespace(
         conn=c, pushed=[], order=[],
         sync_report=SyncReport(files_ok=5, inserted=7),
-        sync_error=None, ok=True, error=None)
+        sync_error=None, ok=True, error=None, monkeypatch=monkeypatch)
 
     def fake_sync(conn, **kwargs):
         box.order.append("sync")
@@ -123,6 +123,7 @@ def test_settled_bets_push_brief_and_record_daily_run(env):
     """有完赛可结：sync → 结算 → 一行简报推送，runs 记 type='daily'。"""
     c = env.conn
     _seed_settleable(c)
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
 
@@ -148,6 +149,7 @@ def test_settled_bets_push_brief_and_record_daily_run(env):
 
 def test_no_settlement_stays_silent(env):
     """无可结注：静默（不推送、不造噪音），run 照常收尾。"""
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
     out = daily.run_daily(env.conn)
 
     assert out["status"] == "ok" and out["sent"] is None
@@ -162,6 +164,7 @@ def test_pending_but_unplayable_also_stays_silent(env):
     h, a = _seed_team(c, "Chelsea"), _seed_team(c, "Arsenal")
     _seed_pending_bet(c, _seed_fixture(c, h, a), _seed_run(c))
     c.commit()
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
     assert out["settled"] == 0 and env.pushed == []
@@ -174,6 +177,7 @@ def test_all_files_failed_is_degraded_but_settlement_still_runs(env):
     _seed_settleable(c)
     env.sync_report = SyncReport(
         files_ok=0, file_errors=[("E0", 2026, "HTTP 403"), ("SP1", 2026, "超时")])
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
 
@@ -193,6 +197,7 @@ def test_partial_sync_success_is_not_degraded(env):
     _seed_settleable(c)
     env.sync_report = SyncReport(files_ok=168, inserted=59000,
                                  file_errors=[("F1", 1997, "空文件")])
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
 
@@ -207,6 +212,7 @@ def test_sync_runs_before_settlement(env, monkeypatch):
         return {"settled": 0, "won": 0, "pnl": 0.0, "clv_median": None}
 
     monkeypatch.setattr(daily, "settle_paper_bets", stub_settle)
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
     out = daily.run_daily(env.conn)
     assert env.order == ["sync", "settle"]
     assert out["settled"] == 0
@@ -217,6 +223,7 @@ def test_sync_failure_degrades_but_settlement_proceeds(env):
     c = env.conn
     _seed_settleable(c)
     env.sync_error = RuntimeError("网络不可达")
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
 
@@ -234,6 +241,7 @@ def test_push_failure_is_recorded_but_does_not_break_daily(env):
     c = env.conn
     _seed_settleable(c)
     env.ok, env.error = False, "exit 1: send failed"
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
 
     out = daily.run_daily(c)
 
@@ -249,6 +257,7 @@ def test_daily_run_still_recorded_when_settlement_raises(env, monkeypatch):
         raise ValueError("台账炸了")
 
     monkeypatch.setattr(daily, "settle_paper_bets", boom)
+    monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
     with pytest.raises(ValueError):
         daily.run_daily(env.conn)
     row = env.conn.execute(
@@ -276,6 +285,7 @@ def test_cli_daily_reports_settlement(tmp_path, monkeypatch):
             daily, "sync_history",
             lambda conn, **kw: SyncReport(files_ok=5, inserted=7))
         monkeypatch.setattr(daily, "send", lambda text: True)
+        monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
         result = CliRunner().invoke(app, ["run", "daily"])
         assert result.exit_code == 0, result.output
         assert "结算 1 注" in result.output
@@ -295,6 +305,112 @@ def test_cli_daily_silent_when_nothing_settled(tmp_path, monkeypatch):
     monkeypatch.setattr(daily, "sync_history", lambda conn, **kw: SyncReport())
     monkeypatch.setattr(daily, "send",
                         lambda text: (_ for _ in ()).throw(AssertionError("不应推送")))
+    monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
     result = CliRunner().invoke(app, ["run", "daily"])
     assert result.exit_code == 0, result.output
     assert "结算 0 注" in result.output
+
+
+# ---- Stage 2：paper_t1 复盘挂载（设计 §10）----
+
+def _seed_yesterday_rec(conn):
+    """昨日推荐链（Task 1 同构）：自带 teams/runs 种子；**fixture 与
+    recommendation/matches 的 id 全用 lastrowid**——调用方可能先跑过
+    _seed_settleable（其 teams/matches/fixtures 各占 id 1），字面量 id 会
+    错位挂到他行。kickoff/比赛日/推荐时间线 = 2024-09-02。"""
+    conn.executemany(
+        "INSERT OR IGNORE INTO teams (league, name) VALUES (?, ?)",
+        [("E0", "Arsenal"), ("E0", "Chelsea")])
+    rid = conn.execute(
+        "INSERT INTO runs (type, phase, started_at, status)"
+        " VALUES ('matchday','am','2024-09-02T03:00:00Z','ok')").lastrowid
+    h, a = 1, 2                       # teams 前两行（OR IGNORE 幂等保持 1/2）
+    mid = conn.execute(
+        "INSERT INTO matches (league, season, date, home_team_id,"
+        " away_team_id, fthg, ftag, raw_line) VALUES"
+        " ('E0', 2024, '2024-09-02', ?, ?, 2, 0, '{}')", (h, a)).lastrowid
+    conn.execute(
+        "INSERT INTO backtest_predictions (league, season, week_index,"
+        " match_id, date, p_home, p_draw, p_away, mkt_home, mkt_draw,"
+        " mkt_away, outcome, total_goals) VALUES"
+        " ('E0', 2024, 1, ?, '2024-09-02', 0.45, 0.28, 0.27,"
+        " 0.52, 0.26, 0.22, 'H', 2)", (mid,))
+    fid = conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc,"
+        " home_team_id, away_team_id, status, created_at)"
+        " VALUES ('E0','ev-r1','oddsapi','2024-09-02T14:00:00Z',?,?,"
+        " 'finished','2024-09-02T08:00:00Z')", (h, a)).lastrowid
+    conn.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market,"
+        " phase, model_p, market_p, best_odds, bookmaker, edge, ev,"
+        " kelly_stake_frac, created_at)"
+        " VALUES (?,?, 'model_only','H','am',0.45,0.52,2.10,'Pinnacle',"
+        "0.063,0.132,0.05,'2024-09-02T03:05:00Z')", (rid, fid))
+    conn.commit()
+
+
+class TestDailyRetro:
+    def _fake_batch(self, conn, n_ok=1):
+        """替身批：返回合法摘要并落一条 ok 归因行（简报段落有内容可渲染）。"""
+        def fake(conn_, cands, selector, params, out_root, attributors=1):
+            rid = conn_.execute(
+                "INSERT INTO retro_runs (selector, params_json, n_selected,"
+                " n_ok, n_parse_fail, n_timeout, n_error, duration_s,"
+                " created_at) VALUES ('paper_t1','{}',?, ?,0,0,0,0.5,"
+                "'2026-09-04T06:31:00Z')",
+                (len(cands), n_ok)).lastrowid
+            conn_.execute(
+                "INSERT INTO retro_attributions (batch_id, match_id, league,"
+                " season, date, selector, attributor, miss_tags_json,"
+                " primary_tag, tags_confidence, model_vs_market,"
+                " evidence_json, digest, status, repaired, harness, model,"
+                " duration_s, input_pack_path, tag_set_version, created_at,"
+                " is_control) VALUES (?,?, 'E0',2024,'2024-09-02','paper_t1',"
+                "1,'[\"injury\"]','injury',0.7,'model_wrong','[]',"
+                "'伤停主力中卫。','ok',0,'hermes',NULL,11.8,'p.json','v1',"
+                "'2026-09-04T06:31:10Z',0)",
+                (rid, cands[0]["match_id"]))
+            conn_.commit()
+            return {"batch_id": rid, "n_selected": len(cands), "n_ok": n_ok,
+                    "n_parse_fail": 0, "n_timeout": 0, "n_error": 0,
+                    "duration_s": 0.5}
+        return fake
+
+    def test_retro_runs_after_settle_and_appends_brief(self, env):
+        # 前提：推送只在 settled>0 时发生（daily 静默规则）——先落一支可结注
+        # （既有 _seed_settleable：kickoff 2026-09-02 的 fixture + pending bet
+        # + 完赛 match），再叠昨日推荐链。_yesterday 被 patch 成 '2024-09-02'，
+        # 与 settleable 的 2026-09-02 fixture 不撞——select_paper_t1 只选
+        # 2024-09-02 那条。
+        _seed_settleable(env.conn)
+        _seed_yesterday_rec(env.conn)
+        calls = []
+        real = self._fake_batch(env.conn)
+        def spy(conn_, cands, selector, params, out_root, attributors=1):
+            env.order.append("retro")          # 记录时点，钉「结算在前」顺序
+            calls.append((selector, params["date"], len(cands)))
+            return real(conn_, cands, selector, params, out_root, attributors)
+        env.monkeypatch.setattr(daily, "_yesterday", lambda: "2024-09-02")
+        env.monkeypatch.setattr(daily, "run_retro_batch", spy)
+        out = daily.run_daily(env.conn)
+        assert calls == [("paper_t1", "2024-09-02", 1)]
+        assert out["retro"]["n_ok"] == 1 and out["retro_error"] is None
+        assert "复盘归因" in env.pushed[0] and "injury" in env.pushed[0]
+        assert env.order.index("settle") < env.order.index("retro")
+
+    def test_no_yesterday_recs_skips_retro(self, env):
+        def boom(*a, **k):
+            raise AssertionError("无昨日推荐不得跑批")
+        env.monkeypatch.setattr(daily, "_yesterday", lambda: "2024-09-02")
+        env.monkeypatch.setattr(daily, "run_retro_batch", boom)
+        out = daily.run_daily(env.conn)
+        assert out["retro"] is None and out["retro_error"] is None
+
+    def test_retro_batch_error_degrades_not_fatal(self, env):
+        _seed_yesterday_rec(env.conn)
+        def boom(*a, **k):
+            raise RuntimeError("hermes down")
+        env.monkeypatch.setattr(daily, "_yesterday", lambda: "2024-09-02")
+        env.monkeypatch.setattr(daily, "run_retro_batch", boom)
+        out = daily.run_daily(env.conn)          # 不抛 = 降级成功
+        assert "hermes down" in out["retro_error"] and out["retro"] is None

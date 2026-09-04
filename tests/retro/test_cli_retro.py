@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from fa.cli import app
 from fa.db import connect, init_db
+from fa.retro.analyze import _mwu, stratified_analysis
 
 runner = CliRunner()
 
@@ -57,6 +58,65 @@ def test_run_manual_batch(db, tmp_path, monkeypatch):
     assert conn.execute(
         "SELECT COUNT(*) c FROM retro_attributions").fetchone()["c"] == 1
     conn.close()
+
+
+def test_run_paper_t1_batch(db, tmp_path, monkeypatch):
+    """paper_t1 全链路（Stage 2）：昨日推荐链（test_select._seed_t1，比赛日
+    2024-04-20）→ 选场 → fake headless → 落库。台账 selector='paper_t1' 且
+    params_json 含选场计数 n_fixtures；归因行 selector 同步落 paper_t1。"""
+    from fa.retro import pipeline
+    from tests.retro.test_select import _seed_t1
+    conn = connect(db)
+    _seed_t1(conn)                      # db fixture 已跑 _seed（teams/三场预测）
+    conn.close()
+
+    def fake_headless(prompt):
+        return {"ok": True, "output": json.dumps({
+            "miss_tags": ["injury"], "primary_tag": "injury",
+            "tags_confidence": 0.8, "model_vs_market": "model_wrong",
+            "evidence": [{"title": "赛前伤停名单", "date": "2024-04-19",
+                          "url": "https://e.com/1"}],
+            "digest": "伤停致模型高估主胜。"}, ensure_ascii=False),
+            "error": None, "duration_s": 0.4}
+
+    monkeypatch.setattr(pipeline, "run_headless", fake_headless)
+    r = runner.invoke(
+        app, ["retro", "run", "--selector", "paper_t1",
+              "--date", "2024-04-20", "--out-root", str(tmp_path / "p")])
+    assert r.exit_code == 0, r.output
+    assert "批 #" in r.output and "paper_t1" in r.output
+    conn = connect(db)
+    try:
+        run = conn.execute(
+            "SELECT selector, params_json, n_selected, n_ok"
+            " FROM retro_runs").fetchone()
+        assert run["selector"] == "paper_t1"
+        params = json.loads(run["params_json"])
+        assert params["date"] == "2024-04-20" and params["n_fixtures"] == 1
+        assert run["n_selected"] == 1 and run["n_ok"] == 1
+        attr = conn.execute(
+            "SELECT selector, match_id, status FROM retro_attributions"
+        ).fetchone()
+        assert attr["selector"] == "paper_t1" and attr["status"] == "ok"
+        assert attr["match_id"] == 1
+    finally:
+        conn.close()
+
+
+def test_run_paper_t1_empty_hint_reports_select_counts(db, monkeypatch):
+    """空场提示对 paper_t1 不得指向「先跑 fa backtest run」（误导）——
+    分支化为该日推荐链诊断，并把选场计数带给读者。"""
+    from fa.retro import pipeline
+
+    def must_not_call(prompt):
+        raise AssertionError("空场不得触达 run_headless")
+
+    monkeypatch.setattr(pipeline, "run_headless", must_not_call)
+    r = runner.invoke(app, ["retro", "run", "--selector", "paper_t1",
+                            "--date", "2024-04-19"])
+    assert r.exit_code == 1
+    assert "无推荐" in r.output and "n_fixtures" in r.output
+    assert "backtest run" not in r.output
 
 
 def test_run_manual_requires_a_filter(db, tmp_path, monkeypatch):
@@ -331,3 +391,148 @@ def test_consistency_discloses_k1_matches(db, tmp_path, monkeypatch):
     c = runner.invoke(app, ["retro", "consistency"])
     assert c.exit_code == 0, c.output
     assert "⚠ 含 k=1 场 1" in c.output
+
+
+# ---- 关卡 3：分层检验（设计 §8-3）----
+
+# 赛前成因标签行的合规证据（date 早于比赛日 2024-04-20）——本文件既有
+# `_seed`（tests.retro.test_select）三场 div = +0.1446/−0.2049/−0.0741，
+# 已由 db fixture 落库，此处只补归因行
+_EV_PRE = json.dumps([{"title": "赛前伤停名单", "date": "2024-04-19",
+                       "url": "https://e.com/pre"}])
+
+
+class TestAnalyze:
+    def _seed_attrib(self, conn, match_id, tags, evidence="[]",
+                     date_="2024-04-20", is_control=0, batch_id=1):
+        # batch_id 外键→retro_runs（connect 开 PRAGMA foreign_keys=ON），先补父行
+        conn.execute(
+            "INSERT OR IGNORE INTO retro_runs (id, selector, params_json,"
+            " n_selected, n_ok, n_parse_fail, n_timeout, n_error, duration_s,"
+            " created_at) VALUES (1, 'manual', '{}', 0, 0, 0, 0, 0, 0.0,"
+            " 'now')")
+        conn.execute(
+            "INSERT INTO retro_attributions (batch_id, match_id, league,"
+            " season, date, selector, attributor, miss_tags_json,"
+            " primary_tag, tags_confidence, model_vs_market,"
+            " evidence_json, digest, status, repaired, harness, model,"
+            " duration_s, input_pack_path, tag_set_version, created_at,"
+            " is_control) VALUES (?,?, 'E0',2024,?, 'manual',1,?,"
+            " ?,0.7,'model_wrong',?,'d','ok',0,'hermes',NULL,1.0,'p',"
+            " 'v1','2026-09-04T00:00:00Z',?)",
+            (batch_id, match_id, date_, json.dumps(tags), tags[0],
+             evidence, is_control))
+        conn.commit()
+
+    def test_stratified_point_estimates_handchecked(self, db):
+        """手算口径：_seed 三场 div = +0.1446 / −0.2049 / −0.0741。
+        归因行：match1 标 injury（div 0.1446），match2/3 无 injury 标签
+        （div −0.2049/−0.0741）→ injury 层均值 0.1446，对照层均值
+        (−0.2049 + −0.0741)/2 = −0.1395。"""
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE)
+        self._seed_attrib(conn, 2, ["variance"])
+        self._seed_attrib(conn, 3, ["variance"])
+        try:
+            res = stratified_analysis(conn)
+        finally:
+            conn.close()
+        t = res["per_tag"]["injury"]
+        assert t["n"] == 1 and t["mean_div"] == pytest.approx(0.1446, abs=1e-4)
+        assert t["mean_div_rest"] == pytest.approx(-0.1395, abs=1e-4)
+        v = res["per_tag"]["variance"]
+        assert v["n"] == 2 and v["n_rest"] == 1
+        assert res["n_excluded"] == 0
+
+    def test_violating_rows_excluded_by_default(self, db):
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"],
+                          evidence=json.dumps(
+                              [{"title": "t", "date": "2024-04-21",
+                                "url": "u"}]))          # 不早于比赛日 → 违规
+        self._seed_attrib(conn, 2, ["variance"])
+        try:
+            res = stratified_analysis(conn)              # 默认剔除
+            assert res["n_excluded"] == 1
+            assert res["per_tag"]["injury"]["n"] == 0
+            res2 = stratified_analysis(conn, include_violations=True)
+        finally:
+            conn.close()
+        assert res2["n_excluded"] == 0
+        assert res2["per_tag"]["injury"]["n"] == 1
+
+    def test_case_control_counts_split(self, db):
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], is_control=0, evidence=_EV_PRE)
+        self._seed_attrib(conn, 2, ["injury"], is_control=1, evidence=_EV_PRE)
+        try:
+            t = stratified_analysis(conn)["per_tag"]["injury"]
+        finally:
+            conn.close()
+        assert (t["n"], t["n_case"], t["n_control"]) == (2, 1, 1)
+
+    def test_mwu_small_layer_gives_none_or_pvalue(self, db):
+        """n<2 的层无法检验——p_value=None，不抛错（小样本如实降格）。"""
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE)
+        try:
+            res = stratified_analysis(conn)
+        finally:
+            conn.close()
+        assert res["per_tag"]["injury"]["p_value"] is None
+
+    def test_cli_analyze_outputs_tag_lines(self, db):
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE)
+        conn.close()
+        result = runner.invoke(app, ["retro", "analyze"])
+        assert result.exit_code == 0
+        assert "injury" in result.output and "分层" in result.output
+
+    def test_null_tags_row_skipped_not_fatal(self, db):
+        """status='ok' 但 miss_tags_json 为 NULL：与 audit_batch 同一过滤
+        （IS NOT NULL）——无标签集无从分层，不入 n_rows，命令不崩。"""
+        conn = connect(db)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE)
+        self._seed_attrib(conn, 2, ["variance"])
+        conn.execute(
+            "UPDATE retro_attributions SET miss_tags_json=NULL"
+            " WHERE match_id=2")
+        conn.commit()
+        try:
+            res = stratified_analysis(conn)
+        finally:
+            conn.close()
+        assert res["n_rows"] == 1                       # NULL tags 行不入分层
+        result = runner.invoke(app, ["retro", "analyze"])
+        assert result.exit_code == 0
+        assert "injury" in result.output and "variance" not in result.output
+
+    def test_mwu_all_ties_returns_none_not_nan(self, db):
+        """全平手（两组值全同）且两侧 n≥8（asymptotic）→ 双侧 p=nan，
+        如实记 None——不让 nan 漏进渲染成 p=nan。"""
+        assert _mwu([1.0] * 8, [1.0] * 8) is None
+
+    def test_full_db_cross_batch_duplicate_disclosed(self, db):
+        """全库模式（不给 --batch-id）代表行按 (batch_id, match_id) 取——
+        同一场跨两个批各一行 → n_rows=2、n_duplicate_matches=1（诚实披露，
+        不去重：MWU 单元独立性被污染须可见）；限批读数应为 0。"""
+        conn = connect(db)
+        # batch_id 外键→retro_runs（connect 开 PRAGMA foreign_keys=ON），补父行 id=2
+        conn.execute(
+            "INSERT INTO retro_runs (id, selector, params_json, n_selected,"
+            " n_ok, n_parse_fail, n_timeout, n_error, duration_s, created_at)"
+            " VALUES (2, 'manual', '{}', 0, 0, 0, 0, 0, 0.0, 'now')")
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE, batch_id=1)
+        self._seed_attrib(conn, 1, ["injury"], evidence=_EV_PRE, batch_id=2)
+        try:
+            res = stratified_analysis(conn)
+            one = stratified_analysis(conn, batch_id=1)
+        finally:
+            conn.close()
+        assert res["n_rows"] == 2
+        assert res["n_duplicate_matches"] == 1
+        assert one["n_rows"] == 1 and one["n_duplicate_matches"] == 0
+        result = runner.invoke(app, ["retro", "analyze"])
+        assert result.exit_code == 0, result.output
+        assert "重复场次 1" in result.output

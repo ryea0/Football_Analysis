@@ -656,12 +656,14 @@ def retro_report(
 @retro_app.command("run")
 def retro_run(
     selector: str = typer.Option("divergence", "--selector",
-                                 help="divergence|manual（paper_t1/agentline_aligned 属 S2/S3）"),
+                                 help="divergence|manual|paper_t1（agentline_aligned 属 S3）"),
     matches: str = typer.Option("", "--matches", help="manual：逗号分隔 match_id"),
     league: str = typer.Option("", "--league"),
     season: int = typer.Option(None, "--season"),
     date_from: str = typer.Option("", "--from"),
     date_to: str = typer.Option("", "--to"),
+    tdate: str = typer.Option("", "--date",
+                              help="paper_t1：比赛日 YYYY-MM-DD，空=昨天"),
     top: int = typer.Option(20, "--top"),
     control: int = typer.Option(10, "--control", help="对照场数（divergence 用）"),
     seed: int = typer.Option(42, "--seed"),
@@ -676,9 +678,11 @@ def retro_run(
 
     from fa.config import project_root
     from fa.retro.pipeline import run_retro_batch
-    from fa.retro.select import select_divergence, select_manual
+    from fa.retro.select import (select_divergence, select_manual,
+                                 select_paper_t1)
     conn = connect()
     try:
+        t1_counts: dict | None = None    # paper_t1 选场计数（空场提示带给读者）
         if selector == "divergence":
             cands = select_divergence(
                 conn, date_from=date_from or None, date_to=date_to or None,
@@ -696,9 +700,15 @@ def retro_run(
                                   league=league or None, season=season)
             params = {"matches": matches, "league": league, "season": season,
                       "attributors": attributors}
+        elif selector == "paper_t1":
+            from datetime import date as _d, timedelta as _td
+            day = tdate or (_d.today() - _td(days=1)).isoformat()
+            cands, t1meta = select_paper_t1(conn, day)
+            params = {"date": day, **t1meta, "attributors": attributors}
+            t1_counts = t1meta
         else:
-            typer.echo(f"--selector 须为 divergence|manual（S2/S3 再扩），"
-                       f"收到 {selector!r}")
+            typer.echo(f"--selector 须为 divergence|manual|paper_t1"
+                       f"（agentline_aligned 属 S3），收到 {selector!r}")
             raise typer.Exit(code=1)
         if attributors < 1:
             typer.echo(f"--attributors 须 ≥1，收到 {attributors}")
@@ -706,7 +716,16 @@ def retro_run(
         if limit is not None:
             cands = cands[:limit]
         if not cands:
-            typer.echo("选场为空——检查过滤条件（或先跑 fa backtest run）")
+            if selector == "paper_t1":
+                # 空场对 paper_t1 常态（非比赛日/推荐链断链），与「忘了先跑
+                # backtest」不同源——提示指向当日推荐链诊断并附选场计数
+                typer.echo(
+                    f"选场为空——昨日（或 --date）无推荐场次/未配对完赛/"
+                    f"缺预测行（n_fixtures={t1_counts['n_fixtures']}"
+                    f" n_unpaired={t1_counts['n_unpaired']}"
+                    f" n_no_prediction={t1_counts['n_no_prediction']}）")
+            else:
+                typer.echo("选场为空——检查过滤条件（或先跑 fa backtest run）")
             raise typer.Exit(code=1)
         root = Path(out_root) if out_root else project_root() / "data" / "retro" / "inputs"
         out = run_retro_batch(conn, cands, selector, params, root,
@@ -775,6 +794,25 @@ def retro_consistency(
                    "——读全同率前先看批 params 的 attributors）")
     typer.echo("解读规则：全同率 <50% → 归因线维持「假设生成器」降格"
                "（spec §5 预写）")
+
+
+@retro_app.command("analyze")
+def retro_analyze(
+    batch_id: int = typer.Option(None, "--batch-id",
+                                 help="限定批；空=全库"),
+    include_violations: bool = typer.Option(
+        False, "--include-violations",
+        help="含 audit 违规行（默认剔除——§15 裁定前不作分层依据）"),
+) -> None:
+    """关卡 3：按 miss_tags 分层的预测效度检验（点估计+Mann-Whitney U）"""
+    from fa.retro.analyze import render_analysis_report, stratified_analysis
+    conn = connect()
+    try:
+        res = stratified_analysis(conn, batch_id=batch_id,
+                                  include_violations=include_violations)
+    finally:
+        conn.close()
+    typer.echo(render_analysis_report(res))
 
 # ---- B 线 run 命令（T9/T10）----
 
@@ -866,6 +904,11 @@ def run_daily_cmd() -> None:
              f"{out['clv_median']:+.2%}" if out["clv_median"] is not None
              else "，CLV 无收盘价基准")
     typer.echo(line)
+    if out["retro"] is not None:
+        typer.echo(f"  复盘归因：批 #{out['retro']['batch_id']}，"
+                   f"ok {out['retro']['n_ok']}/{out['retro']['n_selected']}")
+    elif out["retro_error"]:
+        typer.echo(f"  复盘归因：降级（{out['retro_error']}）")
     if out["sent"] is None:
         typer.echo("  推送：静默（无可结注）")
     elif out["sent"]:

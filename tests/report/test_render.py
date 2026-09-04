@@ -19,6 +19,7 @@ from fa.report.render import (
     _kickoff_cn,
     render_matchday_report,
     render_pm_update,
+    render_retro_brief,
     render_settlement_brief,
 )
 
@@ -826,3 +827,31 @@ def test_am_report_ignores_non_persona_verdict_and_bad_json_factors(conn):
     out = render_matchday_report(conn, rid, "am", SUMMARY, 450, False)
     assert "persona 2 场：✅2 ⚠️0 ⛔0 · 未生效 0" in out
     assert "not-json" not in out                          # 脏 factors 不透出
+
+
+# ------------------------------------- 日报复盘归因段落（retro Stage 2）
+
+
+class TestRenderRetroBrief:
+    def _row(self, **kw):
+        base = {"date": "2026-09-03", "league": "E0", "digest": "伤停两名主力，市场已消化。",
+                "primary_tag": "injury", "tags_confidence": 0.7}
+        base.update(kw)
+        return base
+
+    def test_renders_batch_line_and_per_match(self):
+        out = render_retro_brief(
+            [self._row()], {"batch_id": 9, "n_selected": 2, "n_ok": 1})
+        assert "复盘归因" in out and "批 #9" in out
+        assert "2026-09-03 E0" in out and "injury" in out and "0.70" in out
+        assert "伤停两名主力" in out            # digest 摘录
+
+    def test_long_digest_truncated(self):
+        out = render_retro_brief(
+            [self._row(digest="长" * 200)],
+            {"batch_id": 9, "n_selected": 1, "n_ok": 1})
+        assert "长" * 40 in out and "长" * 41 not in out   # 截到 40 字
+
+    def test_empty_rows_returns_empty_string(self):
+        assert render_retro_brief(
+            [], {"batch_id": 9, "n_selected": 0, "n_ok": 0}) == ""
