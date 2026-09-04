@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -233,13 +233,18 @@ CREATE TABLE IF NOT EXISTS evolution_rulings (
 # v7（A_multi 计划 T1）：line 词表加 'A_multi'、加 attributor 列、UNIQUE 扩成
 # 三元组——同一场同一 line 的 N 个成员行（1..N）与聚合行（0）共存；CHECK 无法
 # 后补，存量库走 _migrate_up 的重建路径（rename-copy-drop，数据保全）。
+# v9（A_debate 计划 T1）：line 词表再加 'A_debate' / 'A_division'（二三形态
+# 一次到位免 v10 再重建）、加 budget_exhausted 列（A_debate 轮中断审计位）；
+# CHECK 又变，存量库二次重建（影子表名换 _v8，_migrate_up v9 块）。
 _AL_TABLE = """
 CREATE TABLE IF NOT EXISTS agentline_predictions (
     id                INTEGER PRIMARY KEY,
     match_id          INTEGER NOT NULL REFERENCES matches(id),
     line              TEXT NOT NULL
-        CHECK (line IN ('A_base', 'A_enh', 'A_multi')),
+        CHECK (line IN ('A_base', 'A_enh', 'A_multi', 'A_debate', 'A_division')),
     attributor        INTEGER NOT NULL DEFAULT 1,  -- 成员 1..N；聚合行 0（A_multi）
+    budget_exhausted  INTEGER NOT NULL DEFAULT 0,
+        -- A_debate 轮中断记 1（v9，2026-09-05 设计 §2.4）；其余线恒 0
     p_home REAL, p_draw REAL, p_away REAL, p_over25 REAL,   -- parse_fail 时 NULL
     confidence        REAL,
     reasoning_digest  TEXT,
@@ -266,6 +271,24 @@ CREATE TABLE IF NOT EXISTS agentline_runs (
     started_at  TEXT NOT NULL,
     finished_at TEXT,
     summary     TEXT                          -- JSON（样本筛选条件等）
+);
+"""
+
+# A_debate 辩论逐轮审计表（v9，2026-09-05 设计 §2.4 DDL 原文）：轮数本身是难
+# 归因变量，逐轮全留档（初版 + 修订版各一行）——聚合判据之外可回放整条链。
+# UNIQUE(match_id, round, role) = 幂等重跑锚（同 v7 口径）；终版才入
+# agentline_predictions（line='A_debate'、attributor=1，链整体为一个归因单元）。
+_AL_DEBATE_TABLE = """
+CREATE TABLE IF NOT EXISTS agentline_debate_rounds (
+    id           INTEGER PRIMARY KEY,
+    match_id     INTEGER NOT NULL REFERENCES matches(id),
+    round        INTEGER NOT NULL,            -- 0=初版；1..2=修订版
+    role         TEXT NOT NULL CHECK (role IN ('generator','critic')),
+    payload_json TEXT NOT NULL,               -- 契约字段或攻击字段的规范化 JSON
+    raw_output   TEXT NOT NULL,               -- agent 原始返回全文（审计/重放）
+    status       TEXT NOT NULL CHECK (status IN ('ok','parse_fail','timeout','error')),
+    duration_s   REAL, harness TEXT, model TEXT, created_at TEXT NOT NULL,
+    UNIQUE (match_id, round, role)
 );
 """
 
@@ -317,7 +340,8 @@ CREATE TABLE IF NOT EXISTS matches (
 CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-""" + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE + _AL_TABLE + _EVOLUTION_TABLE
+""" + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE + _AL_TABLE + _AL_DEBATE_TABLE \
+    + _EVOLUTION_TABLE
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -369,7 +393,11 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     影子表 agentline_predictions_v6 时，重试弃掉半建活动表、从影子重放恢复
     （影子恢复优先于幂等跳过）；
     v7->v8 重建 recommendations——strategy 扩三轨枚举、加 personas_hash 列（M6）；
-    evolution 三表就位；init_db 在 v8 升级前自动备份 fa.db.bak-v8。"""
+    evolution 三表就位；init_db 在 v8 升级前自动备份 fa.db.bak-v8；
+    v8->v9 二次重建 agentline_predictions——line 词表加 'A_debate'/'A_division'、
+    加 budget_exhausted 列（存量行回填 0）；新表 agentline_debate_rounds 就位
+    （A_debate 计划 T1，2026-09-05 设计 §2.4/§5）——同 v7 型 rename-copy-drop，
+    影子表名换 _v8，影子恢复仍优先于幂等跳过。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -506,6 +534,43 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
                 " report_md, created_at FROM recommendations_v7;")
             conn.execute("DROP TABLE recommendations_v7;")
         conn.executescript(_EVOLUTION_TABLE)
+    if from_v < 9:
+        # v9：五词表 + budget_exhausted + 新表 debate_rounds（2026-09-05 设计
+        # §2.4/§5）。CHECK 又变了，唯一路径仍是重建（v7 同型）；影子表名换
+        # _v8。影子恢复优先于幂等跳过。
+        conn.executescript(_AL_DEBATE_TABLE)
+        has_shadow = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table'"
+            " AND name='agentline_predictions_v8'").fetchone() is not None
+        acols = {r["name"] for r in conn.execute(
+            "PRAGMA table_info(agentline_predictions)")}
+        if has_shadow or (acols and "budget_exhausted" not in acols):
+            # 前置：idx_alp_line 占名（v7 块同款）——rename 路径里它随旧表改名
+            # 后继续占住该名，建新表前摘掉（autoindex 随表走，无需处理）
+            conn.execute("DROP INDEX IF EXISTS idx_alp_line")
+            if has_shadow:
+                # 影子是唯一数据源（v7 块同款）：窗 A 空壳 / 窗 B 半建活动表
+                # 一律弃掉重放，不做任何幂等短路
+                conn.execute("DROP TABLE IF EXISTS agentline_predictions")
+            else:
+                conn.executescript(
+                    "ALTER TABLE agentline_predictions RENAME TO"
+                    " agentline_predictions_v8;")
+            conn.executescript(_AL_TABLE)       # 新形状（五词 + budget_exhausted）
+            conn.execute(
+                "INSERT INTO agentline_predictions (match_id, line, attributor,"
+                " budget_exhausted, p_home, p_draw, p_away, p_over25,"
+                " confidence, reasoning_digest, sources_json, raw_output,"
+                " status, repaired, harness, model, duration_s, created_at)"
+                " SELECT match_id, line, attributor, 0, p_home, p_draw,"
+                " p_away, p_over25, confidence, reasoning_digest,"
+                " sources_json, raw_output, status, repaired, harness,"
+                " model, duration_s, created_at"
+                " FROM agentline_predictions_v8;")
+            # INSERT..SELECT 在外键开启下逐行校验 match_id→matches（v7 先例）：
+            # 真库存量全经 save_prediction（FK ON）写入、必然有效；真有脏行就
+            # 在这里 fail-fast——影子表原样保留，重试复现同一错误，不丢数据。
+            conn.execute("DROP TABLE agentline_predictions_v8;")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
