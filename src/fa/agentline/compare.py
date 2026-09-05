@@ -1,5 +1,5 @@
-"""六对照评测（设计 §8 + 2026-09-05 设计 §2.5）：线 P / A_base / A_enh /
-A_multi / A_debate / 市场收盘，同批同判据。
+"""七对照评测（设计 §8 + 2026-09-05 设计 §2.5/§3.4）：线 P / A_base /
+A_enh / A_multi / A_debate / A_division / 市场收盘，同批同判据。
 
 行适配原则：agentline 的 p_* 覆盖 bp 行拷贝，mkt_*（Pinnacle 收盘去水）、
 odds_*、outcome、total_goals 原样保留——evaluate 与 candidates 的入参
@@ -63,7 +63,7 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
            "market": {"ll": e_p["market_ll"]}}
     roi_rows = {"P": bp}
     for line, attr in (("A_base", 1), ("A_enh", 1), ("A_multi", 0),
-                       ("A_debate", 1)):
+                       ("A_debate", 1), ("A_division", 1)):
         ag = _fetch_agent(conn, line, leagues, seasons, attributor=attr)
         rows = merge_rows(bp, ag)
         # evaluate 自带该子集的 market_ll——报告按行展示，分母不再混用全量值
@@ -86,6 +86,7 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
     cmp["audit"]["multi_member_ok"] = sum(
         1 for r in multi if r["status"] == "ok")
     cmp["debate"] = debate_gain(conn, leagues, seasons)
+    cmp["division"] = division_stratified(conn, leagues, seasons)
     return cmp
 
 
@@ -144,6 +145,47 @@ def debate_gain(conn, leagues=None, seasons=None) -> dict:
             "rho": rho, "n_rho": len(sevs)}
 
 
+def division_stratified(conn, leagues=None, seasons=None) -> dict:
+    """质询标签分层检验（2026-09-05 设计 §3.4，retro 关卡3 口径）。
+
+    分层键 = 五标签任一命中；jumpN_fail 是管线降级信号、不进分层键（判决
+    只落 flag 不改数——管线失败≠质询有话可说，混进「有标签」层会把降级
+    场误算成质询起效）。各层 per-match log-loss（metrics.log_loss 单场
+    调用——公式单一事实源，不在本文件重写）；两层各 n≥5 才跑 MWU 双侧。
+    非 ok 终版行默认剔除（audit 口径：分层只在可评行上做）。
+    两种「p 缺席」分开记，渲染各自诚实占位：任一层 n<5 → 不出 mwu_p 键
+    （小样本不出 p）；两组 log-loss 全平手（层内零方差）→ MWU 未定义返回
+    nan，仿 retro._mwu / debate_gain.rho 口径如实记 None，不让 nan 穿透到
+    报告渲染成 p=nan。
+    """
+    from fa.backtest.metrics import fetch_predictions, log_loss
+    from fa.agentline.division import derive_flags
+    bp = fetch_predictions(conn, leagues, seasons)
+    rows = merge_rows(bp, _fetch_agent(conn, "A_division", leagues, seasons,
+                                       attributor=1))
+    flagged, unflagged = [], []
+    for r in rows:
+        jumps = [{"jump": j["jump"], "status": j["status"],
+                  "payload": j["payload_json"]} for j in conn.execute(
+            "SELECT jump, status, payload_json FROM agentline_division_jumps"
+            " WHERE match_id=?", (r["match_id"],))]
+        fl = {k for k in derive_flags(jumps) if not k.startswith("jump")}
+        ll = log_loss([(r["p_home"], r["p_draw"], r["p_away"])],
+                      [r["outcome"]])
+        (flagged if fl else unflagged).append(ll)
+    out = {"n_flagged": len(flagged), "n_unflagged": len(unflagged)}
+    if flagged:
+        out["ll_flagged"] = sum(flagged) / len(flagged)
+    if unflagged:
+        out["ll_unflagged"] = sum(unflagged) / len(unflagged)
+    if len(flagged) >= 5 and len(unflagged) >= 5:
+        from scipy.stats import mannwhitneyu
+        p_raw = float(mannwhitneyu(flagged, unflagged,
+                                   alternative="two-sided").pvalue)
+        out["mwu_p"] = None if math.isnan(p_raw) else p_raw
+    return out
+
+
 _FOOTNOTE = ("> 各行比值在其自身 n 场子集内计算，跨线直比无效；"
              "n<100 的行为链路验证样本，数字无统计意义")
 
@@ -155,7 +197,7 @@ def render_report(cmp: dict, out_path: Path) -> None:
              f"样本 n={cmp['n']}（线 P 与线 A 交集见各线 n）", "",
              "| 线 | n | log-loss | Brier | 子集市场 ll | vs 子集市场 |",
              "|---|---|---|---|---|---|"]
-    for k in ("P", "A_base", "A_enh", "A_multi", "A_debate"):
+    for k in ("P", "A_base", "A_enh", "A_multi", "A_debate", "A_division"):
         e = cmp.get(k)
         if e is None:
             continue          # 旧形态 dict 无该线：宁缺一行，不虚报 n=0
@@ -200,6 +242,25 @@ def render_report(cmp: dict, out_path: Path) -> None:
                       f"终版 ll={d['final_ll']:.4f}（n={d['n']}）；"
                       f"攻击-修订相关性 ρ={rho_s}（n={d.get('n_rho', 0)}，"
                       f"高攻击低修订=固执 / 低攻击高修订=无主见，均为实测信号）"]
+    # 质询分层段（A_division 计划 T8，2026-09-05 设计 §3.4）：有标签层 vs
+    # 无标签层的 log-loss 对照必须可见，且允许结论为「质询无信息量」——
+    # 不做单边解读。p 的三种占位各自诚实：有值报值、任一层 n<5 不报
+    # （小样本）、两组 ll 全平手不报（向量退化）——后两者措辞分开，
+    # 「算不出」不得被误读成「样本不够」；单侧层缺 ll 以「—」占位不虚报。
+    dv = cmp.get("division", {})
+    if dv.get("n_flagged") or dv.get("n_unflagged"):
+        if dv.get("mwu_p") is not None:
+            p_s = f"{dv['mwu_p']:.3f}"
+        elif "mwu_p" in dv:
+            p_s = "MWU 未定义（两组 log-loss 全平手）"
+        else:
+            p_s = "n<5/层不报（小样本诚实）"
+        ll_f = f"{dv['ll_flagged']:.4f}" if "ll_flagged" in dv else "—"
+        ll_u = f"{dv['ll_unflagged']:.4f}" if "ll_unflagged" in dv else "—"
+        lines += ["", f"> A_division 质询分层：有标签 n={dv['n_flagged']}"
+                      f"（ll={ll_f}）vs 无标签 n={dv['n_unflagged']}"
+                      f"（ll={ll_u}）；MWU 双侧 p={p_s}——"
+                      f"允许结论为「质询无信息量」"]
     lines += ["", _FOOTNOTE, ""]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")
