@@ -368,7 +368,9 @@ def test_migrate_up_v2_adds_bline_retro_and_persona(tmp_path):
     (3, ()),                                         # v3 就地升级（M3 真库路径）
     (8, ()),                                         # v8 就地升级（v9 影子重建护栏跳过路径）
     (9, ("agentline_division_jumps",)),              # v9 跨级升级（v10 纯加法补表——
-                                                     # drop 掉新表逼迁移腿真跑，非空转）
+                                                     # drop 掉新表逼出 v9 形状（缺新表）的场景拟真
+                                                     # + 末态断言：_SCHEMA 引导先于 v10 腿，
+                                                     # 真建表覆盖在 v1 legacy 直调路径）
 ], ids=["from_v1", "from_v3", "from_v8", "from_v9"])
 def test_migrate_and_fresh_schemas_match(tmp_path, from_v, drop):
     """新建与迁移两条路径产出的表形状必须一致（M2 教训的推广）。
