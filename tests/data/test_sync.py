@@ -135,6 +135,22 @@ def test_sync_report_dataclass_shape():
             "missing", "file_errors", "rows_no_date"} <= names
 
 
+def test_shrink_guard_lands_in_file_errors_not_crash(conn, monkeypatch, tmp_path):
+    """收缩保护经 sync 记 file_errors（run#9 实况防线）：不抛、分区原样。"""
+    csv_two = (CSV_A.splitlines()[0] + "\n" + CSV_A.splitlines()[1] + "\n"
+               + "E0,22/08/1995,Liverpool,Everton,2,0,H\n")          # 2 行
+    big = _cached(tmp_path, "E0", 1995, csv_two.encode("utf-8"))
+    _serve(monkeypatch, {("E0", 1995): big})
+    sync_history(conn, seasons_from=1995)                             # 入库 2 行
+    small = _cached(tmp_path, "E0", 1995, CSV_A.encode("utf-8"))      # 1 行
+    _serve(monkeypatch, {("E0", 1995): small})
+    rep = sync_history(conn, seasons_from=1995)                       # 哈希变了→重建→收缩
+    assert len(rep.file_errors) == 1
+    lg, y, msg = rep.file_errors[0]
+    assert (lg, y) == ("E0", 1995) and "收缩保护" in msg
+    assert _count(conn) == 2 and rep.inserted == 0
+
+
 def test_ingest_failure_is_recorded_not_raised(conn, monkeypatch, tmp_path):
     """R1：入库层异常（如 IntegrityError）只记账；连接回滚后，后面的文件照常入库。"""
     from fa.data.ingest import ingest_rows as real_ingest

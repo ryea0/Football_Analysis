@@ -22,6 +22,13 @@ def ingest_rows(conn: sqlite3.Connection, league: str, season: int,
     h = _rows_hash(rows)
     if get_meta(conn, key) == h:
         return 0
+    existing = conn.execute(
+        "SELECT COUNT(*) c FROM matches WHERE league=? AND season=?",
+        (league, season)).fetchone()["c"]
+    if len(rows) < existing:         # 收缩保护（spec v0.12 §9.5）：
+        raise ValueError(            # 上游/缓存回退时宁可不动分区也不删赛果
+            f"收缩保护：{league}/{season} 分区库内 {existing} 行 > 新内容 "
+            f"{len(rows)} 行，拒绝重建（疑似上游/缓存回退），分区保持原样")
     try:
         conn.execute("DELETE FROM matches WHERE league=? AND season=?",
                      (league, season))

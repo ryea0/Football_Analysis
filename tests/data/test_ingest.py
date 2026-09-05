@@ -146,3 +146,22 @@ def test_commit_failure_rolls_back_and_reraises(conn, tmp_path):
     faulty = _FaultConn(conn, commit=broken_commit, rollback=broken_rollback)
     with pytest.raises(sqlite3.OperationalError, match="disk I/O"):
         ingest_rows(faulty, "E0", 1995, rows)
+
+
+def test_shrunk_rebuild_refused(conn):
+    """收缩保护（spec v0.12 §9.5）：新内容行数 < 库内现存 → 拒绝重建、分区原样。"""
+    ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))   # 2 行
+    shrunk_csv = CSV_A.splitlines()[0] + "\n" + CSV_A.splitlines()[1] + "\n"
+    with pytest.raises(ValueError, match="收缩保护"):
+        ingest_rows(conn, "E0", 1995, parse_csv(shrunk_csv, "E0", 1995))  # 1 行
+    assert count(conn) == 2                              # 分区保持原样
+    kept = conn.execute(
+        "SELECT COUNT(*) c FROM matches WHERE date='1995-08-22'").fetchone()["c"]
+    assert kept == 1                                     # 被砍的那行还在
+
+
+def test_equal_count_rebuild_still_allowed(conn):
+    """等行数的内容修正（如比分改判）不受收缩保护拦截。"""
+    ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))
+    n = ingest_rows(conn, "E0", 1995, parse_csv(CSV_B_CORRECTED, "E0", 1995))
+    assert n == 2 and count(conn) == 2
