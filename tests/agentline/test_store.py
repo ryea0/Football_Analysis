@@ -2,7 +2,8 @@
 import pytest
 
 from fa.agentline.contract import parse_prediction
-from fa.agentline.store import save_debate_round, save_prediction, save_run
+from fa.agentline.store import (save_debate_round, save_division_jump,
+                                save_prediction, save_run)
 from fa.db import connect, init_db
 
 
@@ -70,6 +71,20 @@ def test_save_debate_round_upsert(db):
     save_debate_round(db, 1, 1, "critic", "[]", "raw3", "ok", 0.1, "h", "m")
     assert db.execute("SELECT COUNT(*) c FROM"
                       " agentline_debate_rounds").fetchone()["c"] == 2
+
+
+def test_save_division_jump_upsert(db):
+    save_division_jump(db, 1, 1, "archivist", '{"a":1}', "raw", "ok",
+                       0.5, "h", "m")
+    save_division_jump(db, 1, 1, "archivist", '{"a":2}', "raw2", "ok",
+                       0.6, "h", "m")            # 重跑覆盖
+    rows = db.execute("SELECT payload_json FROM"
+                      " agentline_division_jumps").fetchall()
+    assert len(rows) == 1 and rows[0]["payload_json"] == '{"a":2}'
+    save_division_jump(db, 1, 2, "predictor", "{}", "raw3", "ok",
+                       0.1, "h", "m")
+    assert db.execute("SELECT COUNT(*) c FROM"
+                      " agentline_division_jumps").fetchone()["c"] == 2
 
 
 def test_save_run_counts(db):

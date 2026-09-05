@@ -75,3 +75,21 @@ def save_debate_round(conn, match_id: int, round_no: int, role: str,
         (match_id, round_no, role, payload_json, raw_output, status,
          duration_s, harness, model, _now()))
     conn.commit()
+
+
+def save_division_jump(conn, match_id: int, jump_no: int, role: str,
+                       payload_json: str, raw_output: str, status: str,
+                       duration_s: float, harness: str, model: str) -> None:
+    """A_division 逐跳产物落库（2026-09-05 设计 §3.4）：UNIQUE(match_id,jump)。"""
+    conn.execute(
+        "INSERT INTO agentline_division_jumps (match_id, jump, role,"
+        " payload_json, raw_output, status, duration_s, harness, model,"
+        " created_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(match_id, jump) DO UPDATE SET"
+        " payload_json=excluded.payload_json, raw_output=excluded.raw_output,"
+        " status=excluded.status, duration_s=excluded.duration_s,"
+        " harness=excluded.harness, model=excluded.model,"
+        " created_at=excluded.created_at",
+        (match_id, jump_no, role, payload_json, raw_output, status,
+         duration_s, harness, model, _now()))
+    conn.commit()
