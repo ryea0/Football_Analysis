@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | 项目名 | fa（Football Analysis） |
-| 版本 | v0.11（确认稿） |
+| 版本 | v0.12（确认稿） |
 | 日期 | 2026-09-05 |
 | 状态 | M1 完成；M2 判决 NO-GO（+3.02%，docs/m2-verdict.md）；**项目负责人批准 §12 双线并存协议——B 线（M3-M5 paper 模式）在推翻顺序关卡的前提下启动**（2026-09-03） |
 
@@ -17,6 +17,7 @@
 > v0.8 → v0.9 变更：周度小结（§9.6 weekly / §10）——`fa ops weekly` 上周双轨对照（落注/结算/ROI/CLV/bankroll）周一 07:00 推 TG，空周静默；§12.3 判据时钟裁定——6 周观察期自 cron 激活日起算，激活前数据留档不进预注册样本（2026-09-04 负责人裁定）。
 > v0.9 → v0.10 变更：组合风控三参数预注册（§5.3/§10 M5 入场前提）——总敞口 ≤30% bankroll、同场同轨 ≤2 注、峰值回撤 >20% 单注减半；paper 期仅观测（runs.summary.risk_gates）、实盘入场硬前提（2026-09-04 负责人裁定，参照交易实践的组合总热度/相关集群/回撤节流原则）。
 > v0.10 → v0.11 变更：新增 §12.7 进化线（C 线，M6）——知识库版本化外置 + hermes -z 反思纯函数 + 窗口快照冻结 + 人审关卡；B 线扩第三轨 model_persona_nokb（C 线同期对照，TG 推送保持双轨口径，§12.3 判据口径不变）；recommendations 增 personas_hash 版本戳（schema v8）（2026-09-04 设计评审，docs/superpowers/specs/2026-09-04-m6-evolution-implementation-design.md）。
+> v0.11 → v0.12 变更：数据链养护加固（§3.4/§9.5/§9.6）——daily 的 CSV 同步对**当前赛季分区**无条件强制重下（历史赛季维持缓存+内容哈希跳过）；matches 分区**收缩保护**（新内容行数少于库内现存即拒绝重建、记 file_errors）；watchdog 扩两项数据链巡检（赛果滞后 / 滞留 pending 注，宽限 3 天）。修复实况：daily 从不刷新缓存致 09-01 起赛果零入库（九月 158 注 paper 全 pending），run#9 分区哈希回退曾删除已入库的 09-03 赛果（F1/SP1 各 1 行）。
 
 ---
 
@@ -118,7 +119,7 @@ hermes cron（调度）
 
 ### 3.4 更新节奏与额度管理
 
-- 每日：更新已完赛场次（含收盘赔率，供 CLV 结算）
+- 每日：更新已完赛场次（含收盘赔率，供 CLV 结算；当前赛季 CSV 强制重下、历史赛季缓存+哈希跳过、分区收缩保护——见 §9.5）
 - 比赛日：按窗口拉实时盘存快照（11:00 / 17:00 两次，见 9.6）
 - Odds API 剩余额度从响应头读取并写入 `runs`/`meta`；低于阈值（如 100）时自动降频（丢弃非比赛日拉取、合并 region）并在报告标注
 
@@ -407,6 +408,9 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 - Odds API 额度耗尽 → 跳过拉盘、用最近快照并在报告标注「非实时盘」
 - persona 失败 → 6.5 降级
 - 所有 run 写 `runs` 表 + 文件日志
+- CSV 同步分层刷新（v0.12）：当前赛季分区每次强制重下（live 数据），历史赛季走本地缓存 + 内容哈希跳过；当前赛季下载失败沿用「最近缓存 + 告警」
+- matches 分区收缩保护（v0.12）：新内容行数 < 库内现存行数 → 拒绝重建（分区保持原样）并记 file_errors——防上游/缓存回退删赛果（2026-09-05 实况：run#9 曾把已入库的 09-03 赛果回退删除）
+- watchdog 巡检扩展（v0.12）：daily 间隔（原有）之外，加赛果滞后（已开球 fixture 最新日 − matches 最新赛果日 > 3 天）与滞留 pending 注（开球日 + 3 天已过仍 pending）两项（§9.6）
 
 ### 9.6 调度（双载体 cron，三条 job，北京时间）
 
@@ -421,7 +425,8 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 唯一入口是 `scripts/fa_cron.sh <daily|am|pm>`——环境补齐（PATH 补 uv 所在、导出
 clash 代理供 TG 推送）、日志落 `logs/cron/`、job 失败即 `fa ops alert` TG 告警、
 daily 成功后 `fa ops watchdog` 查漏跑（最近两次成功 daily 间隔 >25h 即告警，风险
-#6 落地）；成功时 stdout 静默。装配载体二选一、互斥切换（双跑会重复触发）：
+#6 落地；并巡检数据链——赛果滞后 / 滞留 pending 注超 3 天宽限即告警，v0.12）；
+成功时 stdout 静默。装配载体二选一、互斥切换（双跑会重复触发）：
 system crontab（`scripts/cron_install.sh`，标记块幂等）或 hermes cron
 （`scripts/hermes_cron_install.sh`，`--no-agent --script` 纯调度——hermes 不进
 LLM，gateway 亦无须配 TG 代理，告警走 fa 自己的推送路径）。时刻事实单
