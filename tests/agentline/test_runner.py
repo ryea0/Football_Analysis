@@ -99,3 +99,11 @@ def test_build_prompt_enh_directive_search():
     assert "timeRange" in enh and "不要使用" in enh   # 禁近期时间过滤
     assert "检索无可用结果" in enh            # 诚实降级条款
     assert "严禁编造来源" in enh
+
+
+def test_build_prompt_extra_section():
+    info = {"match": {"date": "2026-05-01", "home": "A", "away": "B"}}
+    p = build_prompt(info, "A_base", extra_section="\n# 历史考古官要点\nX\n")
+    assert "# 历史考古官要点" in p and "X" in p
+    p2 = build_prompt(info, "A_base")
+    assert "# 历史考古官要点" not in p2      # 默认零改动

@@ -30,7 +30,8 @@ _ENH_SUFFIX = """
 """
 
 
-def build_prompt(info_set: dict, line: str) -> str:
+def build_prompt(info_set: dict, line: str,
+                 extra_section: str = "") -> str:
     import json
     head = (
         "你是职业足球量化分析师。基于以下赛前信息，独立完成对这场比赛的"
@@ -45,7 +46,8 @@ def build_prompt(info_set: dict, line: str) -> str:
         "- sources：若使用了信息集之外的信息逐条列出 {title, date, url}；"
         "否则为空数组\n")
     date = info_set["match"]["date"]
-    return head + (_ENH_SUFFIX.format(date=date) if line == "A_enh" else "")
+    return (head + extra_section
+            + (_ENH_SUFFIX.format(date=date) if line == "A_enh" else ""))
 
 
 def run_headless(prompt: str, profile: str,

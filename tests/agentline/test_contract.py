@@ -1,7 +1,9 @@
 """契约校验（设计 §4）：约束输出——ok 或 parse_fail，绝不脑补。"""
 import json
 
-from fa.agentline.contract import ATTACK_LABELS, parse_attack, parse_prediction
+from fa.agentline.contract import (ATTACK_LABELS, RELEVANCE_LEVELS,
+                                   parse_attack, parse_history_points,
+                                   parse_prediction)
 
 _OK = json.dumps({"p_home": 0.45, "p_draw": 0.28, "p_away": 0.27,
                   "p_over25": 0.55, "confidence": 0.6,
@@ -123,10 +125,6 @@ def test_parse_attack_reason_truncated_to_200():
     got = parse_attack('{"attacks": [{"label": "overconfidence",'
                        ' "reason": "%s", "severity": 0.1}]}' % ("字" * 300))
     assert len(got["attacks"][0]["reason"]) == 200
-
-
-from fa.agentline.contract import (RELEVANCE_LEVELS,
-                                   parse_history_points)
 
 
 def test_parse_history_points_ok():
