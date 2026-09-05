@@ -123,3 +123,49 @@ def test_parse_attack_reason_truncated_to_200():
     got = parse_attack('{"attacks": [{"label": "overconfidence",'
                        ' "reason": "%s", "severity": 0.1}]}' % ("字" * 300))
     assert len(got["attacks"][0]["reason"]) == 200
+
+
+from fa.agentline.contract import (RELEVANCE_LEVELS,
+                                   parse_history_points)
+
+
+def test_parse_history_points_ok():
+    raw = json.dumps({
+        "h2h_points": [{"point": "近6次交锋主队4胜", "relevance": "high"}],
+        "recent_form_points": [{"point": "客队三连败", "relevance": "medium"},
+                                {"point": "主队两连平", "relevance": "low"}]})
+    got = parse_history_points(raw)
+    assert got["status"] == "ok"
+    assert got["h2h_points"][0]["relevance"] == "high"
+    assert len(got["recent_form_points"]) == 2
+
+
+def test_parse_history_points_empty_arrays_legal():
+    got = parse_history_points('{"h2h_points": [], "recent_form_points": []}')
+    assert got["status"] == "ok"
+
+
+def test_parse_history_points_missing_key_fails():
+    got = parse_history_points('{"h2h_points": []}')   # 严格：两键都必须在
+    assert got["status"] == "parse_fail"
+
+
+def test_parse_history_points_bad_relevance_fails():
+    got = parse_history_points('{"h2h_points": [{"point": "p",'
+                               ' "relevance": "huge"}],'
+                               ' "recent_form_points": []}')
+    assert got["status"] == "parse_fail"
+
+
+def test_parse_history_points_probability_guard():
+    got = parse_history_points('{"h2h_points": [],'
+                               ' "recent_form_points": [], "p_home": 0.5}')
+    assert got["status"] == "parse_fail" and "概率" in got["error"]
+
+
+def test_parse_history_points_truncated_and_repaired():
+    got = parse_history_points(
+        'x```json\n{"h2h_points": [{"point": "%s", "relevance": "high"}],'
+        ' "recent_form_points": []}\n```' % ("字" * 150))
+    assert got["status"] == "ok" and got["repaired"] is True
+    assert len(got["h2h_points"][0]["point"]) == 100
