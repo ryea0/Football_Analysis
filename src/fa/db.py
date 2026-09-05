@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -292,6 +292,25 @@ CREATE TABLE IF NOT EXISTS agentline_debate_rounds (
 );
 """
 
+# A_division 三跳产物表（v10，2026-09-05 设计 §3.4 DDL 原文）：archivist /
+# predictor / challenger 每跳一行全留档（跳数本身是难归因变量）；终版才入
+# agentline_predictions（line='A_division'、attributor=1）。UNIQUE(match_id,
+# jump) = 幂等重跑锚（同 debate_rounds 口径）。纯加法——line 词表五词 v9 已
+# 备齐，无需重建。
+_AL_DIV_TABLE = """
+CREATE TABLE IF NOT EXISTS agentline_division_jumps (
+    id           INTEGER PRIMARY KEY,
+    match_id     INTEGER NOT NULL REFERENCES matches(id),
+    jump         INTEGER NOT NULL CHECK (jump IN (1,2,3)),
+    role         TEXT NOT NULL CHECK (role IN ('archivist','predictor','challenger')),
+    payload_json TEXT NOT NULL,
+    raw_output   TEXT NOT NULL,
+    status       TEXT NOT NULL CHECK (status IN ('ok','parse_fail','timeout','error')),
+    duration_s   REAL, harness TEXT, model TEXT, created_at TEXT NOT NULL,
+    UNIQUE (match_id, jump)
+);
+"""
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
 
@@ -341,7 +360,7 @@ CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """ + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE + _AL_TABLE + _AL_DEBATE_TABLE \
-    + _EVOLUTION_TABLE
+    + _AL_DIV_TABLE + _EVOLUTION_TABLE
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -401,7 +420,10 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     v8->v9 二次重建 agentline_predictions——line 词表加 'A_debate'/'A_division'、
     加 budget_exhausted 列（存量行回填 0）；新表 agentline_debate_rounds 就位
     （A_debate 计划 T1，2026-09-05 设计 §2.4/§5）——同 v7 型 rename-copy-drop，
-    影子表名换 _v8，影子恢复仍优先于幂等跳过。"""
+    影子表名换 _v8，影子恢复仍优先于幂等跳过；
+    v9->v10 纯加法——新表 agentline_division_jumps（A_division 三跳产物，
+    2026-09-05 设计 §3.4）；line 词表五词 v9 已备齐，无需重建，IF NOT EXISTS
+    幂等补表。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -575,6 +597,10 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
             # 真库存量全经 save_prediction（FK ON）写入、必然有效；真有脏行就
             # 在这里 fail-fast——影子表原样保留，重试复现同一错误，不丢数据。
             conn.execute("DROP TABLE agentline_predictions_v8;")
+    if from_v < 10:
+        # v10：新表 division_jumps（2026-09-05 设计 §3.4）。纯加法——词表
+        # 五词已在 v9 备齐，无需重建；IF NOT EXISTS 幂等。
+        conn.executescript(_AL_DIV_TABLE)
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
