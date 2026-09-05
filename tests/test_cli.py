@@ -652,3 +652,20 @@ def test_agentline_run_rejects_unknown_line(tmp_path, monkeypatch):
     _use_tmp_db(tmp_path, monkeypatch)
     result = runner.invoke(app, ["agentline", "run", "--line", "A_nonsense"])
     assert result.exit_code == 2
+
+
+def test_agentline_run_division_dispatch(tmp_path, monkeypatch):
+    _use_tmp_db(tmp_path, monkeypatch)
+    import fa.agentline.orchestrate as orch
+    seen = {}
+
+    def fake_run_division(conn, d, limit=None):
+        seen["limit"] = limit
+        return {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+
+    monkeypatch.setattr(orch, "run_division", fake_run_division)
+    result = runner.invoke(app, ["agentline", "run", "--line", "A_division",
+                                 "--limit", "5"])
+    assert result.exit_code == 0
+    assert "ok" in result.output
+    assert seen["limit"] == 5               # --limit 透传 run_division
