@@ -1,5 +1,5 @@
-"""六对照评测（设计 §8 + 2026-09-05 设计 §2.5）：线 P / A_base / A_enh /
-A_multi / A_debate / 市场收盘，同批同判据。
+"""七对照评测（设计 §8 + 2026-09-05 设计 §2.5/§3.4）：线 P / A_base /
+A_enh / A_multi / A_debate / A_division / 市场收盘，同批同判据。
 
 行适配原则：agentline 的 p_* 覆盖 bp 行拷贝，mkt_*（Pinnacle 收盘去水）、
 odds_*、outcome、total_goals 原样保留——evaluate 与 candidates 的入参
@@ -63,7 +63,7 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
            "market": {"ll": e_p["market_ll"]}}
     roi_rows = {"P": bp}
     for line, attr in (("A_base", 1), ("A_enh", 1), ("A_multi", 0),
-                       ("A_debate", 1)):
+                       ("A_debate", 1), ("A_division", 1)):
         ag = _fetch_agent(conn, line, leagues, seasons, attributor=attr)
         rows = merge_rows(bp, ag)
         # evaluate 自带该子集的 market_ll——报告按行展示，分母不再混用全量值
@@ -86,6 +86,7 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
     cmp["audit"]["multi_member_ok"] = sum(
         1 for r in multi if r["status"] == "ok")
     cmp["debate"] = debate_gain(conn, leagues, seasons)
+    cmp["division"] = division_stratified(conn, leagues, seasons)
     return cmp
 
 
@@ -144,8 +145,95 @@ def debate_gain(conn, leagues=None, seasons=None) -> dict:
             "rho": rho, "n_rho": len(sevs)}
 
 
+def _mwu_p(a: list, b: list):
+    """MWU 双侧 p 值（retro 关卡3 口径单点维护）：全平手（零方差）时
+    scipy 返回 nan，如实记 None，不让 nan 穿透到报告渲染成 p=nan。"""
+    from scipy.stats import mannwhitneyu
+    p_raw = float(mannwhitneyu(a, b, alternative="two-sided").pvalue)
+    return None if math.isnan(p_raw) else p_raw
+
+
+# severity 高烈度割点（2026-09-05 设计 §3.4 增补）：severity 契约 [0,1] 的
+# 中点，预注册——不得按数据事后调整（改阈值须走设计档修订并记决策）。
+_SEVERITY_HIGH = 0.5
+
+
+def division_stratified(conn, leagues=None, seasons=None) -> dict:
+    """质询标签分层检验（2026-09-05 设计 §3.4，retro 关卡3 口径）。
+
+    分层键 = 五标签任一命中；jumpN_fail 是管线降级信号、不进分层键（判决
+    只落 flag 不改数——管线失败≠质询有话可说，混进「有标签」层会把降级
+    场误算成质询起效）。各层 per-match log-loss（metrics.log_loss 单场
+    调用——公式单一事实源，不在本文件重写）；两层各 n≥5 才跑 MWU 双侧。
+    非 ok 终版行默认剔除（audit 口径：分层只在可评行上做）。
+    两种「p 缺席」分开记，渲染各自诚实占位：任一层 n<5 → 不出 mwu_p 键
+    （小样本不出 p）；两组 log-loss 全平手（层内零方差）→ MWU 未定义返回
+    nan，仿 retro._mwu / debate_gain.rho 口径如实记 None，不让 nan 穿透到
+    报告渲染成 p=nan。
+
+    severity 加权视角（§3.4 增补，2026-09-05 负责人裁定）：首批判读实证
+    标签饱和（有攻击/无攻击二分退化），另按**场次最大攻击 severity** 分
+    三组——≥0.5 高烈度 / <0.5 低烈度 / attacks 空（含跳3 非 ok）单列计数
+    不进检验。MWU 双侧只比较高 vs 低，两侧各 n≥5 才出 mwu_p_sev（nan→
+    None 口径同 mwu_p）。阈值 0.5 = severity 契约 [0,1] 的中点，预注册、
+    不得按数据事后调割点；二分标签键保留不动（跨批连续性）。
+    """
+    from fa.backtest.metrics import fetch_predictions, log_loss
+    from fa.agentline.division import derive_flags
+    bp = fetch_predictions(conn, leagues, seasons)
+    rows = merge_rows(bp, _fetch_agent(conn, "A_division", leagues, seasons,
+                                       attributor=1))
+    flagged, unflagged = [], []
+    high, low = [], []
+    n_no_attack = 0
+    for r in rows:
+        jumps = [{"jump": j["jump"], "status": j["status"],
+                  "payload": j["payload_json"]} for j in conn.execute(
+            "SELECT jump, status, payload_json FROM agentline_division_jumps"
+            " WHERE match_id=?", (r["match_id"],))]
+        fl = {k for k in derive_flags(jumps) if not k.startswith("jump")}
+        ll = log_loss([(r["p_home"], r["p_draw"], r["p_away"])],
+                      [r["outcome"]])
+        (flagged if fl else unflagged).append(ll)
+        # severity 只取跳3 ok payload 的 attacks（同一份 jumps，零额外查询）
+        atks = [a for j in jumps if j["jump"] == 3 and j["status"] == "ok"
+                for a in json.loads(j["payload"]).get("attacks", [])]
+        if not atks:
+            n_no_attack += 1
+        elif max(a["severity"] for a in atks) >= _SEVERITY_HIGH:
+            high.append(ll)
+        else:
+            low.append(ll)
+    out = {"n_flagged": len(flagged), "n_unflagged": len(unflagged),
+           "n_high": len(high), "n_low": len(low), "n_no_attack": n_no_attack}
+    if flagged:
+        out["ll_flagged"] = sum(flagged) / len(flagged)
+    if unflagged:
+        out["ll_unflagged"] = sum(unflagged) / len(unflagged)
+    if len(flagged) >= 5 and len(unflagged) >= 5:
+        out["mwu_p"] = _mwu_p(flagged, unflagged)
+    if high:
+        out["ll_high"] = sum(high) / len(high)
+    if low:
+        out["ll_low"] = sum(low) / len(low)
+    if len(high) >= 5 and len(low) >= 5:
+        out["mwu_p_sev"] = _mwu_p(high, low)
+    return out
+
+
 _FOOTNOTE = ("> 各行比值在其自身 n 场子集内计算，跨线直比无效；"
              "n<100 的行为链路验证样本，数字无统计意义")
+
+
+def _p_placeholder(d: dict, key: str) -> str:
+    """MWU p 的三种诚实占位（二分标签与 severity 视角共用，措辞单点维护）：
+    有值报值；键在而值为 None → 向量退化（两组 log-loss 全平手）；键不在 →
+    任一侧 n<5 小样本不出 p——「算不出」不得被误读成「样本不够」。"""
+    if d.get(key) is not None:
+        return f"{d[key]:.3f}"
+    if key in d:
+        return "MWU 未定义（两组 log-loss 全平手）"
+    return "n<5/层不报（小样本诚实）"
 
 
 def render_report(cmp: dict, out_path: Path) -> None:
@@ -155,7 +243,7 @@ def render_report(cmp: dict, out_path: Path) -> None:
              f"样本 n={cmp['n']}（线 P 与线 A 交集见各线 n）", "",
              "| 线 | n | log-loss | Brier | 子集市场 ll | vs 子集市场 |",
              "|---|---|---|---|---|---|"]
-    for k in ("P", "A_base", "A_enh", "A_multi", "A_debate"):
+    for k in ("P", "A_base", "A_enh", "A_multi", "A_debate", "A_division"):
         e = cmp.get(k)
         if e is None:
             continue          # 旧形态 dict 无该线：宁缺一行，不虚报 n=0
@@ -200,6 +288,30 @@ def render_report(cmp: dict, out_path: Path) -> None:
                       f"终版 ll={d['final_ll']:.4f}（n={d['n']}）；"
                       f"攻击-修订相关性 ρ={rho_s}（n={d.get('n_rho', 0)}，"
                       f"高攻击低修订=固执 / 低攻击高修订=无主见，均为实测信号）"]
+    # 质询分层段（A_division 计划 T8，2026-09-05 设计 §3.4）：有标签层 vs
+    # 无标签层的 log-loss 对照必须可见，且允许结论为「质询无信息量」——
+    # 不做单边解读。p 的三种占位各自诚实：有值报值、任一层 n<5 不报
+    # （小样本）、两组 ll 全平手不报（向量退化）——后两者措辞分开，
+    # 「算不出」不得被误读成「样本不够」；单侧层缺 ll 以「—」占位不虚报。
+    dv = cmp.get("division", {})
+    if dv.get("n_flagged") or dv.get("n_unflagged"):
+        p_s = _p_placeholder(dv, "mwu_p")
+        ll_f = f"{dv['ll_flagged']:.4f}" if "ll_flagged" in dv else "—"
+        ll_u = f"{dv['ll_unflagged']:.4f}" if "ll_unflagged" in dv else "—"
+        lines += ["", f"> A_division 质询分层：有标签 n={dv['n_flagged']}"
+                      f"（ll={ll_f}）vs 无标签 n={dv['n_unflagged']}"
+                      f"（ll={ll_u}）；MWU 双侧 p={p_s}——"
+                      f"允许结论为「质询无信息量」"]
+        # severity 加权视角（§3.4 增补）：标签饱和时二分退化的替补读法。
+        # 无攻击组只计数不进检验；空层 ll 以「—」占位；p 占位与上行同源。
+        if dv.get("n_high") or dv.get("n_low") or dv.get("n_no_attack"):
+            ps = _p_placeholder(dv, "mwu_p_sev")
+            ll_h = f"{dv['ll_high']:.4f}" if "ll_high" in dv else "—"
+            ll_l = f"{dv['ll_low']:.4f}" if "ll_low" in dv else "—"
+            lines.append(f"> severity 加权：高烈度 n={dv['n_high']}"
+                         f"（ll={ll_h}）vs 低烈度 n={dv['n_low']}"
+                         f"（ll={ll_l}）vs 无攻击 n={dv['n_no_attack']}；"
+                         f"MWU 双侧 p={ps}——阈值 0.5 预注册")
     lines += ["", _FOOTNOTE, ""]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")

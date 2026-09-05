@@ -366,3 +366,234 @@ def test_report_omits_debate_gain_when_absent(tmp_path):
     render_report(_fake_cmp(enh_sources=0), out)
     text = out.read_text(encoding="utf-8")
     assert "修订增益" not in text and "| A_debate |" not in text
+
+
+# ---- A_division（三跳 + 质询判决）：七对照 + 质询标签分层检验 ---------------
+# 夹具沿用本文件 _deb_seed 的造数方式（同款 bp INSERT + ok 终版行）；jumps 行
+# payload 与 test_division / 引擎 _record 输出同源（json.dumps 的规范化 dict）。
+
+_HIST_OK = json.dumps({"h2h_points": [], "recent_form_points": []})
+_PRED_OK = json.dumps({"p_home": 0.5, "p_draw": 0.3, "p_away": 0.2,
+                       "p_over25": 0.5, "confidence": 0.5,
+                       "reasoning_digest": "d", "sources": []})
+_ATK_OC = json.dumps({"attacks": [{"label": "overconfidence", "reason": "r",
+                                   "severity": 0.9}]})
+_ATK_NONE = json.dumps({"attacks": []})
+
+
+def _div_jump(conn, mid, jump, role, payload):
+    conn.execute(
+        "INSERT INTO agentline_division_jumps (match_id, jump, role,"
+        " payload_json, raw_output, status, duration_s, harness, model,"
+        " created_at)"
+        " VALUES (?, ?, ?, ?, 'raw', 'ok', 0.1, 'h', 'm', '2026-09-05')",
+        (mid, jump, role, payload))
+
+
+def _div_seed(conn, mid, atk, ph_fin=0.5):
+    """一场完整跳链：bp 行 + A_division 终版 ok 行 + 三跳 ok 行。"""
+    conn.execute(
+        "INSERT INTO backtest_predictions (league, season, week_index,"
+        " match_id, date, p_home, p_draw, p_away, p_over25, p_under25,"
+        " mkt_home, mkt_draw, mkt_away, mkt_over25, odds_home, odds_draw,"
+        " odds_away, outcome, total_goals)"
+        " VALUES ('E0', 2023, 1, ?, '2024-02-01', 0.4, 0.3, 0.3, 0.5, 0.5,"
+        " 0.45, 0.28, 0.27, 0.55, 2.2, 3.5, 3.6, 'H', 3)", (mid,))
+    conn.execute(
+        "INSERT INTO agentline_predictions (match_id, line, p_home,"
+        " p_draw, p_away, p_over25, confidence, reasoning_digest,"
+        " sources_json, raw_output, status, repaired, created_at)"
+        " VALUES (?, 'A_division', ?, 0.3, ?, 0.5, 0.5, 'r', '[]', 'raw',"
+        " 'ok', 0, '2026-09-05')", (mid, ph_fin, 1 - ph_fin - 0.3))
+    _div_jump(conn, mid, 1, "archivist", _HIST_OK)
+    _div_jump(conn, mid, 2, "predictor", _PRED_OK)
+    _div_jump(conn, mid, 3, "challenger", atk)
+
+
+@pytest.fixture()
+def conn_with_div_rows(tmp_path):
+    """6 场可评终版 + 1 场 parse_fail 终版：match 1 跳3 落 overconfidence
+    攻击（有标签层），其余 5 场空 attacks（无标签层）——两向计数都非零；
+    parse_fail 场钉住「非 ok 终版行不进分层」（audit 口径：只评可评行）。"""
+    def seed(conn):
+        _div_seed(conn, 1, _ATK_OC)
+        for mid in range(2, 7):
+            _div_seed(conn, mid, _ATK_NONE)
+        # parse_fail 终版：bp 行在、终版行非 ok（概率 NULL）→ 分层不计
+        conn.execute(
+            "INSERT INTO backtest_predictions (league, season, week_index,"
+            " match_id, date, p_home, p_draw, p_away, p_over25, p_under25,"
+            " mkt_home, mkt_draw, mkt_away, mkt_over25, odds_home, odds_draw,"
+            " odds_away, outcome, total_goals)"
+            " VALUES ('E0', 2023, 1, 7, '2024-02-01', 0.4, 0.3, 0.3, 0.5,"
+            " 0.5, 0.45, 0.28, 0.27, 0.55, 2.2, 3.5, 3.6, 'H', 3)")
+        conn.execute(
+            "INSERT INTO agentline_predictions (match_id, line,"
+            " reasoning_digest, sources_json, raw_output, status, repaired,"
+            " created_at)"
+            " VALUES (7, 'A_division', 'r', '[]', 'raw', 'parse_fail',"
+            " 0, '2026-09-05')")
+    yield from _conn_with(tmp_path, "div", seed)
+
+
+@pytest.fixture()
+def conn_div_flat(tmp_path):
+    """10 场全平手（retro._mwu 先例口径）：5 有标签 + 5 无标签，终版概率
+    全同 → 10 场 log-loss 全同。两侧 n≥5 可触发 MWU，但全平手 → p=nan，
+    须如实记 None（n 也照报——向量退化不是样本缺失，完整披露）。
+    实证：scipy 1.18 的 MWU 仅在全平手时 nan——单侧常量、另一侧有差异
+    给有限 p（0.656），不足以触发。"""
+    def seed(conn):
+        for mid in range(1, 6):
+            _div_seed(conn, mid, _ATK_OC, 0.5)
+        for mid in range(6, 11):
+            _div_seed(conn, mid, _ATK_NONE, 0.5)
+    yield from _conn_with(tmp_path, "divflat", seed)
+
+
+_DIV_SEVS = ((1, 0.9, 0.70), (2, 0.8, 0.65), (3, 0.7, 0.60),
+             (4, 0.6, 0.55), (5, 0.5, 0.50),      # 恰 0.5 → 高烈度（≥0.5 预注册）
+             (6, 0.49, 0.45), (7, 0.4, 0.40), (8, 0.3, 0.35),
+             (9, 0.2, 0.30), (10, 0.1, 0.25))
+
+
+def _atk(sev):
+    return json.dumps({"attacks": [{"label": "overconfidence",
+                                    "reason": "r", "severity": sev}]})
+
+
+@pytest.fixture()
+def conn_div_sev_split(tmp_path):
+    """10 场攻击 + 1 场空 attacks：高烈度（≥0.5，含恰 0.5 边界场 mid 5）5 场
+    vs 低烈度（<0.5）5 场，终版概率各不相同 → 两组 log-loss 非退化，两侧
+    n≥5 触发 mwu_p_sev；空 attacks 场单列 n_no_attack 不进检验。"""
+    def seed(conn):
+        for mid, sev, ph in _DIV_SEVS:
+            _div_seed(conn, mid, _atk(sev), ph)
+        _div_seed(conn, 11, _ATK_NONE, 0.5)
+    yield from _conn_with(tmp_path, "divsev", seed)
+
+
+def test_compare_lines_includes_division(conn_with_div_rows):
+    cmp = compare_lines(conn_with_div_rows)
+    assert "A_division" in cmp and cmp["A_division"]["n"] >= 1
+    assert "division" in cmp
+
+
+def test_division_stratified_flag_vs_unflag(conn_with_div_rows):
+    from fa.agentline.compare import division_stratified
+    s = division_stratified(conn_with_div_rows)
+    assert s["n_flagged"] == 1 and s["n_unflagged"] == 5
+    # 小样本（任一层 n<5）不出 mwu_p——诚实边界；两层 ll 都要报
+    assert "mwu_p" not in s
+    assert 0 < s["ll_flagged"] < 1 and 0 < s["ll_unflagged"] < 1
+
+
+def test_division_stratified_excludes_non_ok_finals(conn_with_div_rows):
+    """parse_fail 终版场（match 7）不得混进任一层——分层只取 ok 终版行。"""
+    from fa.agentline.compare import _fetch_agent, division_stratified
+    mids = {r["match_id"] for r in _fetch_agent(
+        conn_with_div_rows, "A_division", None, None, attributor=1)}
+    assert 7 not in mids and len(mids) == 6
+    s = division_stratified(conn_with_div_rows)
+    assert s["n_flagged"] + s["n_unflagged"] == 6
+
+
+def test_division_stratified_empty(conn_empty):
+    from fa.agentline.compare import division_stratified
+    s = division_stratified(conn_empty)
+    # 空库：二分标签 + severity 三组计数全 0；ll 与 p 一律不出键
+    assert s == {"n_flagged": 0, "n_unflagged": 0,
+                 "n_high": 0, "n_low": 0, "n_no_attack": 0}
+
+
+def test_division_stratified_all_ties_mwu_p_is_none_not_nan(conn_div_flat):
+    """两组 log-loss 全平手 → MWU 未定义返回 nan：必须如实记 None，不得让
+    nan 穿透到报告渲染成 p=nan（先例：retro._mwu / debate_gain.rho）；
+    n 照报——向量退化不是样本缺失，是另一回事。"""
+    from fa.agentline.compare import division_stratified
+    s = division_stratified(conn_div_flat)
+    assert s["n_flagged"] == 5 and s["n_unflagged"] == 5
+    assert s["ll_flagged"] == s["ll_unflagged"]     # 全平手前提成立
+    assert s["mwu_p"] is None
+
+
+def test_division_stratified_severity_split(conn_div_sev_split):
+    """severity 加权分层（spec §3.4 增补）：场次最大攻击 severity ≥0.5 高
+    烈度 / <0.5 低烈度 / 空 attacks 单列。边界场（恰 0.5，mid 5）必须归高
+    烈度组——n_high=5 是边界判定的承重断言（错归低则两侧都凑不齐 n≥5，
+    mwu_p_sev 不出键）。二分标签键保留不动：10 场有攻击全进有标签层。"""
+    from fa.agentline.compare import division_stratified
+    s = division_stratified(conn_div_sev_split)
+    assert s["n_high"] == 5 and s["n_low"] == 5 and s["n_no_attack"] == 1
+    assert s["n_flagged"] == 10 and s["n_unflagged"] == 1
+    assert "mwu_p" not in s          # 无标签层 n=1<5：原 MWU 照旧不跑
+    assert 0 < s["mwu_p_sev"] < 1    # 高 vs 低两侧 n≥5 且 ll 非退化
+    assert 0 < s["ll_high"] and 0 < s["ll_low"]
+    assert s["ll_high"] != s["ll_low"]
+
+
+def test_division_stratified_severity_small_sample_no_p(conn_with_div_rows):
+    """仅 1 场有攻击（sev 0.9）：高烈度组出 ll，低烈度组空 → ll_low 不出键
+    （不虚报空层均值），两侧不同时 n≥5 → mwu_p_sev 不出键；空 attacks 的
+    5 场全部单列 n_no_attack，不挤进任一检验组。"""
+    from fa.agentline.compare import division_stratified
+    s = division_stratified(conn_with_div_rows)
+    assert s["n_high"] == 1 and s["n_low"] == 0 and s["n_no_attack"] == 5
+    assert "ll_high" in s
+    assert "ll_low" not in s and "mwu_p_sev" not in s
+
+
+def test_report_renders_severity_stratified(conn_div_sev_split, tmp_path):
+    """severity 视角入报告：三组计数 + 两侧 ll + MWU p 值 + 阈值 0.5 预注册
+    都要可见；p 不得渲染成 nan/None。"""
+    from fa.agentline.compare import compare_lines
+    out = tmp_path / "r.md"
+    render_report(compare_lines(conn_div_sev_split), out)
+    text = out.read_text(encoding="utf-8")
+    assert "severity 加权：高烈度 n=5" in text
+    assert "低烈度 n=5" in text and "无攻击 n=1" in text
+    assert "阈值 0.5 预注册" in text
+    assert "p=nan" not in text and "p=None" not in text
+
+
+def test_report_renders_division_row_and_stratified(conn_with_div_rows,
+                                                    tmp_path):
+    from fa.agentline.compare import compare_lines
+    cmp = compare_lines(conn_with_div_rows)
+    out = tmp_path / "r.md"
+    render_report(cmp, out)
+    text = out.read_text(encoding="utf-8")
+    assert "| A_division |" in text
+    assert "A_division 质询分层" in text
+    assert "有标签 n=1" in text and "无标签 n=5" in text
+    # 小样本占位必须逐字在报告里，且允许「质询无信息量」这个结论方向
+    assert "n<5/层不报（小样本诚实）" in text
+    assert "质询无信息量" in text
+    # 分层段必须在全局免责脚注之前（脚注前追加，不吞掉既有小样本免责）
+    assert (text.index("A_division 质询分层")
+            < text.index("各行比值在其自身 n 场子集内计算"))
+    # severity 视角同一报告内并行可见：低烈度组空 → ll 以「—」占位不虚报，
+    # 小样本占位措辞与二分标签视角同源
+    assert "severity 加权：高烈度 n=1" in text and "无攻击 n=5" in text
+    assert "低烈度 n=0（ll=—）" in text
+
+
+def test_report_renders_degenerate_mwu_placeholder(conn_div_flat, tmp_path):
+    """mwu_p=None（向量退化）不得渲染成 p=nan 或 p=None——专用占位与
+    小样本占位措辞不同，否则「算不出」会被误读成「样本不够」。"""
+    from fa.agentline.compare import compare_lines
+    out = tmp_path / "r.md"
+    render_report(compare_lines(conn_div_flat), out)
+    text = out.read_text(encoding="utf-8")
+    assert "p=nan" not in text and "p=None" not in text
+    assert "MWU 未定义（两组 log-loss 全平手）" in text
+    assert "有标签 n=5" in text and "无标签 n=5" in text
+
+
+def test_report_omits_division_stratified_when_absent(tmp_path):
+    # 旧形态 dict（无 division 键）不得炸 render_report，也不得虚报分层段
+    out = tmp_path / "r.md"
+    render_report(_fake_cmp(enh_sources=0), out)
+    text = out.read_text(encoding="utf-8")
+    assert "质询分层" not in text and "| A_division |" not in text

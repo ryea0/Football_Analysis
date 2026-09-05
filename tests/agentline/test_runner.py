@@ -99,3 +99,21 @@ def test_build_prompt_enh_directive_search():
     assert "timeRange" in enh and "不要使用" in enh   # 禁近期时间过滤
     assert "检索无可用结果" in enh            # 诚实降级条款
     assert "严禁编造来源" in enh
+
+
+def test_build_prompt_extra_section():
+    info = {"match": {"date": "2026-05-01", "home": "A", "away": "B"}}
+    p = build_prompt(info, "A_base", extra_section="\n# 历史考古官要点\nX\n")
+    assert "# 历史考古官要点" in p and "X" in p
+    p2 = build_prompt(info, "A_base")
+    assert "# 历史考古官要点" not in p2      # 默认零改动
+
+
+def test_build_prompt_extra_section_precedes_enh_suffix():
+    """hardener（Task 3 review 捆绑）：extra_section 必须落在 A_enh 检索段之前。
+    division 预测者要点段若被拼到检索指令之后，会打乱「检索→结合要点→预测」
+    的指令顺序，钉住 head + extra_section + suffix 的拼接顺序。"""
+    info = {"match": {"date": "2026-05-01", "home": "A", "away": "B"}}
+    p = build_prompt(info, "A_enh", extra_section="\n# X段\nY\n")
+    assert "# X段" in p and "Y" in p
+    assert p.index("# X段") < p.index("# 网络检索")

@@ -309,3 +309,122 @@ def test_run_debate_crash_leaves_run_row_with_partial_counts(conn, info_dir,
     summary = json.loads(run_row["summary"])
     assert summary["interrupted_match_id"] == 11      # 中断位可定位续跑
     assert summary["n_calls"] == 3 and summary["n_todo"] == 2   # 批级计数照记
+
+
+# ---- A_division（历史考古官→预测者→质询官）：run_division 批编排 -------------
+# 夹具沿用本文件既有 conn/info_dir（run_multi 段）；HIST/PRED/ATK 字面量与
+# tests/agentline/test_division.py 同源复制（同一份要点/预测/质询语义）。
+
+
+_DIV_HIST = json.dumps({"h2h_points": [{"point": "p1", "relevance": "high"}],
+                        "recent_form_points": []})
+_DIV_PRED = json.dumps({"p_home": 0.5, "p_draw": 0.3, "p_away": 0.2,
+                        "p_over25": 0.5, "confidence": 0.6,
+                        "reasoning_digest": "d", "sources": []})
+_DIV_ATK = json.dumps({"attacks": [{"label": "overconfidence", "reason": "r",
+                                    "severity": 0.9}]})
+
+
+def test_run_division_happy_and_flagged_summary(conn, info_dir, monkeypatch):
+    from fa.agentline.orchestrate import run_division
+    seq = [_DIV_HIST, _DIV_PRED, _DIV_ATK]           # 跳1→跳2→跳3
+    profiles = []
+
+    def fake_run(prompt, profile, timeout_s=None):
+        profiles.append(profile)
+        return (seq.pop(0), None, 0.01)
+
+    monkeypatch.setattr(runner_mod, "run_headless", fake_run)
+    counts = run_division(conn, info_dir)
+    assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+    # profile 透传（run_multi/run_debate 同款不变量）：三跳全走 A_base
+    assert len(profiles) == 3
+    assert set(profiles) == {"fa-agent-base"}
+    row = conn.execute("SELECT p_home FROM agentline_predictions"
+                       " WHERE line='A_division' AND attributor=1").fetchone()
+    assert abs(row["p_home"] - 0.5) < 1e-9
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_division_jumps").fetchone()["c"] == 3
+    summary = json.loads(conn.execute(
+        "SELECT summary FROM agentline_runs WHERE line='A_division'"
+        " ORDER BY id DESC LIMIT 1").fetchone()["summary"])
+    assert summary["n_calls"] == 3 and summary["n_flagged"] == 1
+    # 幂等重跑：ok 行已在 → 零调用、跳行不变（run 台账照记一行）
+    counts2 = run_division(conn, info_dir)
+    assert counts2["ok"] == 0
+    assert len(profiles) == 3                # 重跑未发起任何 dsh 调用
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_division_jumps").fetchone()["c"] == 3
+    assert conn.execute("SELECT COUNT(*) c FROM agentline_runs"
+                        " WHERE line='A_division'").fetchone()["c"] == 2
+
+
+def test_run_division_batch_totals_limit_and_no_flag(conn, info_dir,
+                                                     monkeypatch):
+    """n_calls 为批内跨场累计（各场 2 或 3）；n_flagged 计含任一 flag（含跳
+    失败 flag）的场次；limit 截断 + 幂等续跑补齐剩余场次。"""
+    from fa.agentline.orchestrate import run_division
+    info = {"match": {"league": "E0", "season": 2023, "date": "2024-02-01",
+                      "home": "Arsenal", "away": "Chelsea"}, "odds": {}}
+    (info_dir / "11.json").write_text(json.dumps(info), encoding="utf-8")
+    seq = [_DIV_HIST, _DIV_PRED, _DIV_ATK,       # 场 10：3 调用，有质询 flag
+           _DIV_HIST, "垃圾"]                     # 场 11：跳2 失败 → 2 调用
+    monkeypatch.setattr(runner_mod, "run_headless",
+                        lambda p, prof, timeout_s=None: (seq.pop(0), None, 0.01))
+    counts = run_division(conn, info_dir)
+    assert counts == {"ok": 1, "parse_fail": 1, "timeout": 0, "error": 0}
+    assert seq == []                              # 3+2=5 次调用，恰好消费
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_division_jumps").fetchone()["c"] == 5
+    summary = json.loads(conn.execute(
+        "SELECT summary FROM agentline_runs WHERE line='A_division'"
+        " ORDER BY id DESC LIMIT 1").fetchone()["summary"])
+    assert summary["n_todo"] == 2
+    assert summary["n_calls"] == 5                # 批内跨场累计
+    assert summary["n_flagged"] == 2              # 质询 flag + 跳2 失败 flag
+    # 幂等续跑语义与 run_line 同：只跳过 status='ok'——parse_fail 的场 11 会
+    # 被重试（此时三跳全 ok、质询为空 → 无 flag）。limit=2 截断到 [11,12]。
+    (info_dir / "12.json").write_text(json.dumps(info), encoding="utf-8")
+    seq.extend([_DIV_HIST, _DIV_PRED, json.dumps({"attacks": []}),   # 场 11 重试
+                _DIV_HIST, _DIV_PRED, json.dumps({"attacks": []})])  # 场 12
+    counts2 = run_division(conn, info_dir, limit=2)
+    assert counts2 == {"ok": 2, "parse_fail": 0, "timeout": 0, "error": 0}
+    assert seq == []                              # 3+3=6 次调用，恰好消费
+    ids = [r["match_id"] for r in conn.execute(
+        "SELECT match_id FROM agentline_predictions WHERE line='A_division'"
+        " ORDER BY match_id")]
+    assert ids == [10, 11, 12]
+    # 3 场 × 3 跳 = 9 行：场 11 重试的跳1/跳2 走 upsert 覆盖，不加行
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_division_jumps").fetchone()["c"] == 9
+    summary2 = json.loads(conn.execute(
+        "SELECT summary FROM agentline_runs WHERE line='A_division'"
+        " ORDER BY id DESC LIMIT 1").fetchone()["summary"])
+    assert summary2["n_todo"] == 2
+    assert summary2["n_calls"] == 6               # 批内跨场累计（3+3）
+    assert summary2["n_flagged"] == 0             # 空质询且无跳失败 → 零 flag
+
+
+def test_run_division_crash_leaves_run_row_with_partial_counts(
+        conn, info_dir, monkeypatch):
+    """批中崩溃（info JSON 损坏致 json.loads 抛错）也必须先留 run 台账（中断位
+    + 已完成计数与批级 n_calls/n_flagged）再抛——run_line/run_debate 同型
+    （先例 4a8b05a），否则留下「predictions>0 且 runs=0」的无痕中断。"""
+    from fa.agentline.orchestrate import run_division
+    (info_dir / "11.json").write_text("{损坏:非 JSON", encoding="utf-8")
+    seq = [_DIV_HIST, _DIV_PRED, _DIV_ATK]        # 场 10 完整走完三跳
+    monkeypatch.setattr(runner_mod, "run_headless",
+                        lambda p, prof, timeout_s=None: (seq.pop(0), None, 0.01))
+    with pytest.raises(json.JSONDecodeError):
+        run_division(conn, info_dir)              # 异常照抛（不吞）
+    assert seq == []                              # 场 10 的 3 次调用已发生
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_division_jumps").fetchone()["c"] == 3
+    run_row = conn.execute("SELECT * FROM agentline_runs"
+                           " WHERE line='A_division'").fetchone()
+    assert run_row is not None                    # 台账已留
+    assert run_row["n_ok"] == 1                   # 已完成场次如实计数
+    summary = json.loads(run_row["summary"])
+    assert summary["interrupted_match_id"] == 11  # 中断位可定位续跑
+    assert summary["n_calls"] == 3 and summary["n_flagged"] == 1
+    assert summary["n_todo"] == 2

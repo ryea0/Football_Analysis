@@ -108,3 +108,43 @@ def parse_attack(raw: str, repaired_ok: bool = False) -> dict:
         return {"status": "parse_fail", "attacks": [],
                 "error": f"parse_fail 原因：{type(exc).__name__}: {exc}",
                 "repaired": repaired}
+
+
+RELEVANCE_LEVELS = ("high", "medium", "low")
+
+
+def parse_history_points(raw: str, repaired_ok: bool = False) -> dict:
+    """历史考古官要点契约（2026-09-05 设计 §3.3）。
+
+    严格双键（缺一即 parse_fail，与 parse_prediction 的「绝不脑补」同
+    风格）；数组可为空（历史段无信息=合法）；relevance 封闭三词；禁概率
+    数字（出现 p_* 字段即弃）。
+    """
+    repaired = repaired_ok
+    try:
+        try:
+            obj = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            obj = _extract_json(raw)
+            repaired = True
+        if any(f in obj for f in _PROB_FIELDS):
+            raise ValueError("要点 JSON 出现概率字段（考古官禁数字）")
+        out = {}
+        for key in ("h2h_points", "recent_form_points"):
+            items = obj[key]
+            if not isinstance(items, list):
+                raise ValueError(f"{key} 必须是数组")
+            pts = []
+            for it in items:
+                if it["relevance"] not in RELEVANCE_LEVELS:
+                    raise ValueError(f"relevance 越界：{it['relevance']}")
+                pts.append({"point": str(it["point"])[:100],
+                            "relevance": it["relevance"]})
+            out[key] = pts
+        return {"status": "ok", **out, "repaired": repaired}
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError,
+            AttributeError) as exc:
+        return {"status": "parse_fail", "h2h_points": [],
+                "recent_form_points": [],
+                "error": f"parse_fail 原因：{type(exc).__name__}: {exc}",
+                "repaired": repaired}

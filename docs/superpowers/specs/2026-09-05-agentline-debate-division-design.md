@@ -148,6 +148,8 @@
 - 终版 = 跳2 预测原样：`line='A_division'`、`attributor=1`；`division_flags_json` 并入 predictions 行的 `sources_json` 邻接新列**不加列**——flags 存 jumps 表跳3 行 payload，评测侧 JOIN 取（避免 predictions 再重建）
 - 评测：七对照（六对照 + A_division）+ 质询标签分层检验段
 
+**severity 加权分层（2026-09-05 负责人裁定增补）**：首批 E2E 实证质询官标签饱和（10/10 场有攻击、无标签层 0 场，二分标签键分层退化）。增补第三层分层视角：以**场次最大攻击 severity** 为分层变量——≥0.5 高烈度组 / <0.5 低烈度组 / 无攻击（attacks 空）单列计数不进检验；MWU 双侧只比较高 vs 低（两组各 n≥5 才报 p，nan→None 口径同前）。约束：阈值 0.5 预注册（severity 契约 0-1 的中点），**不得按数据事后调割点**；原二分标签键保留不动（跨批连续性）；治疗不变——质询官 prompt 冻结（选项「调 prompt」违反窗口内 treatment 冻结，只在窗口边界可议）；severity 已全量入库于跳3 payload，零重跑成本。
+
 ## 4. 形态一放量协议与「数据齐」判定
 
 ### 4.1 放量梯子

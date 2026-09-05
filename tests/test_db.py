@@ -25,9 +25,10 @@ def conn(tmp_path):
 # B 线五表（schema v3）：表边界见 spec §12.1——B 线独占，绝不写 backtest_predictions
 _BLINE_TABLES = ("fixtures", "odds_snapshots", "recommendations", "bets", "runs")
 # 范式对比线表（spec §12.5）：v5 两表（agentline_predictions / agentline_runs）
-# + v9 辩论逐轮审计表（agentline_debate_rounds）——线 A 专属，物理隔离分账
+# + v9 辩论逐轮审计表（agentline_debate_rounds）+ v10 三跳产物表
+# （agentline_division_jumps）——线 A 专属，物理隔离分账
 _AGENTLINE_TABLES = ("agentline_predictions", "agentline_runs",
-                     "agentline_debate_rounds")
+                     "agentline_debate_rounds", "agentline_division_jumps")
 
 
 def _table_cols(c, table: str) -> dict:
@@ -366,7 +367,11 @@ def test_migrate_up_v2_adds_bline_retro_and_persona(tmp_path):
     (1, ("backtest_predictions", *_BLINE_TABLES)),   # v1 跨级升级
     (3, ()),                                         # v3 就地升级（M3 真库路径）
     (8, ()),                                         # v8 就地升级（v9 影子重建护栏跳过路径）
-], ids=["from_v1", "from_v3", "from_v8"])
+    (9, ("agentline_division_jumps",)),              # v9 跨级升级（v10 纯加法补表——
+                                                     # drop 掉新表逼出 v9 形状（缺新表）的场景拟真
+                                                     # + 末态断言：_SCHEMA 引导先于 v10 腿，
+                                                     # 真建表覆盖在 v1 legacy 直调路径）
+], ids=["from_v1", "from_v3", "from_v8", "from_v9"])
 def test_migrate_and_fresh_schemas_match(tmp_path, from_v, drop):
     """新建与迁移两条路径产出的表形状必须一致（M2 教训的推广）。
 
