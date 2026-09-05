@@ -55,7 +55,11 @@ def build_challenger_prompt(info_set: dict, pred_raw: str) -> str:
 
 
 def _status_of(parsed: dict, run_err: str | None) -> dict:
-    """dsh 层失败 → timeout/error（与 debate._status_of 同式）。"""
+    """dsh 层失败 → timeout/error（与 debate._status_of 同式）。
+
+    division 版对 reasoning_digest 做键存在性守卫（debate 版无条件覆盖——
+    其唯一输入 parse_prediction 恒含该键；本版为跨契约复用留守卫）。
+    """
     if run_err is not None:
         return {**parsed, "status": "timeout" if "超时" in run_err else "error",
                 **({"reasoning_digest": f"dsh 失败：{run_err}"}
@@ -78,7 +82,10 @@ def run_match_division(call, info: dict) -> dict:
     n_calls += 1
     hist = parse_history_points(out or "")
     if err is not None:
-        hist = {**hist, "status": "timeout" if "超时" in err else "error"}
+        # 真实失败原因入 payload（与 debate.py 批评者分支同式）——否则审计只能
+        # 看到契约解析错误，掩盖 dsh 层失败根因（fix round 1）。
+        hist = {**hist, "status": "timeout" if "超时" in err else "error",
+                "error": f"dsh 失败：{err}"}
     _record(1, "archivist", hist, out or "", dur)
     points = hist if hist["status"] == "ok" else None
 
@@ -93,7 +100,8 @@ def run_match_division(call, info: dict) -> dict:
     n_calls += 1
     atk = parse_attack(out3 or "")
     if err3 is not None:
-        atk = {**atk, "status": "timeout" if "超时" in err3 else "error"}
+        atk = {**atk, "status": "timeout" if "超时" in err3 else "error",
+               "error": f"dsh 失败：{err3}"}   # 根因入账，同跳1（fix round 1）
     _record(3, "challenger", atk, out3 or "", dur3)
     return {"final": pred, "jumps": jumps, "n_calls": n_calls}
 
