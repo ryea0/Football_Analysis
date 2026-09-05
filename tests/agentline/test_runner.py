@@ -107,3 +107,13 @@ def test_build_prompt_extra_section():
     assert "# 历史考古官要点" in p and "X" in p
     p2 = build_prompt(info, "A_base")
     assert "# 历史考古官要点" not in p2      # 默认零改动
+
+
+def test_build_prompt_extra_section_precedes_enh_suffix():
+    """hardener（Task 3 review 捆绑）：extra_section 必须落在 A_enh 检索段之前。
+    division 预测者要点段若被拼到检索指令之后，会打乱「检索→结合要点→预测」
+    的指令顺序，钉住 head + extra_section + suffix 的拼接顺序。"""
+    info = {"match": {"date": "2026-05-01", "home": "A", "away": "B"}}
+    p = build_prompt(info, "A_enh", extra_section="\n# X段\nY\n")
+    assert "# X段" in p and "Y" in p
+    assert p.index("# X段") < p.index("# 网络检索")
