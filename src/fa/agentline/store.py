@@ -10,13 +10,16 @@ def _now() -> str:
 
 def save_prediction(conn: sqlite3.Connection, match_id: int, line: str,
                     parsed: dict, raw_output: str, harness: str,
-                    model: str, duration_s: float, attributor: int = 1) -> int:
+                    model: str, duration_s: float, attributor: int = 1,
+                    budget_exhausted: int = 0) -> int:
     conn.execute(
-        "INSERT INTO agentline_predictions (match_id, line, attributor, p_home,"
-        " p_draw, p_away, p_over25, confidence, reasoning_digest, sources_json,"
-        " raw_output, status, repaired, harness, model, duration_s, created_at)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+        "INSERT INTO agentline_predictions (match_id, line, attributor,"
+        " budget_exhausted, p_home, p_draw, p_away, p_over25, confidence,"
+        " reasoning_digest, sources_json, raw_output, status, repaired,"
+        " harness, model, duration_s, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
         " ON CONFLICT(match_id, line, attributor) DO UPDATE SET"
+        " budget_exhausted=excluded.budget_exhausted,"
         " p_home=excluded.p_home, p_draw=excluded.p_draw,"
         " p_away=excluded.p_away, p_over25=excluded.p_over25,"
         " confidence=excluded.confidence,"
@@ -25,8 +28,9 @@ def save_prediction(conn: sqlite3.Connection, match_id: int, line: str,
         " status=excluded.status, repaired=excluded.repaired,"
         " harness=excluded.harness, model=excluded.model,"
         " duration_s=excluded.duration_s, created_at=excluded.created_at",
-        (match_id, line, attributor, parsed["p_home"], parsed["p_draw"],
-         parsed["p_away"], parsed["p_over25"], parsed["confidence"],
+        (match_id, line, attributor, budget_exhausted,
+         parsed["p_home"], parsed["p_draw"], parsed["p_away"],
+         parsed["p_over25"], parsed["confidence"],
          parsed["reasoning_digest"], parsed["sources_json"], raw_output,
          parsed["status"], int(parsed["repaired"]), harness, model,
          duration_s, _now()))
@@ -53,3 +57,21 @@ def save_run(conn, line: str, profile: str, model: str | None,
          json.dumps(summary, ensure_ascii=False)))
     conn.commit()
     return cur.lastrowid
+
+
+def save_debate_round(conn, match_id: int, round_no: int, role: str,
+                      payload_json: str, raw_output: str, status: str,
+                      duration_s: float, harness: str, model: str) -> None:
+    """A_debate 逐轮产物落库（2026-09-05 设计 §2.4）：UNIQUE 三元 upsert。"""
+    conn.execute(
+        "INSERT INTO agentline_debate_rounds (match_id, round, role,"
+        " payload_json, raw_output, status, duration_s, harness, model,"
+        " created_at) VALUES (?,?,?,?,?,?,?,?,?,?)"
+        " ON CONFLICT(match_id, round, role) DO UPDATE SET"
+        " payload_json=excluded.payload_json, raw_output=excluded.raw_output,"
+        " status=excluded.status, duration_s=excluded.duration_s,"
+        " harness=excluded.harness, model=excluded.model,"
+        " created_at=excluded.created_at",
+        (match_id, round_no, role, payload_json, raw_output, status,
+         duration_s, harness, model, _now()))
+    conn.commit()

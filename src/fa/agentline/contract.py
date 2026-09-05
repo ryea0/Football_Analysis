@@ -65,3 +65,46 @@ def parse_prediction(raw: str, repaired_ok: bool = False) -> dict:
     except (KeyError, ValueError, TypeError, json.JSONDecodeError) as exc:
         fail["reasoning_digest"] = f"parse_fail 原因：{type(exc).__name__}: {exc}"
         return fail
+
+
+ATTACK_LABELS = ("overconfidence", "missing_context", "alt_explanation",
+                 "internal_inconsistency", "evidence_weak")
+_PROB_FIELDS = ("p_home", "p_draw", "p_away", "p_over25")
+
+
+def parse_attack(raw: str, repaired_ok: bool = False) -> dict:
+    """批评者/质询官攻击契约（2026-09-05 设计 §2.3/§3.3）。
+
+    封闭五标签 + reason≤200 字 + severity∈[0,1] 有限值；attacks 可为空
+    （无攻击点=合法）。禁概率数字：obj 出现任一 p_* 字段即 parse_fail
+    （守卫与 parse_prediction 的「绝不脑补」同一风格）。
+    """
+    repaired = repaired_ok
+    try:
+        try:
+            obj = json.loads(raw.strip())
+        except json.JSONDecodeError:
+            obj = _extract_json(raw)
+            repaired = True
+        if any(f in obj for f in _PROB_FIELDS):
+            raise ValueError("攻击 JSON 出现概率字段（批评者禁数字）")
+        items = obj.get("attacks")
+        if not isinstance(items, list):
+            raise ValueError("attacks 必须是数组")
+        out = []
+        for it in items:
+            label = it["label"]
+            if label not in ATTACK_LABELS:
+                raise ValueError(f"label 越界：{label}")
+            sev = float(it["severity"])
+            if math.isnan(sev) or math.isinf(sev) or not 0 <= sev <= 1:
+                raise ValueError("severity 非有限值或越界")
+            out.append({"label": label,
+                        "reason": str(it.get("reason", ""))[:200],
+                        "severity": sev})
+        return {"status": "ok", "attacks": out, "repaired": repaired}
+    except (KeyError, ValueError, TypeError, json.JSONDecodeError,
+            AttributeError) as exc:
+        return {"status": "parse_fail", "attacks": [],
+                "error": f"parse_fail 原因：{type(exc).__name__}: {exc}",
+                "repaired": repaired}

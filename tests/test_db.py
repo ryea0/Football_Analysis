@@ -24,8 +24,10 @@ def conn(tmp_path):
 
 # B 线五表（schema v3）：表边界见 spec §12.1——B 线独占，绝不写 backtest_predictions
 _BLINE_TABLES = ("fixtures", "odds_snapshots", "recommendations", "bets", "runs")
-# 范式对比线两表（schema v5；v4 为 retro 线）：线 A 专属，物理隔离分账（spec §12.5）
-_AGENTLINE_TABLES = ("agentline_predictions", "agentline_runs")
+# 范式对比线表（spec §12.5）：v5 两表（agentline_predictions / agentline_runs）
+# + v9 辩论逐轮审计表（agentline_debate_rounds）——线 A 专属，物理隔离分账
+_AGENTLINE_TABLES = ("agentline_predictions", "agentline_runs",
+                     "agentline_debate_rounds")
 
 
 def _table_cols(c, table: str) -> dict:
@@ -363,7 +365,8 @@ def test_migrate_up_v2_adds_bline_retro_and_persona(tmp_path):
 @pytest.mark.parametrize("from_v,drop", [
     (1, ("backtest_predictions", *_BLINE_TABLES)),   # v1 跨级升级
     (3, ()),                                         # v3 就地升级（M3 真库路径）
-], ids=["from_v1", "from_v3"])
+    (8, ()),                                         # v8 就地升级（v9 影子重建护栏跳过路径）
+], ids=["from_v1", "from_v3", "from_v8"])
 def test_migrate_and_fresh_schemas_match(tmp_path, from_v, drop):
     """新建与迁移两条路径产出的表形状必须一致（M2 教训的推广）。
 
@@ -1138,7 +1141,9 @@ def _make_v7_db(path):
         " '2026-09-05T03:00:00Z')")
     conn.commit()
     conn.close()
-    assert dbmod.SCHEMA_VERSION == 8
+    # 钉下限而非字面量（v6→v7 用例既定口径）：v9 起 fa 版本继续上移，本 helper
+    # 只须保证「当前 ≥ v8」——v7 旧形状仍是重建迁移测试的有效起点
+    assert dbmod.SCHEMA_VERSION >= 8
 
 
 def test_migrate_v7_to_v8(tmp_path):
@@ -1166,7 +1171,9 @@ def test_migrate_v7_to_v8(tmp_path):
     idx = conn.execute("SELECT name FROM sqlite_master WHERE type='index'"
                        " AND name='idx_recs_run'").fetchone()
     assert idx is not None
-    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 8
+    # 钉 SCHEMA_VERSION 而非字面量：v9 起 fa 版本继续上移，本用例只关心升到位
+    assert conn.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     conn.close()
 
 
@@ -1178,7 +1185,8 @@ def test_migrate_v8_backup_created(tmp_path):
     assert (tmp_path / "fa.db.bak-v8").exists()
     dbmod.init_db(p)   # 幂等：二次 init 不重复备份、不重复迁移
     conn = dbmod.connect(p)
-    assert conn.execute("SELECT version FROM schema_version").fetchone()["version"] == 8
+    assert conn.execute(
+        "SELECT version FROM schema_version").fetchone()["version"] == SCHEMA_VERSION
     conn.close()
 
 
@@ -1220,7 +1228,7 @@ def test_v8_migration_guard_skips_rebuilt_table(tmp_path):
         assert conn.execute("SELECT id, personas_hash FROM recommendations"
                             ).fetchone()["id"] == 42
         assert conn.execute("SELECT version FROM schema_version"
-                            ).fetchone()["version"] == 8
+                            ).fetchone()["version"] == SCHEMA_VERSION
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name="
                             "'recommendations_v7'").fetchone() is None
     finally:

@@ -164,6 +164,11 @@ def test_run_multi_members_and_aggregate(conn, info_dir, monkeypatch):
         return (next(outs), None, 1.0)
 
     monkeypatch.setattr(orchestrate.runner_mod, "run_headless", fake_run)
+    # 台账起点＝批起点（终审 Important #2 微任务，run_line 同式）：递增时钟
+    # 钉死 started_at 取 run_multi 开头时刻，而非批尾 save_run 落库时刻。
+    from fa.agentline import store as store_mod
+    clock = iter(f"2026-09-05T00:00:{i:02d}+00:00" for i in range(99))
+    monkeypatch.setattr(store_mod, "_now", lambda: next(clock))
     counts = orchestrate.run_multi(conn, info_dir, members=3, limit=1)
     assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
     rows = conn.execute(
@@ -176,6 +181,10 @@ def test_run_multi_members_and_aggregate(conn, info_dir, monkeypatch):
     assert len(calls) == 3
     assert {profile for _, profile in calls} == {"fa-agent-base"}
     assert all("网络检索" not in prompt for prompt, _ in calls)
+    run_row = conn.execute("SELECT started_at, finished_at FROM agentline_runs"
+                           " WHERE line='A_multi'").fetchone()
+    assert run_row["started_at"] == "2026-09-05T00:00:00+00:00"   # 批首时钟
+    assert run_row["finished_at"] > run_row["started_at"]          # 批尾≠起点
 
 
 def test_run_multi_all_failed_aggregate_error(conn, info_dir, monkeypatch):
@@ -213,3 +222,90 @@ def test_cli_run_rejects_members_lt_two():
     res = CliRunner().invoke(app, ["agentline", "run", "--line", "A_multi",
                                    "--members", "1"])
     assert res.exit_code == 2
+
+
+# ---- A_debate（生成者-批评者-修订）：run_debate 批编排 -----------------------
+# 夹具沿用本文件既有 conn/info_dir（run_multi 段）；OK0/ATK 字面量与
+# tests/agentline/test_debate.py 同源复制（同一份 ok 预测/攻击语义）。
+
+
+_DEB_OK0 = json.dumps({"p_home": 0.5, "p_draw": 0.3, "p_away": 0.2,
+                       "p_over25": 0.5, "confidence": 0.6,
+                       "reasoning_digest": "d", "sources": []})
+_DEB_ATK = json.dumps({"attacks": [{"label": "overconfidence", "reason": "r",
+                                    "severity": 0.8}]})
+
+
+def test_run_debate_happy_and_idempotent(conn, info_dir, monkeypatch):
+    from fa.agentline.orchestrate import run_debate
+    seq = [_DEB_OK0, _DEB_ATK, "垃圾"]   # v0 ok → 批评 ok → 修订失败 → 终版=v0
+    profiles = []
+
+    def fake_run(prompt, profile, timeout_s=None):
+        profiles.append(profile)
+        return (seq.pop(0), None, 0.01)
+
+    monkeypatch.setattr(runner_mod, "run_headless", fake_run)
+    counts = run_debate(conn, info_dir, limit=None)
+    assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+    # profile 透传（run_multi 同款不变量）：生成/批评/修订三次调用全走 A_base
+    assert len(profiles) == 3
+    assert set(profiles) == {"fa-agent-base"}
+    row = conn.execute("SELECT budget_exhausted, p_home FROM"
+                       " agentline_predictions WHERE line='A_debate'"
+                       " AND attributor=1").fetchone()
+    assert row["budget_exhausted"] == 1 and abs(row["p_home"] - 0.5) < 1e-9
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_debate_rounds").fetchone()["c"] == 3
+    run2 = conn.execute("SELECT COUNT(*) c FROM agentline_runs"
+                        " WHERE line='A_debate'").fetchone()["c"]
+    # 幂等重跑：ok 行已存在 → 无新调用、无新轮行（run 台账照记）
+    counts2 = run_debate(conn, info_dir)
+    assert counts2["ok"] == 0
+    assert len(seq) == 0                # 首跑恰好消费 3 次调用，无多余 dsh 调用
+    assert conn.execute("SELECT COUNT(*) c FROM"
+                        " agentline_debate_rounds").fetchone()["c"] == 3
+    assert conn.execute("SELECT COUNT(*) c FROM agentline_runs"
+                        " WHERE line='A_debate'").fetchone()["c"] == run2 + 1
+
+
+def test_run_debate_summary_carries_budget_and_early_stop(conn, info_dir,
+                                                          monkeypatch):
+    """runs.summary 须含批级 n_calls / budget_exhausted / early_stop 计数。"""
+    from fa.agentline import orchestrate
+    seq = [_DEB_OK0, _DEB_ATK, _DEB_OK0]     # v1==v0：delta 0 < ε → 提前终止
+    monkeypatch.setattr(orchestrate.runner_mod, "run_headless",
+                        lambda p, prof, timeout_s=None: (seq.pop(0), None, 0.01))
+    counts = orchestrate.run_debate(conn, info_dir, limit=None)
+    assert counts == {"ok": 1, "parse_fail": 0, "timeout": 0, "error": 0}
+    run_row = conn.execute("SELECT * FROM agentline_runs"
+                           " WHERE line='A_debate'").fetchone()
+    summary = json.loads(run_row["summary"])
+    assert summary["n_calls"] == 3 and summary["early_stop"] == 1
+    assert summary["budget_exhausted"] == 0
+    assert summary["n_todo"] == 1
+    pred = conn.execute("SELECT budget_exhausted FROM agentline_predictions"
+                        " WHERE line='A_debate'").fetchone()
+    assert pred["budget_exhausted"] == 0
+
+
+def test_run_debate_crash_leaves_run_row_with_partial_counts(conn, info_dir,
+                                                             monkeypatch):
+    """批中崩溃（info JSON 损坏致 json.loads 抛错）也必须先留 run 台账（中断位
+    + 已累计计数与批级 n_calls）再抛——run_line 同型（先例 4a8b05a），否则留下
+    「predictions>0 且 runs=0」的无痕中断。"""
+    from fa.agentline.orchestrate import run_debate
+    (info_dir / "11.json").write_text("{损坏:非 JSON", encoding="utf-8")
+    seq = [_DEB_OK0, _DEB_ATK, _DEB_OK0]     # 场 10 完整走完一轮辩论链
+    monkeypatch.setattr(runner_mod, "run_headless",
+                        lambda p, prof, timeout_s=None: (seq.pop(0), None, 0.01))
+    with pytest.raises(json.JSONDecodeError):
+        run_debate(conn, info_dir)                    # 异常照抛（不吞）
+    assert seq == []                                  # 场 10 的 3 次调用已发生
+    run_row = conn.execute("SELECT * FROM agentline_runs"
+                           " WHERE line='A_debate'").fetchone()
+    assert run_row is not None                        # 台账已留
+    assert run_row["n_ok"] == 1                       # 已完成场次如实计数
+    summary = json.loads(run_row["summary"])
+    assert summary["interrupted_match_id"] == 11      # 中断位可定位续跑
+    assert summary["n_calls"] == 3 and summary["n_todo"] == 2   # 批级计数照记

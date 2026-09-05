@@ -1,10 +1,12 @@
-"""五对照评测（设计 §8）：线 P / A_base / A_enh / A_multi / 市场，同一判据。
+"""六对照评测（设计 §8 + 2026-09-05 设计 §2.5）：线 P / A_base / A_enh /
+A_multi / A_debate / 市场收盘，同批同判据。
 
 行适配原则：agentline 的 p_* 覆盖 bp 行拷贝，mkt_*（Pinnacle 收盘去水）、
 odds_*、outcome、total_goals 原样保留——evaluate 与 candidates 的入参
 schema 完全复用，评测代码零改动（市场是所有评估的对照线，spec §8.2）。
 """
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -60,7 +62,8 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
     cmp = {"n": len(bp), "P": e_p,
            "market": {"ll": e_p["market_ll"]}}
     roi_rows = {"P": bp}
-    for line, attr in (("A_base", 1), ("A_enh", 1), ("A_multi", 0)):
+    for line, attr in (("A_base", 1), ("A_enh", 1), ("A_multi", 0),
+                       ("A_debate", 1)):
         ag = _fetch_agent(conn, line, leagues, seasons, attributor=attr)
         rows = merge_rows(bp, ag)
         # evaluate 自带该子集的 market_ll——报告按行展示，分母不再混用全量值
@@ -82,7 +85,63 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
     cmp["audit"]["multi_members"] = len(multi)
     cmp["audit"]["multi_member_ok"] = sum(
         1 for r in multi if r["status"] == "ok")
+    cmp["debate"] = debate_gain(conn, leagues, seasons)
     return cmp
+
+
+def debate_gain(conn, leagues=None, seasons=None) -> dict:
+    """修订增益（2026-09-05 设计 §2.5）：v0 vs 终版同场对比 + 分歧相关性。
+
+    v0 取 rounds 表 round=0 的 generator ok 行 payload；终版取 predictions
+    的 A_debate ok 行。rho = 每场最大攻击 severity 与修订幅度（三项 L1）的
+    Spearman 相关（n<3 或无可比对 → None）——高攻击低修订=固执、低攻击高
+    修订=无主见，两向都如实报。零方差（如整批提前终止 → revs 全 0）时
+    Spearman 未定义返回 nan，如实记 None，不渲染 ρ=nan（仿 retro._mwu_p）。
+    """
+    from fa.backtest.metrics import fetch_predictions
+    bp = fetch_predictions(conn, leagues, seasons)
+    finals = _fetch_agent(conn, "A_debate", leagues, seasons, attributor=1)
+    by_mid = {r["match_id"]: r for r in finals}
+    if not by_mid:
+        return {"n": 0}
+    v0 = {r["match_id"]: json.loads(r["payload_json"]) for r in conn.execute(
+        "SELECT match_id, payload_json FROM agentline_debate_rounds"
+        " WHERE round=0 AND role='generator' AND status='ok'")}
+    v0_rows = []
+    for m, f in by_mid.items():
+        if m in v0:
+            r = dict(f)
+            for k in ("p_home", "p_draw", "p_away", "p_over25"):
+                r[k] = v0[m][k]
+            v0_rows.append(r)
+    n = len(v0_rows)
+    if n == 0:
+        return {"n": 0}
+    e_final = evaluate(merge_rows(bp, list(by_mid.values())))
+    e_v0 = evaluate(merge_rows(bp, v0_rows))
+    sevs, revs = [], []
+    for m, f in by_mid.items():
+        if m not in v0:
+            continue
+        atks = [a for r in conn.execute(
+            "SELECT payload_json FROM agentline_debate_rounds"
+            " WHERE match_id=? AND role='critic' AND status='ok'", (m,))
+                for a in json.loads(r["payload_json"]).get("attacks", [])]
+        if not atks:
+            continue
+        sevs.append(max(a["severity"] for a in atks))
+        revs.append(sum(abs(f[k] - v0[m][k])
+                        for k in ("p_home", "p_draw", "p_away")))
+    rho = None
+    if len(sevs) >= 3:
+        from scipy.stats import spearmanr
+        rho_raw = float(spearmanr(sevs, revs).statistic)
+        # 全平手/单侧零方差（如整批提前终止 → revs 全 0）时 Spearman 未定义
+        # 返回 nan——仿 retro._mwu_p 口径如实记 None，不让 nan 漏进报告渲染
+        # 成 ρ=nan；n_rho 照报（ρ=—（n=5）= 有可比对但向量退化，完整披露）。
+        rho = None if math.isnan(rho_raw) else rho_raw
+    return {"n": n, "v0_ll": e_v0["model_ll"], "final_ll": e_final["model_ll"],
+            "rho": rho, "n_rho": len(sevs)}
 
 
 _FOOTNOTE = ("> 各行比值在其自身 n 场子集内计算，跨线直比无效；"
@@ -96,7 +155,7 @@ def render_report(cmp: dict, out_path: Path) -> None:
              f"样本 n={cmp['n']}（线 P 与线 A 交集见各线 n）", "",
              "| 线 | n | log-loss | Brier | 子集市场 ll | vs 子集市场 |",
              "|---|---|---|---|---|---|"]
-    for k in ("P", "A_base", "A_enh", "A_multi"):
+    for k in ("P", "A_base", "A_enh", "A_multi", "A_debate"):
         e = cmp.get(k)
         if e is None:
             continue          # 旧形态 dict 无该线：宁缺一行，不虚报 n=0
@@ -131,6 +190,16 @@ def render_report(cmp: dict, out_path: Path) -> None:
     lines += ["", f"> A_multi 为多成员确定性聚合（分量中位数）；成员行单独落库"
                   f"可计分（本批成员 {mm if mm is not None else '—'} 行 / "
                   f"ok {mo if mo is not None else '—'}）"]
+    # 修订增益段（A_debate 计划 T8，2026-09-05 设计 §2.5）：v0→终版的 log-loss
+    # 变化与「攻击强度-修订幅度」相关性都要可见——rho=None（无可比对）不是缺失
+    # 而是如实占位，固执/无主见两个方向的信号都必须自己说破，不做单边解读。
+    d = cmp.get("debate", {})
+    if d.get("n"):
+        rho_s = f"{d['rho']:+.2f}" if d.get("rho") is not None else "—"
+        lines += ["", f"> A_debate 修订增益：v0 ll={d['v0_ll']:.4f} → "
+                      f"终版 ll={d['final_ll']:.4f}（n={d['n']}）；"
+                      f"攻击-修订相关性 ρ={rho_s}（n={d.get('n_rho', 0)}，"
+                      f"高攻击低修订=固执 / 低攻击高修订=无主见，均为实测信号）"]
     lines += ["", _FOOTNOTE, ""]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")
