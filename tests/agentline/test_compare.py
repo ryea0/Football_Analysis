@@ -451,6 +451,29 @@ def conn_div_flat(tmp_path):
     yield from _conn_with(tmp_path, "divflat", seed)
 
 
+_DIV_SEVS = ((1, 0.9, 0.70), (2, 0.8, 0.65), (3, 0.7, 0.60),
+             (4, 0.6, 0.55), (5, 0.5, 0.50),      # 恰 0.5 → 高烈度（≥0.5 预注册）
+             (6, 0.49, 0.45), (7, 0.4, 0.40), (8, 0.3, 0.35),
+             (9, 0.2, 0.30), (10, 0.1, 0.25))
+
+
+def _atk(sev):
+    return json.dumps({"attacks": [{"label": "overconfidence",
+                                    "reason": "r", "severity": sev}]})
+
+
+@pytest.fixture()
+def conn_div_sev_split(tmp_path):
+    """10 场攻击 + 1 场空 attacks：高烈度（≥0.5，含恰 0.5 边界场 mid 5）5 场
+    vs 低烈度（<0.5）5 场，终版概率各不相同 → 两组 log-loss 非退化，两侧
+    n≥5 触发 mwu_p_sev；空 attacks 场单列 n_no_attack 不进检验。"""
+    def seed(conn):
+        for mid, sev, ph in _DIV_SEVS:
+            _div_seed(conn, mid, _atk(sev), ph)
+        _div_seed(conn, 11, _ATK_NONE, 0.5)
+    yield from _conn_with(tmp_path, "divsev", seed)
+
+
 def test_compare_lines_includes_division(conn_with_div_rows):
     cmp = compare_lines(conn_with_div_rows)
     assert "A_division" in cmp and cmp["A_division"]["n"] >= 1
@@ -479,7 +502,9 @@ def test_division_stratified_excludes_non_ok_finals(conn_with_div_rows):
 def test_division_stratified_empty(conn_empty):
     from fa.agentline.compare import division_stratified
     s = division_stratified(conn_empty)
-    assert s == {"n_flagged": 0, "n_unflagged": 0}
+    # 空库：二分标签 + severity 三组计数全 0；ll 与 p 一律不出键
+    assert s == {"n_flagged": 0, "n_unflagged": 0,
+                 "n_high": 0, "n_low": 0, "n_no_attack": 0}
 
 
 def test_division_stratified_all_ties_mwu_p_is_none_not_nan(conn_div_flat):
@@ -491,6 +516,45 @@ def test_division_stratified_all_ties_mwu_p_is_none_not_nan(conn_div_flat):
     assert s["n_flagged"] == 5 and s["n_unflagged"] == 5
     assert s["ll_flagged"] == s["ll_unflagged"]     # 全平手前提成立
     assert s["mwu_p"] is None
+
+
+def test_division_stratified_severity_split(conn_div_sev_split):
+    """severity 加权分层（spec §3.4 增补）：场次最大攻击 severity ≥0.5 高
+    烈度 / <0.5 低烈度 / 空 attacks 单列。边界场（恰 0.5，mid 5）必须归高
+    烈度组——n_high=5 是边界判定的承重断言（错归低则两侧都凑不齐 n≥5，
+    mwu_p_sev 不出键）。二分标签键保留不动：10 场有攻击全进有标签层。"""
+    from fa.agentline.compare import division_stratified
+    s = division_stratified(conn_div_sev_split)
+    assert s["n_high"] == 5 and s["n_low"] == 5 and s["n_no_attack"] == 1
+    assert s["n_flagged"] == 10 and s["n_unflagged"] == 1
+    assert "mwu_p" not in s          # 无标签层 n=1<5：原 MWU 照旧不跑
+    assert 0 < s["mwu_p_sev"] < 1    # 高 vs 低两侧 n≥5 且 ll 非退化
+    assert 0 < s["ll_high"] and 0 < s["ll_low"]
+    assert s["ll_high"] != s["ll_low"]
+
+
+def test_division_stratified_severity_small_sample_no_p(conn_with_div_rows):
+    """仅 1 场有攻击（sev 0.9）：高烈度组出 ll，低烈度组空 → ll_low 不出键
+    （不虚报空层均值），两侧不同时 n≥5 → mwu_p_sev 不出键；空 attacks 的
+    5 场全部单列 n_no_attack，不挤进任一检验组。"""
+    from fa.agentline.compare import division_stratified
+    s = division_stratified(conn_with_div_rows)
+    assert s["n_high"] == 1 and s["n_low"] == 0 and s["n_no_attack"] == 5
+    assert "ll_high" in s
+    assert "ll_low" not in s and "mwu_p_sev" not in s
+
+
+def test_report_renders_severity_stratified(conn_div_sev_split, tmp_path):
+    """severity 视角入报告：三组计数 + 两侧 ll + MWU p 值 + 阈值 0.5 预注册
+    都要可见；p 不得渲染成 nan/None。"""
+    from fa.agentline.compare import compare_lines
+    out = tmp_path / "r.md"
+    render_report(compare_lines(conn_div_sev_split), out)
+    text = out.read_text(encoding="utf-8")
+    assert "severity 加权：高烈度 n=5" in text
+    assert "低烈度 n=5" in text and "无攻击 n=1" in text
+    assert "阈值 0.5 预注册" in text
+    assert "p=nan" not in text and "p=None" not in text
 
 
 def test_report_renders_division_row_and_stratified(conn_with_div_rows,
@@ -509,6 +573,10 @@ def test_report_renders_division_row_and_stratified(conn_with_div_rows,
     # 分层段必须在全局免责脚注之前（脚注前追加，不吞掉既有小样本免责）
     assert (text.index("A_division 质询分层")
             < text.index("各行比值在其自身 n 场子集内计算"))
+    # severity 视角同一报告内并行可见：低烈度组空 → ll 以「—」占位不虚报，
+    # 小样本占位措辞与二分标签视角同源
+    assert "severity 加权：高烈度 n=1" in text and "无攻击 n=5" in text
+    assert "低烈度 n=0（ll=—）" in text
 
 
 def test_report_renders_degenerate_mwu_placeholder(conn_div_flat, tmp_path):
