@@ -7,13 +7,13 @@
 """
 import json
 
-from fa.agentline.contract import parse_attack, parse_history_points, \
-    parse_prediction
+from fa.agentline.contract import ATTACK_LABELS, RELEVANCE_LEVELS, \
+    parse_attack, parse_history_points, parse_prediction
 from fa.agentline.runner import build_prompt
 
-RELEVANCE_ENUM = "high|medium|low"
-ATTACK_ENUM_HELP = ("overconfidence|missing_context|alt_explanation"
-                    "|internal_inconsistency|evidence_weak")
+# 枚举串 join 自契约常量（单一事实源，终审 Minor#1）：改词表只动 contract.py
+RELEVANCE_ENUM = "|".join(RELEVANCE_LEVELS)
+ATTACK_ENUM_HELP = "|".join(ATTACK_LABELS)
 
 
 def build_archivist_prompt(info_set: dict) -> str:

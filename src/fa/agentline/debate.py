@@ -6,11 +6,11 @@
 """
 import json
 
-from fa.agentline.contract import parse_attack, parse_prediction
+from fa.agentline.contract import ATTACK_LABELS, parse_attack, parse_prediction
 from fa.agentline.runner import build_prompt
 
-ATTACK_ENUM_HELP = ("overconfidence|missing_context|alt_explanation"
-                    "|internal_inconsistency|evidence_weak")
+# 枚举串 join 自契约常量（单一事实源，终审 Minor#1）：改词表只动 contract.py
+ATTACK_ENUM_HELP = "|".join(ATTACK_LABELS)
 
 
 def build_critic_prompt(info_set: dict, prev_pred: str,
