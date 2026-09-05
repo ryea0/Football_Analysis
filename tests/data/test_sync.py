@@ -135,6 +135,25 @@ def test_sync_report_dataclass_shape():
             "missing", "file_errors", "rows_no_date"} <= names
 
 
+def test_current_season_always_refreshed(conn, monkeypatch, tmp_path):
+    """当前赛季分区无条件强制重下（spec v0.12 §9.5）——daily 不传 refresh 也能拿到新赛果。"""
+    flags: dict[tuple[str, int], bool] = {}
+    monkeypatch.setattr("fa.data.sync._current_season_start", lambda: 1996)
+
+    def fake_download(league, start_year, refresh=False):
+        flags[(league, start_year)] = refresh
+        if (league, start_year) not in (("E0", 1995), ("E0", 1996)):
+            return None
+        p = tmp_path / f"{league}_{start_year}.csv"
+        p.write_text(CSV_A.replace("1995", str(start_year)))
+        return p
+
+    monkeypatch.setattr("fa.data.sync.download_csv", fake_download)
+    sync_history(conn, seasons_from=1995)             # 不传 refresh
+    assert flags[("E0", 1996)] is True                # 当前赛季：强制重下
+    assert flags[("E0", 1995)] is False               # 历史赛季：走缓存
+
+
 def test_shrink_guard_lands_in_file_errors_not_crash(conn, monkeypatch, tmp_path):
     """收缩保护经 sync 记 file_errors（run#9 实况防线）：不抛、分区原样。"""
     csv_two = (CSV_A.splitlines()[0] + "\n" + CSV_A.splitlines()[1] + "\n"

@@ -27,6 +27,13 @@ def _current_season_start() -> int:
 
 def sync_history(conn: sqlite3.Connection, seasons_from: int = SEASONS_FROM,
                  refresh: bool = False) -> SyncReport:
+    """下载并入库历史+当前赛季 CSV（幂等：分区内容哈希跳过）。
+
+    当前赛季分区（``year == 当前赛季起始年``）无条件 ``refresh=True`` 重下
+    （spec v0.12 §9.5）——否则 daily 永远读陈旧缓存、赛果零入库（2026-09-05
+    实况：缓存停在 08-31，九月 158 注 paper 全 pending）；历史赛季维持
+    缓存 + 哈希跳过，``refresh=True`` 时全量重下。
+    """
     rep = SyncReport()
     to_year = _current_season_start()
     for league in LEAGUES:
@@ -34,7 +41,9 @@ def sync_history(conn: sqlite3.Connection, seasons_from: int = SEASONS_FROM,
             # 单文件容错：一个赛季失败（下载/解析/入库）只记账，不中断整个 sync。
             # ingest_rows 失败时自回滚，这里无需再回滚，只保证异常不外溢。
             try:
-                path = download_csv(league, year, refresh=refresh)
+                # 当前赛季是 live 数据：无条件强制重下；refresh 形参只额外
+                # 作用到历史赛季
+                path = download_csv(league, year, refresh=refresh or year == to_year)
                 if path is None:
                     rep.files_missing += 1
                     rep.missing.append((league, year))
