@@ -10,8 +10,10 @@ from pathlib import Path
 from fa.agentline import runner as runner_mod
 from fa.agentline.contract import parse_prediction
 from fa.agentline.debate import run_match_debate
+from fa.agentline.division import derive_flags, run_match_division
 from fa.agentline.runner import _PROFILE_LINE, build_prompt
-from fa.agentline.store import save_debate_round, save_prediction, save_run
+from fa.agentline.store import save_debate_round, save_division_jump, \
+    save_prediction, save_run
 
 # 审计常量（设计 §6 harness/model 列）：值来自 Task 2 spike 实测（附录 A）——
 # dsh 版本 0.1.1-rc.2（npm 钉死版，见附录 A.1）；模型为 ARK plan 端点的
@@ -155,5 +157,55 @@ def run_debate(conn: sqlite3.Connection, info_dir: Path,
                  started_at=t0)
         raise
     save_run(conn, "A_debate", profile, MODEL, counts, {**summary, **agg},
+             started_at=t0)
+    return counts
+
+
+def run_division(conn: sqlite3.Connection, info_dir: Path,
+                 limit: int | None = None) -> dict:
+    """A_division（2026-09-05 设计 §3）：三跳串行，质询只落 flag 不改数。
+
+    幂等：line='A_division' 且 attributor=1 已 ok 的场次跳过（jumps 行不
+    判重——重跑覆盖，与 run_multi 成员行语义一致）。批中崩溃留台账再抛
+    （run_line/run_debate 同型：防「predictions>0 且 runs=0」无痕中断）。
+    """
+    profile = _PROFILE_LINE["A_base"]
+    done = {r["match_id"] for r in conn.execute(
+        "SELECT match_id FROM agentline_predictions"
+        " WHERE line='A_division' AND attributor=1 AND status='ok'")}
+    todo = sorted(int(p.stem) for p in info_dir.glob("*.json")
+                  if p.stem.isdigit() and int(p.stem) not in done)
+    if limit is not None:
+        todo = todo[:limit]
+    counts = {"ok": 0, "parse_fail": 0, "timeout": 0, "error": 0}
+    agg = {"n_calls": 0, "n_flagged": 0}
+    from fa.agentline.store import _now
+    t0 = _now()                       # 台账起点＝批次起点，非批尾落库时刻
+    summary = {"n_todo": len(todo), "info_dir": str(info_dir)}
+    try:
+        for mid in todo:
+            info = json.loads((info_dir / f"{mid}.json").read_text(
+                encoding="utf-8"))
+            res = run_match_division(
+                lambda p: runner_mod.run_headless(p, profile), info)
+            for row in res["jumps"]:
+                save_division_jump(conn, mid, row["jump"], row["role"],
+                                   row["payload"], row["raw"], row["status"],
+                                   row["dur"], _HARNESS, MODEL)
+            save_prediction(conn, mid, "A_division", res["final"], "",
+                            _HARNESS, MODEL,
+                            sum(r["dur"] for r in res["jumps"]),
+                            attributor=1)
+            counts[res["final"]["status"]] += 1
+            agg["n_calls"] += res["n_calls"]
+            # flags 单一事实源＝derive_flags（评测同款口径）：跳失败也记
+            # flag，故按「任一 flag」真值计场。
+            agg["n_flagged"] += 1 if derive_flags(res["jumps"]) else 0
+    except Exception:
+        save_run(conn, "A_division", profile, MODEL, counts,
+                 {**summary, **agg, "interrupted_match_id": mid},
+                 started_at=t0)
+        raise
+    save_run(conn, "A_division", profile, MODEL, counts, {**summary, **agg},
              started_at=t0)
     return counts
