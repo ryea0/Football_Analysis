@@ -6,7 +6,7 @@
 判据设计为**纯查询、不依赖时钟**：取最近两次成功（ok / degraded_ok）daily 的
 ``started_at`` 间隔，间隔即漏跑 / 连续失败的证据——测试无需注入 now。
 """
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -193,3 +193,112 @@ def test_cron_wrapper_evolve_branch_bash_syntax():
     proc = subprocess.run(["bash", "-n", str(root / "scripts" / "fa_cron.sh")],
                           capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+# ------------------------------------------------- 数据链巡检（spec v0.12 §9.6）
+
+
+def _seed_bet_chain(conn, kickoff_utc: str, bet_status: str = "pending"):
+    """种一条 runs→fixtures→recommendations→bets 全链（FK ON，缺一不可）。"""
+    conn.execute(
+        "INSERT INTO runs (type, phase, started_at, status)"
+        " VALUES ('matchday', 'am', '2026-09-01T03:00:00Z', 'ok')")
+    run_id = conn.execute("SELECT MAX(id) id FROM runs").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, status,"
+        " created_at) VALUES ('E0', 'k1', 'oddsapi', ?, 'scheduled',"
+        " '2026-09-01T00:00:00Z')", (kickoff_utc,))
+    fx = conn.execute("SELECT MAX(id) id FROM fixtures").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market,"
+        " phase, model_p, market_p, best_odds, bookmaker, edge, ev,"
+        " kelly_stake_frac, created_at)"
+        " VALUES (?, ?, 'model_only', 'H', 'am', 0.4, 0.3, 2.5, 'b', 0.1,"
+        " 0.05, 0.01, '2026-09-01T03:00:00Z')", (run_id, fx))
+    rec = conn.execute("SELECT MAX(id) id FROM recommendations").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker,"
+        " odds_taken, stake, status)"
+        " VALUES (?, 'paper', '2026-09-01T03:00:00Z', 'b', 2.5, 10.0, ?)",
+        (rec, bet_status))
+    conn.commit()
+
+
+def _seed_match_row(conn, d: str):
+    conn.execute(
+        "INSERT OR IGNORE INTO teams (league, name) VALUES ('E0', 'Arsenal')")
+    conn.execute(
+        "INSERT OR IGNORE INTO teams (league, name) VALUES ('E0', 'West Ham')")
+    home = conn.execute("SELECT id FROM teams WHERE league='E0'"
+                        " AND name='Arsenal'").fetchone()["id"]
+    away = conn.execute("SELECT id FROM teams WHERE league='E0'"
+                        " AND name='West Ham'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
+        " fthg, ftag, raw_line) VALUES ('E0', 2026, ?, ?, ?, 1, 0, '{}')",
+        (d, home, away))
+    conn.commit()
+
+
+def test_check_matches_lag_alerts_when_results_frozen(env, monkeypatch):
+    """实况复刻：fixture 已开球到 09-04、matches 冻在 08-31 → 滞后 4 天 > 3 告警。"""
+    monkeypatch.setattr(ops, "_today", lambda: date(2026, 9, 5))
+    _seed_bet_chain(env.conn, "2026-09-04T19:00:00Z")   # 只为种出已开球 fixture
+    _seed_match_row(env.conn, "2026-08-31")
+    text = ops.check_matches_lag(env.conn)
+    assert text is not None and "滞后 4 天" in text and "2026-08-31" in text
+
+
+def test_check_matches_lag_silent_within_grace(env, monkeypatch):
+    """常规滞后（football-data 次日出赛果）不告警。"""
+    monkeypatch.setattr(ops, "_today", lambda: date(2026, 9, 5))
+    _seed_bet_chain(env.conn, "2026-09-04T19:00:00Z")
+    _seed_match_row(env.conn, "2026-09-03")
+    assert ops.check_matches_lag(env.conn) is None
+
+
+def test_check_matches_lag_silent_when_no_past_fixtures(env, monkeypatch):
+    """只有未来 fixture（含休赛期空表）→ 静默。"""
+    monkeypatch.setattr(ops, "_today", lambda: date(2026, 9, 5))
+    _seed_bet_chain(env.conn, "2026-09-06T19:00:00Z")
+    assert ops.check_matches_lag(env.conn) is None
+
+
+def test_check_matches_lag_alerts_when_matches_empty(env, monkeypatch):
+    monkeypatch.setattr(ops, "_today", lambda: date(2026, 9, 5))
+    _seed_bet_chain(env.conn, "2026-09-04T19:00:00Z")
+    text = ops.check_matches_lag(env.conn)
+    assert text is not None and "无任何赛果行" in text
+
+
+def test_check_stuck_bets_alerts_after_grace(env, monkeypatch):
+    monkeypatch.setattr(ops, "_today", lambda: date(2026, 9, 5))
+    _seed_bet_chain(env.conn, "2026-09-01T19:00:00Z")   # 开球 09-01，宽限线 09-02
+    text = ops.check_stuck_bets(env.conn)
+    assert text is not None and "1 注" in text
+
+
+def test_check_stuck_bets_silent_within_grace(env, monkeypatch):
+    monkeypatch.setattr(ops, "_today", lambda: date(2026, 9, 5))
+    _seed_bet_chain(env.conn, "2026-09-03T19:00:00Z")   # 09-03 ≥ 宽限线 09-02
+    assert ops.check_stuck_bets(env.conn) is None
+
+
+def test_check_stuck_bets_ignores_settled(env, monkeypatch):
+    monkeypatch.setattr(ops, "_today", lambda: date(2026, 9, 5))
+    _seed_bet_chain(env.conn, "2026-09-01T19:00:00Z", bet_status="lost")
+    assert ops.check_stuck_bets(env.conn) is None
+
+
+def test_run_watchdog_joins_alerts_into_one_push(env, monkeypatch):
+    """漏跑 + 滞留 pending 同时发生 → 两条文本合一条推送（赛果行就近种一行
+    让滞后检查保持静默，聚焦聚合行为本身）。"""
+    monkeypatch.setattr(ops, "_today", lambda: date(2026, 9, 5))
+    _seed(env.conn, "daily", None, _iso(T0), "ok")
+    _seed(env.conn, "daily", None, _iso(T0 + timedelta(hours=30)), "ok")
+    _seed_bet_chain(env.conn, "2026-09-01T19:00:00Z")
+    _seed_match_row(env.conn, "2026-09-01")
+    out = ops.run_watchdog(env.conn)
+    assert out["sent"] is True
+    assert out["alert"].count("⚠️") == 2 and "\n" in out["alert"]
+    assert env.pushed == [out["alert"]]

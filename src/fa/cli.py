@@ -1090,7 +1090,7 @@ def ops_alert_cmd(text: str = typer.Argument(..., help="告警正文")):
 
 @ops_app.command("watchdog")
 def ops_watchdog_cmd() -> None:
-    """daily 健诊：成功间隔超阈值（漏跑/连续失败）即告警（daily wrapper 收尾调用）"""
+    """daily 健诊：跑批间隔 + 数据链（赛果滞后/滞留 pending 注）三项巡检，异常即告警（daily wrapper 收尾调用）"""
     from fa.pipeline.ops import run_watchdog
     from fa.pipeline.reporting import last_error
 
@@ -1101,7 +1101,7 @@ def ops_watchdog_cmd() -> None:
         conn.close()
 
     if out["alert"] is None:
-        typer.echo("watchdog：无异常（daily 成功间隔在阈值内）")
+        typer.echo("watchdog：无异常（三项巡检通过）")
         return
     typer.echo(out["alert"])
     if not out["sent"]:
