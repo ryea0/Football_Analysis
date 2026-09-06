@@ -16,8 +16,25 @@ from fa.backtest.simulate import (ODDS_MAX, ODDS_MIN, candidates, simulate_flat,
                                   simulate_kelly)
 from fa.config import db_path
 
+# 策略轨排序参照（单一事实源：后端 STRATEGIES 常量）；若 import 失败（如未装
+# fa 核心依赖），fallback 到固定顺序，避免看板因缺依赖崩。
+try:
+    from fa.pipeline.value import STRATEGIES as _STRATEGIES
+except Exception:  # pragma: no cover
+    _STRATEGIES = ("model_only", "model_persona", "model_persona_nokb")
+
 # 北京日界（spec §9.6 全项目口径；固定 +8 无夏令时）——日期过滤/选项统一用它
 _BEIJING = timezone(timedelta(hours=8))
+
+
+def _median(vals: list[float]) -> float | None:
+    """纯 Python 中位数（避免 numpy/pandas 依赖 + 小列表零开销）。"""
+    if not vals:
+        return None
+    n = len(vals)
+    if n % 2 == 1:
+        return float(vals[n // 2])
+    return float((vals[n // 2 - 1] + vals[n // 2]) / 2.0)
 
 
 # 全站表列名双语映射（2026-09-04 用户实测反馈：推荐表列名全英文——补全为
@@ -62,6 +79,10 @@ COL_BILINGUAL = {
     # 页7 模拟键（simulate_flat / simulate_kelly）
     "staked": "投注额 staked", "returned": "回收 returned", "roi": "ROI",
     "final_bankroll": "终值 final", "max_drawdown_pct": "最大回撤 max DD",
+    # v2 分解表新增列（2026-09-07）
+    "win_rate": "胜率 win rate", "avg_odds": "平均赔率 avg odds",
+    "settled_date": "结算日 settled", "pnl": "盈亏 pnl",
+    "n_settled": "已结算 settled", "clv_median": "CLV中位 clv med",
 }
 
 
@@ -80,10 +101,12 @@ def connect_ro(path: Path | None = None) -> sqlite3.Connection:
 
 
 def b_summary(conn: sqlite3.Connection) -> dict:
-    """页1 总览：meta 两键 + paper 注汇总 + 额度序列。
+    """页1 总览：meta 两键 + paper 注汇总 + 额度序列 + 分轨汇总。
 
     pnl/staked 只计已结算注（pending 不进任何一侧；void 排除——零损益）；
     meta 键缺失返回 None（页面显示「未记录」而非 0，设计 §6）。
+    ``by_strategy`` 按策略轨分账：bankroll 取 meta 分轨键，其余指标从
+    bets 聚合，轨序同 ``_STRATEGIES``，缺数据的轨补零值。
     """
     def meta_float(key: str) -> float | None:
         row = conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -100,11 +123,63 @@ def b_summary(conn: sqlite3.Connection) -> dict:
     quota = conn.execute("""
         SELECT id, type, phase, status, started_at, credits_before, credits_after
         FROM runs ORDER BY id""").fetchall()
+
+    # 分轨汇总：bankroll 取 meta 分轨键，其余从 bets 按 strategy 聚合
+    by_strat_df = pd.read_sql_query("""
+        SELECT r.strategy AS strategy,
+               COUNT(*) AS n,
+               COALESCE(SUM(b.status = 'pending'), 0) AS n_pending,
+               COALESCE(SUM(b.status IN ('won', 'lost')), 0) AS n_settled,
+               COALESCE(SUM(b.status = 'won'), 0) AS n_won,
+               COALESCE(SUM(CASE WHEN b.status IN ('won', 'lost')
+                                 THEN COALESCE(b.return_amt, 0) - b.stake ELSE 0 END), 0.0) AS pnl,
+               COALESCE(SUM(CASE WHEN b.status IN ('won', 'lost')
+                                 THEN b.stake ELSE 0 END), 0.0) AS staked
+        FROM bets b JOIN recommendations r ON r.id = b.recommendation_id
+        WHERE b.mode = 'paper'
+        GROUP BY r.strategy""", conn)
+
+    by_strategy: dict = {}
+    for strat in _STRATEGIES:
+        row = by_strat_df[by_strat_df["strategy"] == strat]
+        if len(row):
+            r = row.iloc[0]
+            n_settled = int(r["n_settled"])
+            staked = float(r["staked"])
+            n_won = int(r["n_won"])
+            win_rate = (n_won / n_settled) if n_settled else None
+            roi = (float(r["pnl"]) / staked) if staked else None
+        else:
+            n_settled = 0
+            win_rate = None
+            roi = None
+
+        # CLV 中位：该轨所有已结算且有 clv 的注
+        clv_row = conn.execute("""
+            SELECT b.clv FROM bets b
+            JOIN recommendations r ON r.id = b.recommendation_id
+            WHERE b.mode = 'paper' AND r.strategy = ?
+              AND b.status IN ('won', 'lost') AND b.clv IS NOT NULL
+            ORDER BY b.clv""", (strat,)).fetchall()
+        clv_vals = [r["clv"] for r in clv_row]
+        clv_median = _median(clv_vals)
+
+        by_strategy[strat] = {
+            "bankroll": meta_float(f"paper_bankroll:{strat}"),
+            "n": int(row.iloc[0]["n"]) if len(row) else 0,
+            "n_settled": n_settled,
+            "n_pending": int(row.iloc[0]["n_pending"]) if len(row) else 0,
+            "win_rate": win_rate,
+            "roi": roi,
+            "clv_median": clv_median,
+        }
+
     return {"bankroll": meta_float("paper_bankroll"),
             "quota_remaining": meta_float("odds_quota_remaining"),
             "n_bets": agg["n"], "n_pending": agg["n_pending"],
             "pnl": agg["pnl"], "staked": agg["staked"],
-            "quota_series": [dict(r) for r in quota]}
+            "quota_series": [dict(r) for r in quota],
+            "by_strategy": by_strategy}
 
 
 def b_recommendations(conn: sqlite3.Connection) -> pd.DataFrame:
@@ -183,8 +258,10 @@ def _bj_days(df: pd.DataFrame, column: str) -> pd.Series:
 
 
 def b_ab_tracks(conn: sqlite3.Connection) -> dict:
-    """页3：两轨注数/ROI/CLV 中位数 + 按结算日累计 P&L（§6.6/§12.3）。
+    """页3：三轨注数/ROI/CLV 中位数 + 按结算日累计 P&L（§6.6/§12.3 + C 线对照）。
 
+    策略轨从数据动态发现，排序参照后端 STRATEGIES（单一事实源）；空库
+    仍返回三轨的零值骨架（保持 UI 三列布局稳定）。
     样本量语义交给页面展示（进度条 + 警示）；这里只算数，不判结论。
     """
     df = pd.read_sql_query("""
@@ -193,8 +270,12 @@ def b_ab_tracks(conn: sqlite3.Connection) -> dict:
         FROM bets b JOIN recommendations r ON r.id = b.recommendation_id
         WHERE b.mode = 'paper'""", conn)
     out: dict = {}
-    for strat in ("model_only", "model_persona"):
-        g = df[df["strategy"] == strat]
+    # 以 STRATEGIES 为骨架：缺数据的轨补零值，保证 UI 三列稳定
+    present = set(df["strategy"].unique()) if not df.empty else set()
+    strats = [s for s in _STRATEGIES if s in present] + \
+             [s for s in _STRATEGIES if s not in present]
+    for strat in strats:
+        g = df[df["strategy"] == strat] if not df.empty else df.iloc[0:0]
         settled = g[g["status"].isin(["won", "lost"])].sort_values("settled_at")
         pnl = float(settled["return_amt"].fillna(0).sum() - settled["stake"].sum()) if len(settled) else 0.0
         staked = float(settled["stake"].sum()) if len(settled) else 0.0
@@ -207,6 +288,172 @@ def b_ab_tracks(conn: sqlite3.Connection) -> dict:
                     "pnl": list((settled["return_amt"].fillna(0) - settled["stake"]).cumsum())},
         }
     return out
+
+
+def b_breakdown(conn: sqlite3.Connection, dim: str) -> pd.DataFrame:
+    """按 dim 维度聚合 paper 注的分轨统计（页2 盈亏分解面板）。
+
+    dim ∈ {"market", "league", "settled_date"}
+    返回列：strategy, <dim>, n, n_settled, win_rate, roi, clv_median, avg_odds
+
+    口径与 ``b_ab_tracks`` / ``settle_paper_bets`` 一致：
+    - settled = status IN ('won', 'lost')（void 不计入胜率/ROI 分母）
+    - ROI = pnl_sum / staked_sum（staked = 已结算注的 stake 合计）
+    - CLV 中位 = 已结算注（有 closing_odds 的）的 CLV 中位数
+    - settled_date 维度用**北京日**（spec §9.6 全项目口径）
+    """
+    if dim not in ("market", "league", "settled_date"):
+        raise ValueError(f"b_breakdown: dim 必须是 market/league/settled_date，got {dim!r}")
+
+    if dim == "market":
+        dim_col = "r.market"
+        dim_alias = "market"
+    elif dim == "league":
+        dim_col = "f.league"
+        dim_alias = "league"
+    else:  # settled_date
+        dim_col = "DATE(b.settled_at)"
+        dim_alias = "settled_date"
+
+    df = pd.read_sql_query(f"""
+        SELECT r.strategy AS strategy,
+               {dim_col} AS {dim_alias},
+               COUNT(*) AS n,
+               COALESCE(SUM(b.status IN ('won', 'lost')), 0) AS n_settled,
+               COALESCE(SUM(b.status = 'won'), 0) AS n_won,
+               COALESCE(SUM(CASE WHEN b.status IN ('won', 'lost')
+                                 THEN COALESCE(b.return_amt, 0) - b.stake ELSE 0 END), 0.0) AS pnl,
+               COALESCE(SUM(CASE WHEN b.status IN ('won', 'lost')
+                                 THEN b.stake ELSE 0 END), 0.0) AS staked,
+               COALESCE(AVG(CASE WHEN b.status IN ('won', 'lost')
+                                 THEN b.odds_taken END), 0.0) AS avg_odds
+        FROM bets b
+        JOIN recommendations r ON r.id = b.recommendation_id
+        JOIN fixtures f ON f.id = r.fixture_id
+        WHERE b.mode = 'paper'
+        GROUP BY r.strategy, {dim_alias}
+        ORDER BY r.strategy, {dim_alias}""", conn)
+
+    if df.empty:
+        # 空库契约：返回空 DataFrame 但列齐
+        return pd.DataFrame(columns=["strategy", dim_alias, "n", "n_settled",
+                                     "win_rate", "roi", "clv_median", "avg_odds",
+                                     "pnl"])
+
+    # 衍生列：胜率、ROI
+    df["win_rate"] = df.apply(
+        lambda r: r["n_won"] / r["n_settled"] if r["n_settled"] else None, axis=1)
+    df["roi"] = df.apply(
+        lambda r: r["pnl"] / r["staked"] if r["staked"] else None, axis=1)
+
+    # CLV 中位：按 strategy + dim 维度算
+    clv_df = pd.read_sql_query(f"""
+        SELECT r.strategy AS strategy,
+               {dim_col} AS {dim_alias},
+               b.clv
+        FROM bets b
+        JOIN recommendations r ON r.id = b.recommendation_id
+        JOIN fixtures f ON f.id = r.fixture_id
+        WHERE b.mode = 'paper'
+          AND b.status IN ('won', 'lost')
+          AND b.clv IS NOT NULL
+        ORDER BY r.strategy, {dim_alias}, b.clv""", conn)
+
+    if not clv_df.empty:
+        clv_med = clv_df.groupby(["strategy", dim_alias])["clv"].median().reset_index()
+        clv_med.rename(columns={"clv": "clv_median"}, inplace=True)
+        df = df.merge(clv_med, on=["strategy", dim_alias], how="left")
+    else:
+        df["clv_median"] = None
+
+    # settled_date 维度：UTC 日转北京日
+    if dim == "settled_date" and not df.empty and df["settled_date"].notna().any():
+        # SQL DATE() 返回 UTC 日期串；转北京日用 _bj_days
+        # （这里只有日期没有时间，先用 UTC 日期近似——实际上
+        # 结算事件发生在 UTC 某日，其北京日可能偏移。精确起见我们
+        # 重新用 settled_at 时间戳算北京日。）
+        # 注：上面 SQL 用 DATE(b.settled_at) 聚合是按 UTC 日桶，
+        # 这与 _bj_days 口径不一致。修正：重新按北京日聚合。
+        df = _breakdown_by_beijing_day(conn)
+        dim_alias = "settled_date"
+
+    # 策略轨排序（参照 STRATEGIES）
+    df["strategy"] = pd.Categorical(df["strategy"], categories=list(_STRATEGIES),
+                                    ordered=True)
+    df = df.sort_values(["strategy", dim_alias]).reset_index(drop=True)
+    df["strategy"] = df["strategy"].astype(str)
+
+    # 输出列对齐
+    keep = ["strategy", dim_alias, "n", "n_settled", "win_rate", "roi",
+            "clv_median", "avg_odds", "pnl"]
+    return df[keep]
+
+
+def _breakdown_by_beijing_day(conn: sqlite3.Connection) -> pd.DataFrame:
+    """settled_date 维度的北京日版本（b_breakdown 内部调用）。
+
+    从数据库读取全部已结算 paper 注的 settled_at（带时间），
+    在 Python 侧转北京日再聚合——避免 SQL 侧 DATE() 按 UTC 日桶与
+    全站北京日口径不一致。
+    """
+    df = pd.read_sql_query("""
+        SELECT r.strategy AS strategy, b.status, b.stake, b.return_amt,
+               b.clv, b.odds_taken, b.settled_at
+        FROM bets b
+        JOIN recommendations r ON r.id = b.recommendation_id
+        WHERE b.mode = 'paper'""", conn)
+
+    if df.empty:
+        return pd.DataFrame(columns=["strategy", "settled_date", "n", "n_settled",
+                                     "win_rate", "roi", "clv_median", "avg_odds"])
+
+    df["settled_date"] = _bj_days(df, "settled_at")
+    # 未结算的注 settled_at 为空 → 日期为 NaT → 排除
+    df = df[df["settled_date"].notna() & df["settled_at"].notna()].copy()
+
+    if df.empty:
+        return pd.DataFrame(columns=["strategy", "settled_date", "n", "n_settled",
+                                     "win_rate", "roi", "clv_median", "avg_odds"])
+
+    def agg(g):
+        settled = g[g["status"].isin(["won", "lost"])]
+        n_settled = len(settled)
+        n_won = int((settled["status"] == "won").sum())
+        staked = float(settled["stake"].sum()) if n_settled else 0.0
+        pnl = float((settled["return_amt"].fillna(0) - settled["stake"]).sum()) if n_settled else 0.0
+        clv_vals = sorted(settled["clv"].dropna().tolist())
+        return pd.Series({
+            "n": len(g),
+            "n_settled": n_settled,
+            "win_rate": n_won / n_settled if n_settled else None,
+            "roi": pnl / staked if staked else None,
+            "clv_median": _median(clv_vals),
+            "avg_odds": float(settled["odds_taken"].mean()) if n_settled else 0.0,
+            "pnl": pnl,
+        })
+
+    result = df.groupby(["strategy", "settled_date"]).apply(
+        agg, include_groups=False).reset_index()
+    # 输出列对齐（与 market/league 维度一致）
+    keep = ["strategy", "settled_date", "n", "n_settled", "win_rate", "roi",
+            "clv_median", "avg_odds", "pnl"]
+    result = result[[c for c in keep if c in result.columns]]
+    return result
+
+
+def b_pending(conn: sqlite3.Connection) -> pd.DataFrame:
+    """页1 在途注列表：paper pending 注 + fixture/strategy 信息，按开赛时间升序。"""
+    return pd.read_sql_query("""
+        SELECT b.id, r.strategy, r.market, f.league,
+               f.kickoff_utc, th.name AS home, ta.name AS away,
+               b.odds_taken, b.stake, b.placed_at
+        FROM bets b
+        JOIN recommendations r ON r.id = b.recommendation_id
+        JOIN fixtures f ON f.id = r.fixture_id
+        LEFT JOIN teams th ON th.id = f.home_team_id
+        LEFT JOIN teams ta ON ta.id = f.away_team_id
+        WHERE b.mode = 'paper' AND b.status = 'pending'
+        ORDER BY f.kickoff_utc ASC, b.id ASC""", conn)
 
 
 def b_runs(conn: sqlite3.Connection) -> pd.DataFrame:

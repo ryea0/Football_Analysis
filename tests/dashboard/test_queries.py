@@ -540,13 +540,21 @@ def test_col_bilingual_covers_all_table_columns(db, tmp_path):
     """全站列名双语映射（COL_BILINGUAL）完备性钉测：主要查询输出的每一列
     都必须有双语名——无豁免清单，漏译即测试红（用户实测反馈：推荐表列名
     全英文，2026-09-04）。"""
-    from queries import (COL_BILINGUAL, b_bets, b_recommendations, b_runs,
-                         b_unknown_names)
+    from queries import (COL_BILINGUAL, b_bets, b_breakdown, b_pending,
+                         b_recommendations, b_runs, b_unknown_names)
 
     _seed_rec_chain(db)                     # B 线查询用主夹具库
-    for fn in (b_recommendations, b_bets, b_runs, b_unknown_names):
+    for fn in (b_recommendations, b_bets, b_runs, b_unknown_names,
+               b_pending):
         missing = set(fn(db).columns) - set(COL_BILINGUAL)
         assert not missing, f"{fn.__name__} 有列未双语: {sorted(missing)}"
+    # b_breakdown 三个维度都测
+    for dim in ("market", "league", "settled_date"):
+        df = b_breakdown(db, dim)
+        if df.empty:
+            continue
+        missing = set(df.columns) - set(COL_BILINGUAL)
+        assert not missing, f"b_breakdown(dim={dim}) 有列未双语: {sorted(missing)}"
     # 页5/6/7 的指标键源自 backtest 预测行——独立库种 bp 行（避免与 B 线种子
     # 撞队名 UNIQUE）
     adb = connect(tmp_path / "a.db")
@@ -568,3 +576,261 @@ def test_col_bilingual_covers_all_table_columns(db, tmp_path):
             assert not missing7, f"页7 模拟键未双语: {sorted(missing7)}"
     finally:
         adb.close()
+
+
+# ======================================== v2 新增测试（2026-09-07）
+
+def _seed_three_tracks(db):
+    """三轨夹具：model_only / model_persona / model_persona_nokb 各 2 注
+    （1 won + 1 lost），手算基准见各用例断言。
+
+    各轨独立 recommendation 2 注 = 1 won + 1 lost：
+    - model_only:    won stake=stake 10 ret 25 clv +0.05 d1, lost stake 10 clv −0.02 d2
+    - model_persona: won stake 4 ret 12 clv +0.10 d1, lost stake 6 clv −0.04 d2
+    - model_persona_nokb: won stake 8 ret 20 clv +0.08 d1, lost stake 8 clv −0.01 d2
+    """
+    _seed_bline_base(db)  # rec 1/2（model_only / model_persona）+ fixture 1
+    db.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac, created_at)"
+        " VALUES (5, 1, 1, 'model_only', 'A', 'am', 0.40, 0.35, 3.0, 'Pinnacle',"
+        " 0.05, 0.20, 0.010, '2026-09-04T11:30:00'),"
+        " (6, 1, 1, 'model_persona', 'A', 'am', 0.40, 0.35, 3.0, 'Pinnacle',"
+        " 0.05, 0.20, 0.008, '2026-09-04T11:30:00'),"
+        " (7, 1, 1, 'model_persona_nokb', 'H', 'am', 0.55, 0.50, 2.5, 'Pinnacle',"
+        " 0.05, 0.175, 0.009, '2026-09-04T11:30:00'),"
+        " (8, 1, 1, 'model_persona_nokb', 'A', 'am', 0.40, 0.35, 2.5, 'Pinnacle',"
+        " 0.05, 0.20, 0.007, '2026-09-04T11:30:00')")
+    db.execute(
+        "INSERT INTO bets (id, recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status, settled_at, return_amt, closing_odds, clv)"
+        # model_only
+        " VALUES (20, 1, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 10.0, 'won',"
+        " '2026-09-05T06:30:00', 25.0, 2.38, 0.05),"
+        " (21, 5, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.0, 10.0, 'lost',"
+        " '2026-09-06T06:30:00', 0.0, 2.94, -0.02),"
+        # model_persona
+        " (22, 2, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.0, 4.0, 'won',"
+        " '2026-09-05T06:30:00', 12.0, 2.73, 0.10),"
+        " (23, 6, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.0, 6.0, 'lost',"
+        " '2026-09-06T06:30:00', 0.0, 2.88, -0.04),"
+        # model_persona_nokb
+        " (24, 7, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 8.0, 'won',"
+        " '2026-09-05T06:30:00', 20.0, 2.31, 0.08),"
+        " (25, 8, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 8.0, 'lost',"
+        " '2026-09-06T06:30:00', 0.0, 2.53, -0.01)")
+    db.commit()
+
+
+# —— b_ab_tracks 三轨测试 ——
+
+def test_b_ab_tracks_three_tracks(db):
+    """三轨全量：返回 3 键、排序正确（model_only → model_persona → model_persona_nokb）。"""
+    from queries import b_ab_tracks
+
+    _seed_three_tracks(db)
+    t = b_ab_tracks(db)
+    assert list(t.keys()) == ["model_only", "model_persona", "model_persona_nokb"]
+    # 各轨 2 注都已结算
+    for k in t:
+        assert t[k]["n"] == 2
+        assert t[k]["n_settled"] == 2
+    # nokb 手算：won +20-8=+12, lost -8 → pnl = +4, staked = 16, roi = 4/16 = 0.25
+    nokb = t["model_persona_nokb"]
+    assert nokb["roi"] == pytest.approx(4.0 / 16.0)
+    assert nokb["clv_median"] == pytest.approx((0.08 + (-0.01)) / 2)
+    assert nokb["cum"]["pnl"] == [pytest.approx(12.0), pytest.approx(4.0)]
+
+
+def test_b_ab_tracks_empty_three(db):
+    """空库返回三轨零值骨架（UI 三列不塌陷。"""
+    from queries import b_ab_tracks
+
+    t = b_ab_tracks(db)
+    assert set(t.keys()) == {"model_only", "model_persona", "model_persona_nokb"}
+    for k in t:
+        assert t[k]["n"] == 0 and t[k]["n_settled"] == 0
+        assert t[k]["roi"] is None and t[k]["clv_median"] is None
+        assert t[k]["cum"] == {"dates": [], "pnl": []}
+
+
+# —— b_summary by_strategy 测试 ——
+
+def test_b_summary_by_strategy(db):
+    """by_strategy 三轨分账：bankroll 独立、各指标独立计数正确。"""
+    from queries import b_summary
+
+    _seed_three_tracks(db)
+    set_meta(db, "paper_bankroll:model_only", "980.0")
+    set_meta(db, "paper_bankroll:model_persona", "1002.0")
+    set_meta(db, "paper_bankroll:model_persona_nokb", "996.0")
+    s = b_summary(db)
+
+    bs = s["by_strategy"]
+    assert set(bs.keys()) == {"model_only", "model_persona", "model_persona_nokb"}
+
+    mo = bs["model_only"]
+    assert mo["bankroll"] == 980.0
+    assert mo["n"] == 2 and mo["n_settled"] == 2 and mo["n_pending"] == 0
+    assert mo["win_rate"] == pytest.approx(0.5)       # 1 won / 2 settled
+    assert mo["roi"] == pytest.approx(5.0 / 20.0)   # pnl = (25-10) + (0-10) = 5
+    assert mo["clv_median"] == pytest.approx(0.015)   # (0.05 + (-0.02)) / 2
+
+    nokb = bs["model_persona_nokb"]
+    assert nokb["bankroll"] == 996.0
+    assert nokb["n"] == 2 and nokb["n_settled"] == 2
+    assert nokb["win_rate"] == pytest.approx(0.5)
+    assert nokb["roi"] == pytest.approx(4.0 / 16.0)   # (20-8) + (0-8) = 4
+    assert nokb["clv_median"] == pytest.approx(0.035)  # (0.08 + (-0.01)) / 2
+
+
+def test_b_summary_by_strategy_empty(db):
+    """空库 by_strategy 三轨全零，bankroll=None。"""
+    from queries import b_summary
+
+    s = b_summary(db)
+    bs = s["by_strategy"]
+    assert set(bs.keys()) == {"model_only", "model_persona", "model_persona_nokb"}
+    for k in bs:
+        assert bs[k]["bankroll"] is None
+        assert bs[k]["n"] == 0
+        assert bs[k]["n_settled"] == 0
+        assert bs[k]["n_pending"] == 0
+        assert bs[k]["win_rate"] is None
+        assert bs[k]["roi"] is None
+        assert bs[k]["clv_median"] is None
+
+
+# —— b_breakdown 三维度测试 ——
+
+def test_b_breakdown_market(db):
+    """market 维度：3 轨 × 2 市场（H/A）的交叉矩阵。"""
+    from queries import b_breakdown
+
+    _seed_three_tracks(db)
+    df = b_breakdown(db, "market")
+    assert not df.empty
+    assert set(df.columns) == {"strategy", "market", "n", "n_settled", "win_rate",
+                          "roi", "clv_median", "avg_odds", "pnl"}
+    # 三轨都有 H 和 A 两个市场
+    strategies = df["strategy"].unique().tolist()
+    assert len(strategies) == 3
+    # 排序正确
+    assert strategies == ["model_only", "model_persona", "model_persona_nokb"]
+    # model_only 有 H（won）和 A（lost）各一注
+    mo_h = df[(df["strategy"] == "model_only") & (df["market"] == "H")].iloc[0]
+    assert mo_h["n"] == 1 and mo_h["n_settled"] == 1
+    assert mo_h["win_rate"] == pytest.approx(1.0)
+    assert mo_h["roi"] == pytest.approx(15.0 / 10.0)  # (25-10) / 10
+    assert mo_h["avg_odds"] == pytest.approx(2.5)
+
+    mo_a = df[(df["strategy"] == "model_only") & (df["market"] == "A")].iloc[0]
+    assert mo_a["n"] == 1 and mo_a["n_settled"] == 1
+    assert mo_a["win_rate"] == pytest.approx(0.0)
+    assert mo_a["roi"] == pytest.approx(-10.0 / 10.0)  # -10 / 10 = -1.0
+
+
+def test_b_breakdown_league(db):
+    """league 维度：单联赛 E0，三轨都有数据。"""
+    from queries import b_breakdown
+
+    _seed_three_tracks(db)
+    df = b_breakdown(db, "league")
+    assert not df.empty
+    assert "league" in df.columns
+    assert (df["league"] == "E0").all()
+    assert len(df) == 3  # 三轨各一行
+
+
+def test_b_breakdown_settled_date(db):
+    """settled_date 维度：北京日口径，两日各三轨各有一注。"""
+    from queries import b_breakdown
+
+    _seed_three_tracks(db)
+    df = b_breakdown(db, "settled_date")
+    assert not df.empty
+    assert "settled_date" in df.columns
+    dates = sorted(df["settled_date"].unique())
+    # d1 = 2026-09-05T06:30:00Z = 北京 2026-09-05 14:30 → 北京日 09-05
+    # d2 = 2026-09-06T06:30:00Z = 北京 2026-09-06 14:30 → 北京日 09-06
+    assert dates == ["2026-09-05", "2026-09-06"]
+    # 每天三轨各一注，共 6 行
+    assert len(df) == 6
+    # 09-05 model_only：won，pnl = +15
+    mo_d1 = df[(df["strategy"] == "model_only") & (df["settled_date"] == "2026-09-05")].iloc[0]
+    assert mo_d1["n_settled"] == 1
+    assert mo_d1["pnl"] == pytest.approx(15.0)
+
+
+def test_b_breakdown_invalid_dim(db):
+    """非法 dim 抛 ValueError。"""
+    from queries import b_breakdown
+
+    with pytest.raises(ValueError):
+        b_breakdown(db, "invalid")
+
+
+def test_b_breakdown_empty(db):
+    """空库返回空 DataFrame（列齐）。"""
+    from queries import b_breakdown
+
+    for dim in ("market", "league", "settled_date"):
+        df = b_breakdown(db, dim)
+        assert df.empty
+        # 列名包含核心列（dim 列名随维度变化）
+        assert "strategy" in df.columns
+        assert "n" in df.columns
+        assert "n_settled" in df.columns
+        assert "win_rate" in df.columns
+        assert "roi" in df.columns
+        assert "clv_median" in df.columns
+        assert "avg_odds" in df.columns
+
+
+# —— b_pending 测试 ——
+
+def test_b_pending_list(db):
+    """在途注列表：按开赛时间升序、返回列齐。"""
+    from queries import b_pending
+
+    _seed_three_tracks(db)
+    # 加一条 pending 注（新 recommendation 避免 UNIQUE 约束）
+    db.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac, created_at)"
+        " VALUES (10, 1, 1, 'model_only', 'D', 'am', 0.25, 0.28, 3.6, 'Pinnacle',"
+        " -0.03, -0.08, 0.000, '2026-09-04T11:30:00')")
+    db.execute(
+        "INSERT INTO bets (id, recommendation_id, mode, placed_at, bookmaker, odds_taken,"
+        " stake, status)"
+        " VALUES (30, 10, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 3.6, 5.0, 'pending')")
+    db.commit()
+
+    df = b_pending(db)
+    assert len(df) == 1
+    row = df.iloc[0]
+    assert row["strategy"] == "model_only"
+    assert row["market"] == "D"
+    assert row["league"] == "E0"
+    assert row["home"] == "Team A"
+    assert row["away"] == "Team B"
+    assert row["odds_taken"] == pytest.approx(3.6)
+    assert row["stake"] == pytest.approx(5.0)
+    # 必须有 kickoff_utc（按它排序）
+    assert "kickoff_utc" in df.columns
+
+
+def test_b_pending_empty(db):
+    """无在途注返回空表。"""
+    from queries import b_pending
+
+    _seed_three_tracks(db)  # 全部已结算
+    assert b_pending(db).empty
+
+
+def test_b_pending_empty_db(db):
+    """空库不抛异常。"""
+    from queries import b_pending
+
+    assert b_pending(db).empty
+

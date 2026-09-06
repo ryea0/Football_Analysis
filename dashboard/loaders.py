@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import streamlit as st
 
 from queries import (a_calibration, a_overview, a_paper_sim, b_ab_tracks,
-                     b_bets, b_recommendations, b_runs, b_summary,
-                     b_unknown_names, connect_ro)
+                     b_bets, b_breakdown, b_pending, b_recommendations,
+                     b_runs, b_summary, b_unknown_names, connect_ro)
 
 
 def _run(fn, *args):
@@ -44,6 +44,16 @@ def ab_tracks() -> dict:
 @st.cache_data(ttl=300)
 def runs():
     return _run(b_runs)
+
+
+@st.cache_data(ttl=300)
+def breakdown(dim: str):
+    return _run(b_breakdown, dim)
+
+
+@st.cache_data(ttl=300)
+def pending_bets():
+    return _run(b_pending)
 
 
 @st.cache_data(ttl=300)

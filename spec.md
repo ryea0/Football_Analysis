@@ -319,7 +319,9 @@ M6 起同刻三落（§12.7）：第三轨 `model_persona_nokb` 为 C 线对照�
 - 只读连接（`mode=ro`）+ 独立依赖组（`uv run --group dashboard streamlit run dashboard/app.py`）；指标口径单一来源——复用 `backtest/metrics` 与 `backtest/simulate`，看板不另写公式
 - 看板是**视图不是证据源**：结论仍以 runs 落库记录与 m*/判决文档为准
 
-paper bankroll 与上表指标按 `strategy` 分轨统计（model_only / model_persona 各一本，初始各 1000）——§12.3 预注册判据的分轨对比口径（M4 裁定，2026-09-04：分轨隔离使一轨盈余不放大另一轨仓位，A/B 对比不失真）。
+paper bankroll 与上表指标按 `strategy` 分轨统计（model_only / model_persona / model_persona_nokb 各一本，初始各 1000）——§12.3 预注册判据的分轨对比口径（M4 裁定，2026-09-04：分轨隔离使一轨盈余不放大另一轨仓位，A/B 对比不失真）。
+
+**v2 增强（2026-09-07）**：三轨化（nokb 对照轨接入页1/页2/页3）+ 多维盈亏分解（页2：分市场/分联赛/按日）+ 在途注列表（页1）；设计：`docs/superpowers/specs/2026-09-07-dashboard-v2-b-track-enhancement.md`。
 
 ---
 
