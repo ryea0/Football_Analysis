@@ -18,6 +18,92 @@ import streamlit as st
 from loaders import breakdown, paper_bets, recommendations
 from queries import COL_BILINGUAL, by_date, date_choices
 
+
+# —— 辅助函数（页内局部，不归 queries：纯 UI 层渲染）——
+def _render_breakdown_table(df: pd.DataFrame, dim_label: str, dim_col: str):
+    """market/league 维度的表格渲染：正 ROI 绿色、负 ROI 红色。"""
+    if df.empty:
+        st.info("暂无已结算数据 / No settled bets yet")
+        return
+
+    display = df.copy()
+    # 百分比列格式化
+    pct_cols = ["win_rate", "roi", "clv_median"]
+    for c in pct_cols:
+        if c in display.columns:
+            display[c] = display[c].map(
+                lambda x: "—" if x is None or (isinstance(x, float) and pd.isna(x))
+                else f"{x:+.2%}")
+
+    st.dataframe(display.rename(columns=COL_BILINGUAL),
+                 use_container_width=True, hide_index=True)
+
+    # 柱图：各策略在该维度上的 ROI 对比
+    fig = go.Figure()
+    for strat in sorted(df["strategy"].unique()):
+        sub = df[df["strategy"] == strat]
+        fig.add_trace(go.Bar(x=sub[dim_col], y=sub["roi"], name=strat,
+                             text=sub["roi"].map(
+                                 lambda x: "—" if x is None or pd.isna(x)
+                                 else f"{x:+.1%}"),
+                             textposition="outside"))
+    fig.update_layout(barmode="group", height=360,
+                      yaxis_title="ROI（已结算）",
+                      yaxis_tickformat=".1%",
+                      margin=dict(t=30, b=20))
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    st.plotly_chart(fig, use_container_width=True)
+    st.caption("样本不足 300 注时，ROI/CLV 数字仅供观察，不构成显著性结论。")
+
+
+def _render_daily_breakdown(df: pd.DataFrame):
+    """settled_date 维度：柱图（每日 P&L）+ 表格（分轨 P&L + 累计）。"""
+    if df.empty:
+        st.info("暂无已结算数据 / No settled bets yet")
+        return
+
+    # 柱图：各策略每日 P&L（分组）
+    fig = go.Figure()
+    for strat in sorted(df["strategy"].unique()):
+        sub = df[df["strategy"] == strat].sort_values("settled_date")
+        fig.add_trace(go.Bar(x=sub["settled_date"], y=sub["pnl"], name=strat,
+                             text=sub["pnl"].map(lambda x: f"{x:+.1f}"),
+                             textposition="outside"))
+    fig.update_layout(barmode="group", height=360,
+                      yaxis_title="当日 P&L Daily P&L",
+                      margin=dict(t=30, b=20))
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # 表格：日期 → 每轨当日 P&L + 累计 P&L（宽表格式）
+    strats = sorted(df["strategy"].unique())
+    dates = sorted(df["settled_date"].unique())
+
+    rows = []
+    cum = {s: 0.0 for s in strats}
+    for d in dates:
+        row = {"date": d}
+        for s in strats:
+            sub = df[(df["settled_date"] == d) & (df["strategy"] == s)]
+            daily_pnl = float(sub["pnl"].iloc[0]) if len(sub) else 0.0
+            n_bets = int(sub["n_settled"].iloc[0]) if len(sub) else 0
+            cum[s] += daily_pnl
+            row[f"{s}_daily"] = daily_pnl
+            row[f"{s}_n"] = n_bets
+            row[f"{s}_cum"] = cum[s]
+        rows.append(row)
+
+    wide = pd.DataFrame(rows)
+    display = pd.DataFrame({"日期 Date": wide["date"]})
+    for s in strats:
+        display[f"{s} 注数"] = wide[f"{s}_n"]
+        display[f"{s} 当日P&L"] = wide[f"{s}_daily"].map(lambda x: f"{x:+.2f}")
+        display[f"{s} 累计P&L"] = wide[f"{s}_cum"].map(lambda x: f"{x:+.2f}")
+
+    st.dataframe(display, use_container_width=True, hide_index=True)
+    st.caption("日期为北京日（spec §9.6 全项目口径）。样本不足 300 注时数字仅供观察。")
+
+
 st.header("B 线 · 推荐与台账 Recommendations & Ledger")
 try:
     recs = recommendations()
@@ -84,90 +170,3 @@ else:
                "所用。盈亏三态：won/lost=回报−注金、void=0（零损益）、pending=—"
                " / clv = odds_taken / closing − 1 (positive = beat the close); "
                "closing basis: Pinnacle first, Betfair exchange fallback")
-
-
-# —— 辅助函数（页内局部，不归 queries：纯 UI 层渲染）——
-def _render_breakdown_table(df: pd.DataFrame, dim_label: str, dim_col: str):
-    """market/league 维度的表格渲染：正 ROI 绿色、负 ROI 红色。"""
-    if df.empty:
-        st.info("暂无已结算数据 / No settled bets yet")
-        return
-
-    display = df.copy()
-    # 百分比列格式化（不改变数值，仅用于 st.dataframe 样式着色）
-    pct_cols = ["win_rate", "roi", "clv_median"]
-    for c in pct_cols:
-        if c in display.columns:
-            display[c] = display[c].map(
-                lambda x: "—" if x is None or (isinstance(x, float) and pd.isna(x))
-                else f"{x:+.2%}")
-
-    st.dataframe(display.rename(columns=COL_BILINGUAL),
-                 use_container_width=True, hide_index=True)
-
-    # 柱图：各策略在该维度上的 ROI 对比
-    fig = go.Figure()
-    for strat in sorted(df["strategy"].unique()):
-        sub = df[df["strategy"] == strat]
-        fig.add_trace(go.Bar(x=sub[dim_col], y=sub["roi"], name=strat,
-                             text=sub["roi"].map(
-                                 lambda x: "—" if x is None or pd.isna(x)
-                                 else f"{x:+.1%}"),
-                             textposition="outside"))
-    fig.update_layout(barmode="group", height=360,
-                      yaxis_title="ROI（已结算）",
-                      yaxis_tickformat=".1%",
-                      margin=dict(t=30, b=20))
-    fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig, use_container_width=True)
-    st.caption("样本不足 300 注时，ROI/CLV 数字仅供观察，不构成显著性结论。")
-
-
-def _render_daily_breakdown(df: pd.DataFrame):
-    """settled_date 维度：柱图（每日 P&L）+ 表格（分轨 P&L + 累计）。"""
-    if df.empty:
-        st.info("暂无已结算数据 / No settled bets yet")
-        return
-
-    # 柱图：各策略每日 P&L（堆叠）
-    fig = go.Figure()
-    for strat in sorted(df["strategy"].unique()):
-        sub = df[df["strategy"] == strat].sort_values("settled_date")
-        fig.add_trace(go.Bar(x=sub["settled_date"], y=sub["pnl"], name=strat,
-                             text=sub["pnl"].map(lambda x: f"{x:+.1f}"),
-                             textposition="outside"))
-    fig.update_layout(barmode="group", height=360,
-                      yaxis_title="当日 P&L Daily P&L",
-                      margin=dict(t=30, b=20))
-    fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig, use_container_width=True)
-
-    # 表格：日期 → 每轨当日 P&L + 累计 P&L（宽表格式）
-    strats = sorted(df["strategy"].unique())
-    dates = sorted(df["settled_date"].unique())
-
-    # 构造宽表
-    rows = []
-    cum = {s: 0.0 for s in strats}
-    for d in dates:
-        row = {"date": d}
-        for s in strats:
-            sub = df[(df["settled_date"] == d) & (df["strategy"] == s)]
-            daily_pnl = float(sub["pnl"].iloc[0]) if len(sub) else 0.0
-            n_bets = int(sub["n_settled"].iloc[0]) if len(sub) else 0
-            cum[s] += daily_pnl
-            row[f"{s}_daily"] = daily_pnl
-            row[f"{s}_n"] = n_bets
-            row[f"{s}_cum"] = cum[s]
-        rows.append(row)
-
-    wide = pd.DataFrame(rows)
-    # 格式化显示
-    display = pd.DataFrame({"日期 Date": wide["date"]})
-    for s in strats:
-        display[f"{s} 注数"] = wide[f"{s}_n"]
-        display[f"{s} 当日P&L"] = wide[f"{s}_daily"].map(lambda x: f"{x:+.2f}")
-        display[f"{s} 累计P&L"] = wide[f"{s}_cum"].map(lambda x: f"{x:+.2f}")
-
-    st.dataframe(display, use_container_width=True, hide_index=True)
-    st.caption("日期为北京日（spec §9.6 全项目口径）。样本不足 300 注时数字仅供观察。")

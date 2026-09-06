@@ -7,11 +7,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # dashboard/ 入 path
 
+from datetime import timedelta, timezone
+
+import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 from loaders import pending_bets, runs, summary
 from queries import COL_BILINGUAL
+
+_BEIJING = timezone(timedelta(hours=8))
+
+
+def _bj_time(utc_str: str) -> str:
+    """UTC ISO 串 → 北京时字符串（MM-DD HH:MM）。"""
+    try:
+        dt = pd.to_datetime(utc_str, utc=True)
+        return dt.tz_convert(_BEIJING).strftime("%m-%d %H:%M")
+    except Exception:
+        return str(utc_str)
+
 
 # 三轨显示标签
 STRAT_LABELS = {
@@ -83,7 +98,7 @@ with st.expander(f"在途注 Pending Bets（{s['n_pending']}）",
     else:
         # 开赛时间转北京时显示（原列是 UTC ISO 串）
         pend["kickoff_bj"] = pend["kickoff_utc"].map(
-            lambda x: pd_bj_time(x) if x else "—")
+            lambda x: _bj_time(x) if x else "—")
         front = ["kickoff_bj", "league", "home", "away", "market", "strategy",
                  "odds_taken", "stake"]
         ordered = [c for c in front if c in pend.columns] + \
@@ -98,14 +113,3 @@ if df.empty:
     st.caption("暂无 run 记录 / No runs yet")
 st.dataframe(df.rename(columns=COL_BILINGUAL), use_container_width=True,
              hide_index=True)
-
-
-def pd_bj_time(utc_str: str) -> str:
-    """UTC ISO 串 → 北京时字符串（YYYY-MM-DD HH:MM）。"""
-    import pandas as pd
-    try:
-        dt = pd.to_datetime(utc_str, utc=True)
-        from datetime import timedelta, timezone
-        return dt.tz_convert(timezone(timedelta(hours=8))).strftime("%m-%d %H:%M")
-    except Exception:
-        return str(utc_str)
