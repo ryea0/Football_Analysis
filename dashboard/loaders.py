@@ -11,9 +11,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import streamlit as st
 
-from queries import (a_calibration, a_overview, a_paper_sim, b_ab_tracks,
-                     b_bets, b_recommendations, b_runs, b_summary,
-                     b_unknown_names, connect_ro)
+from queries import (a_calibration, a_overview, a_paper_sim, agentline_compare,
+                     agentline_member_divergence, agentline_runs,
+                     agentline_sample_matches, b_ab_tracks, b_bets,
+                     b_recommendations, b_runs, b_summary, b_unknown_names,
+                     connect_ro)
 
 
 def _run(fn, *args):
@@ -64,3 +66,25 @@ def calibration(leagues=None, seasons=None) -> dict:
 @st.cache_data(ttl=300)
 def paper_sim(leagues=None, seasons=None) -> dict:
     return _run(a_paper_sim, leagues, seasons)
+
+
+# ---- 范式对比线（A' 线 / agentline）----
+
+@st.cache_data(ttl=300)
+def al_compare(leagues=None, seasons=None) -> dict:
+    return _run(agentline_compare, leagues, seasons)
+
+
+@st.cache_data(ttl=300)
+def al_runs() -> list:
+    return _run(agentline_runs)
+
+
+@st.cache_data(ttl=300)
+def al_divergence(leagues=None, seasons=None) -> dict:
+    return _run(agentline_member_divergence, leagues, seasons)
+
+
+@st.cache_data(ttl=300)
+def al_samples(leagues=None, seasons=None, limit=5) -> list:
+    return _run(agentline_sample_matches, leagues, seasons, limit)

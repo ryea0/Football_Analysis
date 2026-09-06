@@ -316,3 +316,100 @@ def a_paper_sim(conn: sqlite3.Connection, leagues=None, seasons=None,
             "by_band": {lab: simulate_flat([c for c in cands
                                             if band_label(c["odds"]) == lab])
                         for _, _, lab in _odds_bands()}}
+
+
+# ---- 范式对比线（A' 线 / agentline）----
+
+def agentline_compare(conn, leagues=None, seasons=None) -> dict:
+    """页8：六线对照 + ROI + 成员审计 + 修订增益 + 质询分层。
+
+    直接复用 fa.agentline.compare.compare_lines（单一事实源，避免看板另
+    起一套口径）。空库返回 empty=True 由页面走空态——查询层不抛。"""
+    from fa.agentline.compare import compare_lines
+    try:
+        cmp = compare_lines(conn, leagues, seasons)
+    except ValueError:
+        # backtest_predictions 为空时 evaluate 抛 ValueError——
+        # 整条比较无从谈起，走空态。
+        return {"empty": True}
+    # 五条 DSH 线全是 0 行 → 也当空态（没跑过 agentline）
+    any_data = any(
+        cmp.get(k, {}).get("n", 0) > 0
+        for k in ("A_base", "A_enh", "A_multi", "A_debate", "A_division"))
+    if not any_data:
+        return {"empty": True}
+    return {"empty": False, **cmp}
+
+
+def agentline_runs(conn) -> list[dict]:
+    """页8：agentline 运行台账（最近 20 条）。"""
+    rows = conn.execute("""
+        SELECT id, line, profile, model, n_ok, n_parse_fail, n_timeout, n_error,
+               started_at, finished_at, summary
+        FROM agentline_runs ORDER BY id DESC LIMIT 20
+    """).fetchall()
+    return [dict(r) for r in rows]
+
+
+def agentline_member_divergence(conn, leagues=None, seasons=None) -> dict:
+    """页8：A_multi 成员间分歧分布（每场成员间最大对称 KL 散度）。
+
+    仅对有≥2 个 ok 成员的场次计算。分歧是多 agent 系统的核心测量——
+    高分歧场次 = 困难场识别器（多 agent 总纲 §2 测量纪律）。"""
+    from fa.agentline.compare import _bp_filter
+    w, a = _bp_filter(leagues, seasons)
+    members = [dict(r) for r in conn.execute(
+        "SELECT ap.match_id, ap.attributor, ap.p_home, ap.p_draw, ap.p_away,"
+        " ap.p_over25 FROM agentline_predictions ap"
+        " JOIN backtest_predictions bp ON bp.match_id = ap.match_id"
+        " WHERE ap.line='A_multi' AND ap.attributor>0 AND ap.status='ok'"
+        + w, a)]
+    by_match: dict[int, list] = {}
+    for m in members:
+        by_match.setdefault(m["match_id"], []).append(m)
+    divergences = []
+    import math
+    eps = 1e-9
+    for mid, ms in by_match.items():
+        if len(ms) < 2:
+            continue
+        max_sym = 0.0
+        for i in range(len(ms)):
+            for j in range(i + 1, len(ms)):
+                p = (ms[i]["p_home"], ms[i]["p_draw"], ms[i]["p_away"])
+                q = (ms[j]["p_home"], ms[j]["p_draw"], ms[j]["p_away"])
+                kl_pq = sum(
+                    max(p[k], eps) * math.log(max(p[k], eps) / max(q[k], eps))
+                    for k in range(3))
+                kl_qp = sum(
+                    max(q[k], eps) * math.log(max(q[k], eps) / max(p[k], eps))
+                    for k in range(3))
+                sym = (kl_pq + kl_qp) / 2
+                max_sym = max(max_sym, sym)
+        divergences.append({"match_id": mid, "n_members": len(ms),
+                            "max_sym_kl": max_sym})
+    return {"n_matches": len(divergences), "divergences": divergences,
+            "avg_kl": (sum(d["max_sym_kl"] for d in divergences) / len(divergences)
+                       if divergences else None)}
+
+
+def agentline_sample_matches(conn, leagues=None, seasons=None, limit=5) -> list[dict]:
+    """页8：示例比赛详情（A_base 样本，供页面展示 agent 推理摘要）。
+
+    取 A_base 最近 limit 场 ok 行，带队名/联赛/赛季。"""
+    from fa.agentline.compare import _bp_filter
+    w, a = _bp_filter(leagues, seasons)
+    rows = [dict(r) for r in conn.execute(
+        "SELECT ap.match_id, th.name AS home, ta.name AS away, m.league,"
+        " m.season, m.date, ap.p_home, ap.p_draw, ap.p_away, ap.p_over25,"
+        " ap.confidence, ap.reasoning_digest, ap.status, ap.duration_s,"
+        " ap.model, ap.repaired"
+        " FROM agentline_predictions ap"
+        " JOIN backtest_predictions bp ON bp.match_id = ap.match_id"
+        " JOIN matches m ON m.id = ap.match_id"
+        " JOIN teams th ON th.id = m.home_team_id"
+        " JOIN teams ta ON ta.id = m.away_team_id"
+        " WHERE ap.line='A_base' AND ap.status='ok'"
+        + w + " ORDER BY ap.match_id DESC LIMIT ?",
+        a + [limit])]
+    return rows
