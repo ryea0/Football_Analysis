@@ -19,6 +19,9 @@ import sqlite3
 
 from fa.config import persona_path
 from fa.evolve.knowledge import ensure_current_snapshot, window_kb_text
+from fa.evolve_self.knowledge import (
+    ensure_current_snapshot_self, window_kb_text_self,
+)
 from fa.persona import PersonaError
 from fa.persona.caller import call_hermes
 from fa.persona.contract import (
@@ -30,7 +33,8 @@ from fa.persona.contract import (
 
 STRATEGY = "model_persona"
 NOKB_STRATEGY = "model_persona_nokb"
-_TRACKS = (STRATEGY, NOKB_STRATEGY)
+SELF_STRATEGY = "model_persona_kb_self"
+_TRACKS = (STRATEGY, NOKB_STRATEGY, SELF_STRATEGY)
 
 # 降级词表（写进 runs.summary.persona 的取值域）：timeout/exit 来自 caller，
 # extract/contract 来自契约层；无 reason 的 PersonaError 归 unknown。
@@ -104,90 +108,111 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                       attempted: set[int] | None = None) -> dict:
     """一窗（am 或 pm）的阶段编排：选该 run 的候选 fixture 去重逐场处理——
 
-    M6 起每场**两轨两次调用**（§12.7 对照轨）：kb 轨（persona + 本窗知识快照）
-    写 model_persona 行；nokb 轨（纯 persona）写 model_persona_nokb 行，顺序固定
-    kb→nokb。降级按轨分别记账（degraded = kb 轨、nokb_degraded = nokb 轨），
-    persona 文件缺失 / 本场输入组装失败（§6.3 契约缺口）两轨同降（未触达调用
-    不计入 called）；知识快照建不起（相级）/ 读不了（场级）也两轨同降，
-    reason='kb_snapshot'（M6 终审 F3：IO 缝不炸 phase，§6.5 降级语义）。
+    M6 起每场**三轨三次调用**（§12.7 对照轨 + C' 线自反思轨）：
+    - kb 轨（persona + C 线知识快照）→ model_persona 行
+    - nokb 轨（纯 persona，无知识库）→ model_persona_nokb 行
+    - self 轨（persona + C' 线自反思知识快照）→ model_persona_kb_self 行
+    顺序固定 kb→nokb→self。降级按轨分别记账，persona 文件缺失 / 本场输入
+    组装失败三轨同降（未触达调用不计入 called）；知识快照建不起（相级）/
+    读不了（场级）对应轨降级、nokb 不受影响。
     ``attempted`` 里的场跳过且零调用，改做判决传播（pm 沿用 am，§6.2）——按轨
     各自传播。恰一次 ``conn.commit()``。
 
-    返回 ``{"called","ok","veto","degraded":[{fixture_id,reason}],"attempted"}
-    （kb 轨语义不变，保 ops/watchdog 兼容）+ "nokb_called","nokb_ok",
-    "nokb_veto","nokb_degraded" 镜像键``。
+    返回 ``{"called","ok","veto","degraded":[...],"attempted"}
+    （kb 轨语义不变，保 ops/watchdog 兼容）+ nokb_*/self_* 镜像键``。
     """
     seen = set(attempted or ())
     counts = {t: {"called": 0, "ok": 0, "veto": 0, "degraded": []}
               for t in _TRACKS}
-    # M6 终审 F3（B 线 §6.5 回归修补）：本相两个知识 IO 缝（快照建立 / 快照读取）
-    # 都不允许炸掉整个 matchday phase——失败一律按 §6.5 降级记账
-    # （reason='kb_snapshot'，两轨同降、verdict 保持 NULL、不触达调用）。
+    # 快照：两个知识轨各自建自己的快照，失败各降各的；nokb 永不因快照失败降级
     try:
-        kb_idx = ensure_current_snapshot()  # 快照自足（幂等；B 线唯一读取口）
+        kb_idx = ensure_current_snapshot()  # C 线快照（幂等；B 线读取口）
     except OSError:
-        # 相级缝（只调一次）：失败 = 本相所有**待判**场两轨同降。取「逐场降级」
-        # 而非「整相提前 return」——summary 契约（attempted 名单 + 候选可见性）
-        # 不变，attempted 已判场照常传播判决（传播不读快照），commit 照走。
         kb_idx = None
+    try:
+        self_idx = ensure_current_snapshot_self()  # C' 线自反思快照
+    except OSError:
+        self_idx = None
     rows = conn.execute(
         "SELECT DISTINCT r.fixture_id, f.league FROM recommendations r"
         " JOIN fixtures f ON f.id = r.fixture_id"
-        " WHERE r.run_id=? AND r.strategy IN (?, ?)"
+        " WHERE r.run_id=? AND r.strategy IN (?, ?, ?)"
         " ORDER BY r.fixture_id",
-        (run_id, STRATEGY, NOKB_STRATEGY)).fetchall()
+        (run_id, STRATEGY, NOKB_STRATEGY, SELF_STRATEGY)).fetchall()
     league_set = set(leagues)
     for row in rows:
         fid, league = row["fixture_id"], row["league"]
         if fid in seen:                      # am 已判/已试：pm 沿用，零调用
-            _propagate_verdict(conn, fid, STRATEGY)
-            _propagate_verdict(conn, fid, NOKB_STRATEGY)
+            for t in _TRACKS:
+                _propagate_verdict(conn, fid, t)
             continue
         seen.add(fid)                        # 见过即记（无论调没调、成没成）
         if league not in league_set:
             continue
-        if kb_idx is None:                   # 相级快照失败：两轨同降（见上）
-            for t in _TRACKS:
+        # 各轨因快照失败的降级：kb 受 kb_idx 影响，self 受 self_idx 影响，
+        # nokb 永不因快照降级
+        snapshot_failed_tracks = set()
+        if kb_idx is None:
+            snapshot_failed_tracks.add(STRATEGY)
+        if self_idx is None:
+            snapshot_failed_tracks.add(SELF_STRATEGY)
+        if snapshot_failed_tracks:
+            for t in snapshot_failed_tracks:
                 counts[t]["degraded"].append({"fixture_id": fid,
                                               "reason": "kb_snapshot"})
-            continue
         try:
             persona_md = persona_path(league).read_text(encoding="utf-8")
         except (FileNotFoundError, ValueError):
-            # 文件缺失，或 fixtures 表 league 不在 persona 映射（config 抛
-            # ValueError）——都归 persona_file：人格这一环没就位，非模型之过。
-            for t in _TRACKS:                # 人格这一环没就位，两轨同降
-                counts[t]["degraded"].append({"fixture_id": fid,
-                                              "reason": "persona_file"})
-            continue
-        try:
-            kb_md = window_kb_text(kb_idx, league)
-        except OSError:
-            # 场级缝：快照目录被外力动过 / 读失败——只降该场两轨（§6.5 场次级），
-            # 不让一个读盘故障截断本相余下场
+            # 人格文件缺失 = 三轨同降
             for t in _TRACKS:
-                counts[t]["degraded"].append({"fixture_id": fid,
-                                              "reason": "kb_snapshot"})
+                if t not in snapshot_failed_tracks:
+                    counts[t]["degraded"].append({"fixture_id": fid,
+                                                  "reason": "persona_file"})
             continue
+        # 读各轨知识库：读失败各降各的
+        kb_md: str | None = None
+        self_md: str | None = None
+        read_failed_tracks: set[str] = set()
+        if kb_idx is not None:
+            try:
+                kb_md = window_kb_text(kb_idx, league)
+            except OSError:
+                read_failed_tracks.add(STRATEGY)
+                counts[STRATEGY]["degraded"].append(
+                    {"fixture_id": fid, "reason": "kb_snapshot"})
+        if self_idx is not None:
+            try:
+                self_md = window_kb_text_self(self_idx, league)
+            except OSError:
+                read_failed_tracks.add(SELF_STRATEGY)
+                counts[SELF_STRATEGY]["degraded"].append(
+                    {"fixture_id": fid, "reason": "kb_snapshot"})
         try:
             input_obj = build_input(conn, fid, run_id)
         except PersonaError as exc:
-            # §6.3 契约缺口（fixture 缺 / 主客未对齐 / kickoff 不可解析）＝输入这一环
-            # 没就位，两轨同降、继续下一场（§6.5 场次级；pre-M6 语义：无 reason 属性
-            # 的 PersonaError 归 unknown）——不截断本窗余下场、不吞 commit。
             reason = getattr(exc, "reason", "unknown")
             for t in _TRACKS:
+                if t in snapshot_failed_tracks or t in read_failed_tracks:
+                    continue  # 已经降过了，不重复记
                 counts[t]["degraded"].append({"fixture_id": fid,
                                               "reason": _REASON.get(reason, reason)})
             continue
+        # 逐轨调用 hermes
         for track in _TRACKS:
             c = counts[track]
+            if (track in snapshot_failed_tracks
+                    or track in read_failed_tracks):
+                continue  # 已经降级了，不调 hermes
+            c["called"] += 1                 # hermes 实际调用数（额度口径）
             try:
+                if track == STRATEGY:
+                    track_kb, track_label = kb_md, f"（C线快照 w{kb_idx}）"
+                elif track == SELF_STRATEGY:
+                    track_kb, track_label = self_md, f"（C'线自反思 w{self_idx}）"
+                else:  # nokb
+                    track_kb, track_label = None, ""
                 prompt = build_prompt(persona_md, input_obj,
-                                      kb_md=kb_md if track == STRATEGY else None,
-                                      kb_label=f"（快照 w{kb_idx}）")
-                c["called"] += 1             # hermes 实际调用数（额度口径）：
-                                             # persona_file 降级未触达调用不计
+                                      kb_md=track_kb, kb_label=track_label)
                 output = extract_json(call_hermes(prompt))
                 validate_output(output)
                 apply_verdict(conn, fid, output, strategy=track)
@@ -195,12 +220,18 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                 reason = getattr(exc, "reason", "unknown")
                 c["degraded"].append({"fixture_id": fid,
                                       "reason": _REASON.get(reason, reason)})
-            else:                        # 无异常才计数（原 continue 的等价改写）
+            else:
                 c["ok"] += 1
                 c["veto"] += 1 if output["verdict"] == "veto" else 0
     conn.commit()
-    kb, nokb = counts[STRATEGY], counts[NOKB_STRATEGY]
-    return {"called": kb["called"], "ok": kb["ok"], "veto": kb["veto"],
-            "degraded": kb["degraded"], "attempted": sorted(seen),
-            "nokb_called": nokb["called"], "nokb_ok": nokb["ok"],
-            "nokb_veto": nokb["veto"], "nokb_degraded": nokb["degraded"]}
+    kb = counts[STRATEGY]
+    nokb = counts[NOKB_STRATEGY]
+    slf = counts[SELF_STRATEGY]
+    return {
+        "called": kb["called"], "ok": kb["ok"], "veto": kb["veto"],
+        "degraded": kb["degraded"], "attempted": sorted(seen),
+        "nokb_called": nokb["called"], "nokb_ok": nokb["ok"],
+        "nokb_veto": nokb["veto"], "nokb_degraded": nokb["degraded"],
+        "self_called": slf["called"], "self_ok": slf["ok"],
+        "self_veto": slf["veto"], "self_degraded": slf["degraded"],
+    }

@@ -12,8 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import streamlit as st
 
 from queries import (a_calibration, a_overview, a_paper_sim, b_ab_tracks,
-                     b_bets, b_recommendations, b_runs, b_summary,
-                     b_unknown_names, connect_ro)
+                     b_bets, b_multi_tracks, b_recommendations, b_runs,
+                     b_summary, b_unknown_names, connect_ro)
 
 
 def _run(fn, *args):
@@ -39,6 +39,12 @@ def paper_bets():
 @st.cache_data(ttl=300)
 def ab_tracks() -> dict:
     return _run(b_ab_tracks)
+
+
+@st.cache_data(ttl=300)
+def multi_tracks() -> dict:
+    """页3多轨全景：自动发现所有 strategy（含 C' 线 kb_self 等新增轨）。"""
+    return _run(b_multi_tracks)
 
 
 @st.cache_data(ttl=300)

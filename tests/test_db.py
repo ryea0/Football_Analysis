@@ -114,10 +114,11 @@ def test_fresh_db_is_current(tmp_path):
     assert cols["key_factors"] == ("TEXT", 0, 0)      # 可空、非主键
     assert cols["report_md"] == ("TEXT", 0, 0)
     assert cols["personas_hash"] == ("TEXT", 0, 0)    # v8：M6 hash 位，可空
+    assert cols["personas_self_hash"] == ("TEXT", 0, 0)  # v11：C' 线自反思 hash
     order = list(cols)
-    # 紧跟 final_stake_frac 之后（v6 brief 的列位 + v8 的 personas_hash），v3 既有列序不动
+    # 紧跟 final_stake_frac 之后（v6 brief + v8 personas_hash + v11 personas_self_hash）
     assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
-        ["key_factors", "report_md", "personas_hash"]
+        ["key_factors", "report_md", "personas_hash", "personas_self_hash"]
     c.close()
 
 
@@ -893,9 +894,9 @@ def test_fresh_recommendations_has_persona_columns(tmp_path):
     assert cols["key_factors"] == ("TEXT", 0, 0)
     assert cols["report_md"] == ("TEXT", 0, 0)
     order = list(cols)
-    # v8 起 created_at 前还有 personas_hash（M6），列序一并钉住
+    # v8 起 personas_hash（M6），v11 起 personas_self_hash（C' 线）
     assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
-        ["key_factors", "report_md", "personas_hash"]
+        ["key_factors", "report_md", "personas_hash", "personas_self_hash"]
     c.close()
 
 

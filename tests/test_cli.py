@@ -309,10 +309,9 @@ def test_status_b_line_shows_ledger_quota_runs_unknown(tmp_path, monkeypatch):
 
 
 def test_status_b_line_three_track_lines(tmp_path, monkeypatch):
-    """B 线台账三轨各一行 `[model_only]` / `[model_persona]` / `[…_nokb]`。
+    """B 线台账多轨各一行（STRATEGIES 单源自动）。
 
-    M6 §12.7：status 走 STRATEGIES 单源自动三轨（设计 R1——只有 TG 正文双轨）。
-    只 model_only 轨有注 → 该轨 bankroll 已惰性初始化、另两轨保持「未初始化」，
+    只 model_only 轨有注 → 该轨 bankroll 已惰性初始化、其余轨保持「未初始化」，
     各行绝不互相冒充（D2 分账）。
     """
     db = _use_tmp_db(tmp_path, monkeypatch)
@@ -327,13 +326,15 @@ def test_status_b_line_three_track_lines(tmp_path, monkeypatch):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     tracks = [l for l in result.output.splitlines() if l.startswith("[model_")]
-    assert len(tracks) == 3, result.output
+    assert len(tracks) == 4, result.output  # model_only / persona / nokb / kb_self
     assert tracks[0].startswith("[model_only]")
     assert tracks[1].startswith("[model_persona]")
     assert tracks[2].startswith("[model_persona_nokb]")
+    assert tracks[3].startswith("[model_persona_kb_self]")
     assert "注数=1" in tracks[0] and "bankroll=1000.00" in tracks[0]
     assert "注数=0" in tracks[1] and "bankroll=未初始化" in tracks[1]
     assert "注数=0" in tracks[2] and "bankroll=未初始化" in tracks[2]
+    assert "注数=0" in tracks[3] and "bankroll=未初始化" in tracks[3]
 
 
 def test_status_pct_scales_fraction_values(tmp_path, monkeypatch):

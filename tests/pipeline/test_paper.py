@@ -528,7 +528,8 @@ def test_provider_never_writes_a_line_tables(conn):
 def test_summary_keys_are_exactly_the_brief_contract(conn):
     """D2：paper_summary 分轨——键 = strategy（STRATEGIES 序），值为原形状 dict。"""
     assert list(paper_summary(conn)) == ["model_only", "model_persona",
-                                         "model_persona_nokb"]
+                                         "model_persona_nokb",
+                                         "model_persona_kb_self"]
     for track in paper_summary(conn).values():
         assert set(track) == {"n", "staked", "returned", "roi",
                               "pending", "bankroll", "clv_median"}
@@ -538,7 +539,8 @@ def test_summary_of_empty_ledger(conn):
     empty = {"n": 0, "staked": 0.0, "returned": 0.0, "roi": None, "pending": 0,
              "bankroll": None, "clv_median": None}
     assert paper_summary(conn) == {"model_only": empty, "model_persona": empty,
-                                   "model_persona_nokb": empty}
+                                   "model_persona_nokb": empty,
+                                   "model_persona_kb_self": empty}
 
 
 def test_summary_counts_money_and_clv(conn):
@@ -829,9 +831,10 @@ def test_settle_writes_per_strategy_bankroll(conn_played):
 
 
 def test_settle_by_strategy_shape_has_all_tracks(conn_played):
-    """分轨形状同顶层四键，且**三轨恒在**（空轨零值）——status/weekly 可无脑遍历。"""
+    """分轨形状同顶层四键，且**各轨恒在**（空轨零值）——status/weekly 可无脑遍历。"""
     by = settle_paper_bets(conn_played)["by_strategy"]
-    assert set(by) == {"model_only", "model_persona", "model_persona_nokb"}
+    assert set(by) == {"model_only", "model_persona", "model_persona_nokb",
+                       "model_persona_kb_self"}
     for track in by.values():
         assert set(track) == {"settled", "won", "pnl", "clv_median"}
 
@@ -852,7 +855,8 @@ def test_settle_unsettled_track_keeps_its_bankroll_untouched(conn):
 def test_summary_by_strategy(conn_played):
     settle_paper_bets(conn_played)                   # conn_played 只种到「已落注」
     s = paper_summary(conn_played)
-    assert set(s) == {"model_only", "model_persona", "model_persona_nokb"}
+    assert set(s) == {"model_only", "model_persona", "model_persona_nokb",
+                      "model_persona_kb_self"}
     assert s["model_only"]["roi"] is not None                # 1 中 1 未结 → (20−10)/10
     assert s["model_persona"]["n"] == 1
     assert s["model_persona"]["roi"] == pytest.approx(-1.0)

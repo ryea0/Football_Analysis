@@ -32,7 +32,8 @@ _MARKET = {"H": "主胜", "D": "平局", "A": "客胜", "O2.5": "大2.5"}
 # 允许两套 strategy 对同一 (fixture, market) 并存——键与展示都必须区分，
 # 否则 M4 上线后 am 全量报告丢行、pm diff 跨轨配价。
 _STRATEGY = {"model_only": "纯模型", "model_persona": "模型+persona",
-             "model_persona_nokb": "模型+persona·无知识库"}
+             "model_persona_nokb": "模型+persona·无知识库",
+             "model_persona_kb_self": "模型+persona·自反思"}
 _PERSONA_STRATEGY = "model_persona"     # persona 判决只落此轨（§6.6 的 B 侧）
 
 # M6（§12.7）：nokb 是 C 线测量对照轨，不进 TG 推送正文（R1）——TG 保持

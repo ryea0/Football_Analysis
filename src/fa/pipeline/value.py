@@ -37,9 +37,11 @@ from fa.value.devig import devig_ou, devig_proportional
 from fa.value.gates import (EDGE_MIN, EV_MIN, ODDS_MAX, ODDS_MIN, ev_of,
                             kelly_fraction)
 
-STRATEGIES = ("model_only", "model_persona", "model_persona_nokb")
-# §6.6 A/B 双轨 + M6 C 线对照轨（nokb：人格无知识库，spec §12.7）——
-# paper/render/weekly 全部经此单源引用，三轨自动生效。
+STRATEGIES = ("model_only", "model_persona", "model_persona_nokb",
+               "model_persona_kb_self")
+# §6.6 A/B 双轨 + M6 C 线对照轨（nokb：人格无知识库，spec §12.7）
+# + C' 线自反思对照轨（kb_self：时间线笔记式，无人审自动落账）——
+# paper/render/weekly 全部经此单源引用，四轨自动生效。
 WINDOW_HOURS = 52                   # 比赛日窗口（spec §9.6 两窗之间）
 MIN_TRAIN_ROWS = 30                 # 与 fit_league 的下限一致（数据不足 → 跳过该联赛）
 _H2H_SLOTS = (("H", "home"), ("D", "draw"), ("A", "away"))

@@ -9,7 +9,7 @@ def test_fresh_db_has_division_jumps(tmp_path):
     init_db(db)
     conn = connect(db)
     assert conn.execute("SELECT version FROM schema_version").fetchone()[
-        "version"] == SCHEMA_VERSION == 10
+        "version"] == SCHEMA_VERSION >= 10
     assert "agentline_division_jumps" in {
         r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -62,7 +62,7 @@ def test_v9_migrates_to_v10(tmp_path):
     conn = connect(db)
     # 终审 F3：补表之外还须把版本号钉回 10——否则 init_db 下次启动又走迁移
     assert conn.execute("SELECT version FROM schema_version").fetchone()[
-        "version"] == SCHEMA_VERSION == 10
+        "version"] == SCHEMA_VERSION >= 10
     assert "agentline_division_jumps" in {
         r["name"] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}

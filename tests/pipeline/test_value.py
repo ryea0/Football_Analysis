@@ -227,7 +227,7 @@ def test_in_gate_writes_h_and_o25_recommendations(priced):
     assert all(r["phase"] == "am" for r in mine)
     assert all(r["run_id"] == run for r in mine)
     assert all(r["created_at"] for r in mine)
-    assert len(ids) == 18                            # 3 场 × 2 market × 3 轨（同刻三落）
+    assert len(ids) == 24                            # 3 场 × 2 market × 4 轨（同刻多落）
 
 
 def test_model_p_matches_library_training_data(priced):
@@ -435,7 +435,7 @@ def test_model_is_fitted_once_per_league_per_run(priced, monkeypatch):
     monkeypatch.setattr(value, "fit_league", counting)
     ids = generate_recommendations(c, [LEAGUE], "am", add_run(c))
     assert calls == [LEAGUE]                                # 恰 1 次，且是该联赛
-    assert len(ids) == 18                      # 拟合结果被全部候选复用（3 场×2 市场×3 轨）
+    assert len(ids) == 24                      # 拟合结果被全部候选复用（3 场×2 市场×4 轨）
 
 
 # ---------------------------------------------------------------- UNIQUE 刷新
@@ -501,8 +501,8 @@ def test_quotes_within_same_batch_still_compete(priced):
 
 
 def test_generate_writes_three_tracks_single_commit(priced):
-    """每个过门槛候选写三轨行（§6.6 双轨 + §12.7 nokb 对照轨）：数字全同、
-    persona 两轨中性初始（final = kelly）、model_only 退回 kelly（NULL）。"""
+    """每个过门槛候选写多轨行（§6.6 + §12.7 + C' 线）：数字全同、
+    persona 各轨中性初始（final = kelly）、model_only 退回 kelly（NULL）。"""
     c, fx, probs = priced
     run = add_run(c)
     ids = generate_recommendations(c, [LEAGUE], "am", run)
@@ -512,15 +512,18 @@ def test_generate_writes_three_tracks_single_commit(priced):
     mo = [r for r in rows if r["strategy"] == "model_only"]
     mp = [r for r in rows if r["strategy"] == "model_persona"]
     nk = [r for r in rows if r["strategy"] == "model_persona_nokb"]
-    assert len(mo) == len(mp) == len(nk) > 0 and len(rows) == 3 * len(mo)
-    assert {r["id"] for r in rows} == set(ids)              # 返回 ids 含三轨
-    for a, b, n in zip(mo, mp, nk):                         # 同数字、三轨
+    ms = [r for r in rows if r["strategy"] == "model_persona_kb_self"]
+    n_strats = 4
+    assert len(mo) == len(mp) == len(nk) == len(ms) > 0
+    assert len(rows) == n_strats * len(mo)
+    assert {r["id"] for r in rows} == set(ids)
+    for a, b, n, s in zip(mo, mp, nk, ms):                  # 各轨同数字
         for col in ("fixture_id", "market", "phase", "run_id", "model_p",
                     "market_p", "best_odds", "bookmaker", "edge", "ev",
                     "kelly_stake_frac"):
-            assert a[col] == b[col] == n[col], col
+            assert a[col] == b[col] == n[col] == s[col], col
         assert a["final_stake_frac"] is None                # model_only：退回 kelly（M3 语义）
-    for r in mp + nk:                                       # persona 两轨中性初始
+    for r in mp + nk + ms:                                  # persona 各轨中性初始
         assert r["final_stake_frac"] == r["kelly_stake_frac"]
         assert r["verdict"] is None and r["confidence_delta"] is None
         assert r["key_factors"] is None and r["report_md"] is None
@@ -578,7 +581,7 @@ def test_empty_league_list_yields_nothing(conn):
 
 
 def test_three_tracks_same_numbers_and_nokb_kelly_init(priced):
-    """同刻三落数字全同；nokb final 中性初始 = kelly（同 model_persona 语义）。"""
+    """同刻多落数字全同；persona 各轨 final 中性初始 = kelly。"""
     c, fx, probs = priced
     generate_recommendations(c, [LEAGUE], "am", add_run(c))
     fid = fx["in"]
@@ -587,12 +590,15 @@ def test_three_tracks_same_numbers_and_nokb_kelly_init(priced):
         " final_stake_frac FROM recommendations WHERE fixture_id=? AND market='H'",
         (fid,)).fetchall()
     by = {r["strategy"]: r for r in rows}
-    assert set(by) == {"model_only", "model_persona", "model_persona_nokb"}
+    assert set(by) == {"model_only", "model_persona", "model_persona_nokb",
+                       "model_persona_kb_self"}
     nums = ("model_p", "best_odds", "edge", "ev", "kelly_stake_frac")
-    assert all(by["model_persona"][k] == by["model_persona_nokb"][k] == by["model_only"][k]
+    assert all(by["model_persona"][k] == by["model_persona_nokb"][k]
+               == by["model_persona_kb_self"][k] == by["model_only"][k]
                for k in nums)
     assert by["model_persona"]["final_stake_frac"] == by["model_persona"]["kelly_stake_frac"]
     assert by["model_persona_nokb"]["final_stake_frac"] == by["model_persona_nokb"]["kelly_stake_frac"]
+    assert by["model_persona_kb_self"]["final_stake_frac"] == by["model_persona_kb_self"]["kelly_stake_frac"]
     assert by["model_only"]["final_stake_frac"] is None
 
 
@@ -603,7 +609,7 @@ def test_personas_hash_stamped_on_all_rows(priced):
     rows = c.execute("SELECT DISTINCT personas_hash, strategy FROM recommendations"
                      " WHERE run_id=?", (run,)).fetchall()
     assert {r["personas_hash"] for r in rows} == {"a" * 64}
-    assert len(rows) == 3   # 三轨都带戳
+    assert len(rows) == 4   # 四轨都带戳
 
 
 def test_personas_hash_not_stamped_by_default(priced):
