@@ -12,10 +12,49 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
 import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 
 from loaders import al_compare, al_divergence, al_runs, al_samples
 from queries import COL_BILINGUAL
+
+PALETTE = {
+    "primary": "#2563eb",
+    "good": "#059669",
+    "bad": "#dc2626",
+    "warn": "#d97706",
+    "muted": "#6b7280",
+    "grid": "#e5e7eb",
+}
+
+LINE_COLORS = {
+    "P": "#6b7280",
+    "A_base": "#2563eb",
+    "A_enh": "#059669",
+    "A_multi": "#8b5cf6",
+    "A_debate": "#d97706",
+    "A_division": "#dc2626",
+    "市场 Market": "#374151",
+    "市场 Market (Pinnacle)": "#374151",
+}
+
+
+def _chart_template(fig: go.Figure, height: int = 360) -> go.Figure:
+    fig.update_layout(
+        height=height,
+        margin=dict(t=10, b=10, l=10, r=10),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(size=12, family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif"),
+        xaxis=dict(showgrid=True, gridcolor=PALETTE["grid"], gridwidth=0.5,
+                   showline=True, linecolor="#d1d5db", linewidth=0.5, zeroline=False),
+        yaxis=dict(showgrid=True, gridcolor=PALETTE["grid"], gridwidth=0.5,
+                   showline=True, linecolor="#d1d5db", linewidth=0.5, zeroline=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(size=11)),
+    )
+    return fig
+
 
 st.header("A' 线 · 范式对比（DSH agent）Paradigm Comparison")
 st.caption("同场交集对比 · agentline_predictions 只读 · 永不进 B 线推荐流（spec §12.5）")
@@ -39,21 +78,16 @@ if n_max < 100:
         "仅用于验证管线可用性。结论以 100 场以上的滚动报告为准。",
         icon="⚠️")
 
-# ---- 过滤控件（联赛/赛季）----
-# 从 backtest_predictions 取可用联赛/赛季；这里复用 compare 的全量 n
-# 作为是否有数据的指示，过滤直接传给 al_compare
-# 为避免额外查询，直接用 A_base 的场次来推断可用联赛——
-# 实际上 compare_lines 已经跑过全量了，但没带 by_league 分解。
-# 先放简单版：不过滤；后续可以加 by_league/by_season。
+# ---- 过滤控件说明 ----
 st.caption("当前为全量对比（所有有 agentline 预测的场次）。"
            "按联赛/赛季过滤待后续版本加入。")
 
 cmp = full
 
 # ---- 核心对照指标 ----
-st.subheader("六线对照 Six-Line Comparison")
+st.markdown("#### 📊 六线对照 Six-Line Comparison")
 
-# 构造 DataFrame：线 / n / log-loss / Brier / 子集市场 ll / vs 市场 / ROI
+# 构造 DataFrame
 rows = []
 for k in ("P", "A_base", "A_enh", "A_multi", "A_debate", "A_division"):
     e = cmp.get(k, {})
@@ -71,7 +105,6 @@ for k in ("P", "A_base", "A_enh", "A_multi", "A_debate", "A_division"):
         "vs 市场 vs mkt": f"{e['ratio']:.3f}×",
         "ROI": roi_s,
     })
-# 市场行（基准）
 rows.append({
     "线 Line": "市场 Market (Pinnacle)",
     "n": cmp["n"],
@@ -81,10 +114,15 @@ rows.append({
     "ROI": "—",
 })
 df = pd.DataFrame(rows)
-st.dataframe(df, use_container_width=True, hide_index=True)
+st.dataframe(
+    df,
+    use_container_width=True,
+    hide_index=True,
+    height=min(360, len(df) * 38 + 40),
+)
 
 # 线解释
-with st.expander("各线说明 Line descriptions"):
+with st.expander("📖 各线说明 Line descriptions"):
     st.markdown("""
 - **P**：A 线确定性模型（Dixon-Coles + walk-forward），基线对照
 - **A_base**：DSH agent 基线层（纯读信息集，无外部检索）
@@ -96,28 +134,45 @@ with st.expander("各线说明 Line descriptions"):
 - **市场**：Pinnacle 收盘去水，所有线的共同基准
 """)
 
+st.divider()
+
 # ---- log-loss 柱状图 ----
-st.subheader("log-loss 对比 Bar Chart")
+st.markdown("#### 📊 log-loss 对比 Bar Chart（越低越好）")
 bar_data = []
 for k in ("P", "A_base", "A_enh", "A_multi", "A_debate", "A_division"):
     e = cmp.get(k, {})
     if e and e.get("n"):
-        bar_data.append({"线 Line": k, "log-loss": e["model_ll"],
-                         "n": e["n"]})
+        bar_data.append({"线 Line": k, "log-loss": e["model_ll"], "n": e["n"]})
 if bar_data:
     bar_data.append({"线 Line": "市场 Market",
                      "log-loss": cmp["market"]["ll"],
                      "n": cmp["n"]})
-    fig = px.bar(pd.DataFrame(bar_data), x="线 Line", y="log-loss",
-                 text_auto=".4f",
-                 color="log-loss",
-                 color_continuous_scale="RdBu_r",
-                 title="各线 log-loss（越低越好 Lower is better）")
-    fig.update_layout(showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    bar_df = pd.DataFrame(bar_data)
+    # 用固定颜色映射
+    fig = go.Figure()
+    for _, row in bar_df.iterrows():
+        name = row["线 Line"]
+        color = LINE_COLORS.get(name, PALETTE["primary"])
+        fig.add_trace(go.Bar(
+            x=[name], y=[row["log-loss"]],
+            name=name,
+            marker_color=color,
+            text=f"{row['log-loss']:.4f}",
+            textposition="outside",
+            textfont=dict(size=11),
+            width=0.6,
+            hovertemplate=f"{name}<br>log-loss: %{{y:.4f}}<br>n: {row['n']}<extra></extra>",
+        ))
+    fig.update_layout(
+        showlegend=False,
+        barmode="overlay",
+        yaxis_title="log-loss",
+    )
+    _chart_template(fig, height=360)
+    st.plotly_chart(fig, use_container_width=True, config=dict(displayModeBar=False))
 
 # ---- 平注 ROI ----
-st.subheader("平注 ROI Flat-Stake ROI")
+st.markdown("#### 💰 平注 ROI Flat-Stake ROI")
 roi_rows = []
 for k in ("P", "A_base", "A_enh", "A_multi", "A_debate", "A_division"):
     v = cmp.get("roi", {}).get(k, {})
@@ -125,17 +180,34 @@ for k in ("P", "A_base", "A_enh", "A_multi", "A_debate", "A_division"):
         roi_rows.append({"线 Line": k, "n": v["n"], "ROI": v["roi"]})
 if roi_rows:
     roi_df = pd.DataFrame(roi_rows)
-    fig_roi = px.bar(roi_df, x="线 Line", y="ROI",
-                     text=roi_df["ROI"].map(lambda x: f"{x:+.1%}"),
-                     color="ROI", color_continuous_scale="RdYlGn",
-                     color_continuous_midpoint=0,
-                     title="候选注平注 ROI（收盘价模拟）")
-    fig_roi.add_hline(y=0, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig_roi, use_container_width=True)
+    fig_roi = go.Figure()
+    for _, row in roi_df.iterrows():
+        name = row["线 Line"]
+        color = LINE_COLORS.get(name, PALETTE["primary"])
+        fig_roi.add_trace(go.Bar(
+            x=[name], y=[row["ROI"]],
+            name=name,
+            marker_color=color,
+            text=f"{row['ROI']:+.1%}",
+            textposition="outside",
+            textfont=dict(size=11),
+            width=0.6,
+            hovertemplate=f"{name}<br>ROI: %{{y:+.1%}}<br>n: {row['n']}<extra></extra>",
+        ))
+    fig_roi.add_hline(y=0, line_dash="dash", line_color=PALETTE["muted"], line_width=1)
+    fig_roi.update_layout(
+        showlegend=False,
+        yaxis_title="ROI",
+        yaxis_tickformat=".1%",
+    )
+    _chart_template(fig_roi, height=360)
+    st.plotly_chart(fig_roi, use_container_width=True, config=dict(displayModeBar=False))
     st.caption("候选注 = model 概率 vs 收盘去水的 edge > 0；成交价用收盘价（上界估计）")
 
+st.divider()
+
 # ---- A_multi 成员分歧 ----
-st.subheader("A_multi · 成员分歧 Member Divergence")
+st.markdown("#### 🔀 A_multi · 成员分歧 Member Divergence")
 div = al_divergence()
 if div["n_matches"] == 0:
     st.info("A_multi 无成员数据（或成员数 < 2）")
@@ -143,19 +215,28 @@ else:
     c1, c2 = st.columns(2)
     c1.metric("有分歧数据的场次", f"{div['n_matches']} 场")
     c2.metric("平均最大对称 KL",
-              f"{div['avg_kl']:.4f}" if div["avg_kl"] is not None else "—")
+              f"{div['avg_kl']:.4f}" if div["avg_kl"] is not None else "—",
+              help="成员间意见分歧的平均程度")
     if div["divergences"]:
         div_df = pd.DataFrame(div["divergences"])
-        fig_div = px.histogram(div_df, x="max_sym_kl", nbins=20,
-                               title="每场成员间最大对称 KL 分布")
-        fig_div.update_layout(xaxis_title="max symmetric KL",
-                              yaxis_title="场次")
-        st.plotly_chart(fig_div, use_container_width=True)
+        fig_div = px.histogram(
+            div_df, x="max_sym_kl", nbins=20,
+            title="每场成员间最大对称 KL 分布",
+            color_discrete_sequence=[PALETTE["primary"]],
+        )
+        fig_div.update_layout(
+            xaxis_title="max symmetric KL",
+            yaxis_title="场次",
+            showlegend=False,
+        )
+        _chart_template(fig_div, height=320)
+        st.plotly_chart(fig_div, use_container_width=True, config=dict(displayModeBar=False))
     st.caption("分歧越大 = 成员间意见越不一致 = 可能是困难场（多 agent 总纲 §2）。"
                "成员为同一模型独立采样，一致性数值受温度采样相关性影响。")
 
 # ---- A_debate 修订增益 ----
-st.subheader("A_debate · 修订增益 Revision Gain")
+st.divider()
+st.markdown("#### 🗣️ A_debate · 修订增益 Revision Gain")
 deb = cmp.get("debate", {})
 if not deb.get("n"):
     st.info("A_debate 暂无数据")
@@ -174,11 +255,12 @@ else:
     elif deb.get("n_rho", 0) >= 3:
         st.info("ρ = MWU 未定义（两组 log-loss 全平手）")
     else:
-        st.info(f"无可比对 ρ（n_rho={deb.get('n_rho', 0)}）")
+        st.caption(f"无可比对 ρ（n_rho={deb.get('n_rho', 0)}）")
     st.caption("允许结论为「修订无增益」——不做单边解读。")
 
 # ---- A_division 质询分层 ----
-st.subheader("A_division · 质询分层 Interrogation Stratification")
+st.divider()
+st.markdown("#### 🔍 A_division · 质询分层 Interrogation Stratification")
 dv = cmp.get("division", {})
 if not dv.get("n_flagged") and not dv.get("n_unflagged"):
     st.info("A_division 暂无数据")
@@ -222,22 +304,26 @@ else:
                "质询只落 flag 不改数（管线失败≠质询有话可说）。")
 
 # ---- 运行台账 ----
-st.subheader("运行台账 Run Log")
+st.divider()
+st.markdown("#### 📋 运行台账 Run Log")
 runs_list = al_runs()
 if not runs_list:
     st.info("暂无运行记录")
 else:
     runs_df = pd.DataFrame(runs_list)
-    # 只展示关键列
     show_cols = ["id", "line", "n_ok", "n_parse_fail", "n_timeout",
                  "n_error", "started_at", "finished_at"]
-    # 只保留存在的列
     show_cols = [c for c in show_cols if c in runs_df.columns]
-    st.dataframe(runs_df[show_cols].rename(columns=COL_BILINGUAL),
-                 use_container_width=True, hide_index=True)
+    st.dataframe(
+        runs_df[show_cols].rename(columns=COL_BILINGUAL),
+        use_container_width=True,
+        hide_index=True,
+        height=min(420, max(200, len(runs_df) * 36 + 40)),
+    )
 
 # ---- 示例比赛 ----
-st.subheader("示例比赛 · agent 推理 Sample Predictions")
+st.divider()
+st.markdown("#### 🎯 示例比赛 · agent 推理 Sample Predictions")
 samples = al_samples(limit=3)
 if not samples:
     st.info("暂无 A_base 样本")
@@ -245,15 +331,16 @@ else:
     for s in samples:
         with st.expander(
             f"{s['league']} {s['season']} · {s['home']} vs {s['away']}"
-            f" · {s['date']}"):
+            f" · {s['date']}"
+        ):
             c1, c2, c3, c4 = st.columns(4)
             c1.metric("主胜 H", f"{s['p_home']:.3f}")
             c2.metric("平 D", f"{s['p_draw']:.3f}")
             c3.metric("客胜 A", f"{s['p_away']:.3f}")
             c4.metric("大2.5 O2.5",
-                      f"{s['p_over25']:.3f}" if s["p_over25"] else "—")
+                      f"{s['p_over25']:.3f}" if s['p_over25'] else "—")
             st.markdown(f"**置信度 Confidence:** {s['confidence']}"
-                        if s["confidence"] else "**置信度:** —")
+                        if s['confidence'] else "**置信度:** —")
             st.markdown(f"**模型 Model:** {s.get('model', '—')} · "
                         f"**耗时 Duration:** {s.get('duration_s', '—'):.1f}s"
                         if isinstance(s.get('duration_s'), (int, float))
@@ -270,4 +357,5 @@ st.caption(
     "各线比值在其自身 n 场子集内计算，跨线直比无效；"
     "n<100 的行为链路验证样本，数字无统计意义。\n\n"
     "物理隔离：agentline 只消费 `data/agentline/*.json` 信息集，"
-    "无 DB 写权，永不进入 B 线推荐/落注流（spec §12.5）。")
+    "无 DB 写权，永不进入 B 线推荐/落注流（spec §12.5）。"
+)

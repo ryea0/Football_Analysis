@@ -18,16 +18,69 @@ import streamlit as st
 from loaders import breakdown, paper_bets, recommendations
 from queries import COL_BILINGUAL, by_date, date_choices
 
+PALETTE = {
+    "primary": "#2563eb",
+    "good": "#059669",
+    "bad": "#dc2626",
+    "warn": "#d97706",
+    "muted": "#6b7280",
+    "grid": "#e5e7eb",
+}
+STRAT_COLORS = {
+    "model_only": "#6b7280",
+    "model_persona": "#2563eb",
+    "model_persona_nokb": "#8b5cf6",
+    "model_persona_kb_self": "#059669",
+}
+
+
+def _chart_template(fig: go.Figure, height: int = 340) -> go.Figure:
+    """统一图表模板。"""
+    fig.update_layout(
+        height=height,
+        margin=dict(t=10, b=10, l=10, r=10),
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        font=dict(size=12, family="-apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif"),
+        xaxis=dict(showgrid=True, gridcolor=PALETTE["grid"], gridwidth=0.5,
+                   showline=True, linecolor="#d1d5db", linewidth=0.5, zeroline=False),
+        yaxis=dict(showgrid=True, gridcolor=PALETTE["grid"], gridwidth=0.5,
+                   showline=True, linecolor="#d1d5db", linewidth=0.5, zeroline=False),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02,
+                    xanchor="right", x=1, font=dict(size=11)),
+        bargap=0.25,
+    )
+    return fig
+
 
 # —— 辅助函数（页内局部，不归 queries：纯 UI 层渲染）——
 def _render_breakdown_table(df: pd.DataFrame, dim_label: str, dim_col: str):
-    """market/league 维度的表格渲染：正 ROI 绿色、负 ROI 红色。"""
+    """market/league 维度的表格渲染 + 柱图。"""
     if df.empty:
         st.info("暂无已结算数据 / No settled bets yet")
         return
 
+    # 柱图：各策略在该维度上的 ROI 对比
+    fig = go.Figure()
+    for strat in sorted(df["strategy"].unique()):
+        sub = df[df["strategy"] == strat]
+        color = STRAT_COLORS.get(strat, PALETTE["primary"])
+        fig.add_trace(go.Bar(
+            x=sub[dim_col], y=sub["roi"], name=strat,
+            marker_color=color,
+            text=sub["roi"].map(lambda x: "—" if x is None or pd.isna(x) else f"{x:+.1%}"),
+            textposition="outside",
+            textfont=dict(size=10),
+            hovertemplate=f"{strat}<br>{dim_col}: %{{x}}<br>ROI: %{{y:+.1%}}<extra></extra>",
+        ))
+    fig.update_layout(barmode="group", yaxis_title="ROI（已结算）",
+                      yaxis_tickformat=".1%")
+    fig.add_hline(y=0, line_dash="dash", line_color=PALETTE["muted"], line_width=1)
+    _chart_template(fig, height=340)
+    st.plotly_chart(fig, use_container_width=True, config=dict(displayModeBar=False))
+
+    # 表格
     display = df.copy()
-    # 百分比列格式化
     pct_cols = ["win_rate", "roi", "clv_median"]
     for c in pct_cols:
         if c in display.columns:
@@ -35,24 +88,12 @@ def _render_breakdown_table(df: pd.DataFrame, dim_label: str, dim_col: str):
                 lambda x: "—" if x is None or (isinstance(x, float) and pd.isna(x))
                 else f"{x:+.2%}")
 
-    st.dataframe(display.rename(columns=COL_BILINGUAL),
-                 use_container_width=True, hide_index=True)
-
-    # 柱图：各策略在该维度上的 ROI 对比
-    fig = go.Figure()
-    for strat in sorted(df["strategy"].unique()):
-        sub = df[df["strategy"] == strat]
-        fig.add_trace(go.Bar(x=sub[dim_col], y=sub["roi"], name=strat,
-                             text=sub["roi"].map(
-                                 lambda x: "—" if x is None or pd.isna(x)
-                                 else f"{x:+.1%}"),
-                             textposition="outside"))
-    fig.update_layout(barmode="group", height=360,
-                      yaxis_title="ROI（已结算）",
-                      yaxis_tickformat=".1%",
-                      margin=dict(t=30, b=20))
-    fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig, use_container_width=True)
+    st.dataframe(
+        display.rename(columns=COL_BILINGUAL),
+        use_container_width=True,
+        hide_index=True,
+        height=min(420, max(200, len(display) * 36 + 40)),
+    )
     st.caption("样本不足 300 注时，ROI/CLV 数字仅供观察，不构成显著性结论。")
 
 
@@ -66,14 +107,19 @@ def _render_daily_breakdown(df: pd.DataFrame):
     fig = go.Figure()
     for strat in sorted(df["strategy"].unique()):
         sub = df[df["strategy"] == strat].sort_values("settled_date")
-        fig.add_trace(go.Bar(x=sub["settled_date"], y=sub["pnl"], name=strat,
-                             text=sub["pnl"].map(lambda x: f"{x:+.1f}"),
-                             textposition="outside"))
-    fig.update_layout(barmode="group", height=360,
-                      yaxis_title="当日 P&L Daily P&L",
-                      margin=dict(t=30, b=20))
-    fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig, use_container_width=True)
+        color = STRAT_COLORS.get(strat, PALETTE["primary"])
+        fig.add_trace(go.Bar(
+            x=sub["settled_date"], y=sub["pnl"], name=strat,
+            marker_color=color,
+            text=sub["pnl"].map(lambda x: f"{x:+.1f}"),
+            textposition="outside",
+            textfont=dict(size=10),
+            hovertemplate=f"{strat}<br>日期: %{{x}}<br>P&L: %{{y:+.2f}}<extra></extra>",
+        ))
+    fig.update_layout(barmode="group", yaxis_title="当日 P&L Daily P&L")
+    fig.add_hline(y=0, line_dash="dash", line_color=PALETTE["muted"], line_width=1)
+    _chart_template(fig, height=340)
+    st.plotly_chart(fig, use_container_width=True, config=dict(displayModeBar=False))
 
     # 表格：日期 → 每轨当日 P&L + 累计 P&L（宽表格式）
     strats = sorted(df["strategy"].unique())
@@ -100,7 +146,12 @@ def _render_daily_breakdown(df: pd.DataFrame):
         display[f"{s} 当日P&L"] = wide[f"{s}_daily"].map(lambda x: f"{x:+.2f}")
         display[f"{s} 累计P&L"] = wide[f"{s}_cum"].map(lambda x: f"{x:+.2f}")
 
-    st.dataframe(display, use_container_width=True, hide_index=True)
+    st.dataframe(
+        display,
+        use_container_width=True,
+        hide_index=True,
+        height=min(420, max(200, len(display) * 36 + 40)),
+    )
     st.caption("日期为北京日（spec §9.6 全项目口径）。样本不足 300 注时数字仅供观察。")
 
 
@@ -112,7 +163,8 @@ except FileNotFoundError as e:
     st.error(str(e))
     st.stop()
 
-st.subheader("推荐 Recommendations")
+# —— 推荐表 ——
+st.markdown("#### 🎯 推荐 Recommendations")
 if recs.empty:
     st.info("暂无推荐——比赛日 matchday run 写入 recommendations（spec §9.6）"
             " / No recommendations yet — written by matchday runs")
@@ -127,11 +179,18 @@ else:
     view = by_date(
         recs[recs["strategy"].isin(strategies) & recs["phase"].isin(phases)],
         "created_at", day)
-    st.dataframe(view.rename(columns=COL_BILINGUAL), use_container_width=True,
-                 hide_index=True)
+    st.dataframe(
+        view.rename(columns=COL_BILINGUAL),
+        use_container_width=True,
+        hide_index=True,
+        height=min(520, max(240, len(view) * 36 + 45)),
+    )
+    st.caption(f"共 {len(view)} 条推荐 · 按创建时间倒序")
 
-# —— v2 新增：盈亏分解面板（P1）——
-with st.expander("盈亏分解 Breakdown（按市场/联赛/日）", expanded=True):
+st.divider()
+
+# —— 盈亏分解面板（P1）——
+with st.expander("📊 盈亏分解 Breakdown（按市场/联赛/日）", expanded=True):
     tab1, tab2, tab3 = st.tabs(["按市场 Market", "按联赛 League", "按日 Daily"])
 
     with tab1:
@@ -146,7 +205,8 @@ with st.expander("盈亏分解 Breakdown（按市场/联赛/日）", expanded=Tr
         df_day = breakdown("settled_date")
         _render_daily_breakdown(df_day)
 
-st.subheader("paper 注明细 Bet Ledger")
+# —— paper 注明细 ——
+st.markdown("#### 💰 paper 注明细 Bet Ledger")
 if bets.empty:
     st.info("暂无 paper 注——M3 起每个比赛日自动落注（spec §7.2）"
             " / No paper bets yet — auto-placed on matchdays")
@@ -163,10 +223,16 @@ else:
              "kickoff_utc", "settled_at", "placed_at", "strategy", "phase"]
     ordered = [c for c in front if c in view.columns] + \
               [c for c in view.columns if c not in front]
-    st.dataframe(view[ordered].rename(columns=COL_BILINGUAL),
-                 use_container_width=True, hide_index=True)
-    st.caption("clv = 拿价/收盘价 − 1，正=买在收盘前更优价。收盘基准链（spec §7.3）："
-               "Pinnacle 优先、缺失 fallback Betfair 交易所，基准列 source 记账实际"
-               "所用。盈亏三态：won/lost=回报−注金、void=0（零损益）、pending=—"
-               " / clv = odds_taken / closing − 1 (positive = beat the close); "
-               "closing basis: Pinnacle first, Betfair exchange fallback")
+
+    st.dataframe(
+        view[ordered].rename(columns=COL_BILINGUAL),
+        use_container_width=True,
+        hide_index=True,
+        height=min(520, max(240, len(view) * 36 + 45)),
+    )
+    st.caption(
+        f"共 {len(view)} 注 · "
+        "clv = 拿价/收盘价 − 1，正=买在收盘前更优价。收盘基准链（spec §7.3）："
+        "Pinnacle 优先、缺失 fallback Betfair 交易所，基准列 source 记账实际"
+        "所用。盈亏三态：won/lost=回报−注金、void=0（零损益）、pending=—"
+    )
