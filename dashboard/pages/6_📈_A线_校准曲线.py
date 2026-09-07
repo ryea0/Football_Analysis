@@ -1,4 +1,7 @@
-"""A 线 · 校准曲线：十分位分组，分市场（设计 §3 页6）。"""
+"""A 线 · 校准曲线：十分位分组，分市场（设计 §3 页6）。
+
+v2（2026-09-07）：顶部统一时间范围筛选器，与联赛/赛季叠加过滤。
+"""
 import sys
 from pathlib import Path
 
@@ -8,6 +11,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from components.time_filter import time_range_filter
 from loaders import calibration, overview
 from queries import COL_BILINGUAL
 
@@ -48,7 +52,6 @@ def _chart_template(fig: go.Figure, height: int = 400) -> go.Figure:
 st.header("A 线 · 校准曲线（十分位）Calibration")
 try:
     full = overview()
-    cal = calibration()
 except FileNotFoundError as e:
     st.error(str(e))
     st.stop()
@@ -56,8 +59,31 @@ if full["empty"]:
     st.info("backtest_predictions 为空——先跑回测")
     st.stop()
 
+leagues_all = sorted(full["by_league"])
+seasons_all = sorted(full["by_season"])
+
+# ── 时间范围筛选器 ──
+last_season = max(int(s) for s in seasons_all) if seasons_all else 2025
+anchor_date = pd.Timestamp(f"{last_season}-06-30").date()
+
+start_date, end_date, grain = time_range_filter(
+    key="a6_calibration",
+    default_preset="all",
+    anchor_date=anchor_date,
+)
+
+date_from_str = start_date.isoformat() if start_date.year > 2000 else None
+date_to_str = end_date.isoformat() if end_date.year < 2090 else None
+
+# 联赛 / 赛季筛选
+c1, c2 = st.columns(2)
+sel_l = c1.multiselect("联赛 Leagues", leagues_all, default=leagues_all)
+sel_s = c2.multiselect("赛季 Seasons", seasons_all, default=seasons_all)
+
+cal = calibration(sel_l or None, sel_s or None, date_from_str, date_to_str)
+
 st.caption("理想线 = 完美校准（预测概率 = 实际频率）；点越靠近对角线越好。"
-           "气泡大小 = 该桶样本量。")
+           "气泡大小 = 该桶样本量。时间范围仅影响样本量，不改变分桶方式。")
 
 _MARKETS = [("H", "主胜 Home"), ("D", "平局 Draw"), ("A", "客胜 Away"),
              ("O2.5", "大 2.5 球 Over 2.5")]

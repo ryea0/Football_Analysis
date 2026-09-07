@@ -524,13 +524,21 @@ def b_unknown_names(conn: sqlite3.Connection) -> pd.DataFrame:
         " ORDER BY first_seen, name", conn)
 
 
-def a_overview(conn: sqlite3.Connection, leagues=None, seasons=None) -> dict:
+def a_overview(conn: sqlite3.Connection, leagues=None, seasons=None,
+               date_from: str | None = None, date_to: str | None = None) -> dict:
     """页5：全样本对比 + 分赛季/分联赛/交叉分解（evaluate 口径=spec §8.2）。
 
     metrics.evaluate 对空行抛 ValueError——这里转成 empty 标记，页面走空态
     （设计 §5/§6：查询对空库永不抛）。
+
+    ``date_from`` / ``date_to``：比赛日范围（ISO 字符串，含两端），None=不限。
+    比赛日 ``date`` 是当地日期串（YYYY-MM-DD），直接字典序比较即可。
     """
     rows = fetch_predictions(conn, leagues, seasons)
+    if date_from:
+        rows = [r for r in rows if r["date"] >= date_from]
+    if date_to:
+        rows = [r for r in rows if r["date"] <= date_to]
     if not rows:
         return {"empty": True}
     cross: dict = {}
@@ -544,13 +552,20 @@ def a_overview(conn: sqlite3.Connection, leagues=None, seasons=None) -> dict:
                                  for (l, s), v in sorted(cross.items())}}
 
 
-def a_calibration(conn: sqlite3.Connection, leagues=None, seasons=None) -> dict:
+def a_calibration(conn: sqlite3.Connection, leagues=None, seasons=None,
+                  date_from: str | None = None, date_to: str | None = None) -> dict:
     """页6：分市场十分位校准（复用 metrics.calibration，等宽分桶）。
 
     O2.5 的命中定义 = total_goals ≥ 3（与 simulate._hit 同口径）；无
     p_over25 行的库（大小球通道未跑）返回空列表而非报错。
+
+    ``date_from`` / ``date_to``：比赛日范围（ISO 串），None=不限。
     """
     rows = fetch_predictions(conn, leagues, seasons)
+    if date_from:
+        rows = [r for r in rows if r["date"] >= date_from]
+    if date_to:
+        rows = [r for r in rows if r["date"] <= date_to]
     if not rows:
         return {"empty": True}
 
@@ -575,13 +590,21 @@ def _odds_bands() -> list[tuple[float, float, str]]:
 
 
 def a_paper_sim(conn: sqlite3.Connection, leagues=None, seasons=None,
+                date_from: str | None = None, date_to: str | None = None,
                 bankroll: float = 1000.0) -> dict:
     """页7：flat/¼Kelly 模拟（复用 simulate，成交价=收盘价，与 M2 报告同口径）。
 
     累计曲线用「日期前缀复调」：每个时间点把截至该日的候选前缀喂给同一个
     simulate 函数取汇总值——曲线与终值永远同源，不复制任何算式。
+
+    ``date_from`` / ``date_to``：比赛日范围（ISO 串），None=不限。
+    累计曲线从范围内第一日起算（起点 bankroll=初始值 / P&L=0）。
     """
     rows = fetch_predictions(conn, leagues, seasons)
+    if date_from:
+        rows = [r for r in rows if r["date"] >= date_from]
+    if date_to:
+        rows = [r for r in rows if r["date"] <= date_to]
     cands = candidates(rows)
     if not cands:
         return {"empty": True}
@@ -614,14 +637,15 @@ def a_paper_sim(conn: sqlite3.Connection, leagues=None, seasons=None,
 
 # ---- 范式对比线（A' 线 / agentline）----
 
-def agentline_compare(conn, leagues=None, seasons=None) -> dict:
+def agentline_compare(conn, leagues=None, seasons=None,
+                      date_from=None, date_to=None) -> dict:
     """页8：六线对照 + ROI + 成员审计 + 修订增益 + 质询分层。
 
     直接复用 fa.agentline.compare.compare_lines（单一事实源，避免看板另
     起一套口径）。空库返回 empty=True 由页面走空态——查询层不抛。"""
     from fa.agentline.compare import compare_lines
     try:
-        cmp = compare_lines(conn, leagues, seasons)
+        cmp = compare_lines(conn, leagues, seasons, date_from, date_to)
     except ValueError:
         # backtest_predictions 为空时 evaluate 抛 ValueError——
         # 整条比较无从谈起，走空态。
@@ -645,13 +669,14 @@ def agentline_runs(conn) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def agentline_member_divergence(conn, leagues=None, seasons=None) -> dict:
+def agentline_member_divergence(conn, leagues=None, seasons=None,
+                                date_from=None, date_to=None) -> dict:
     """页8：A_multi 成员间分歧分布（每场成员间最大对称 KL 散度）。
 
     仅对有≥2 个 ok 成员的场次计算。分歧是多 agent 系统的核心测量——
     高分歧场次 = 困难场识别器（多 agent 总纲 §2 测量纪律）。"""
     from fa.agentline.compare import _bp_filter
-    w, a = _bp_filter(leagues, seasons)
+    w, a = _bp_filter(leagues, seasons, date_from, date_to)
     members = [dict(r) for r in conn.execute(
         "SELECT ap.match_id, ap.attributor, ap.p_home, ap.p_draw, ap.p_away,"
         " ap.p_over25 FROM agentline_predictions ap"
@@ -687,12 +712,13 @@ def agentline_member_divergence(conn, leagues=None, seasons=None) -> dict:
                        if divergences else None)}
 
 
-def agentline_sample_matches(conn, leagues=None, seasons=None, limit=5) -> list[dict]:
+def agentline_sample_matches(conn, leagues=None, seasons=None,
+                             date_from=None, date_to=None, limit=5) -> list[dict]:
     """页8：示例比赛详情（A_base 样本，供页面展示 agent 推理摘要）。
 
     取 A_base 最近 limit 场 ok 行，带队名/联赛/赛季。"""
     from fa.agentline.compare import _bp_filter
-    w, a = _bp_filter(leagues, seasons)
+    w, a = _bp_filter(leagues, seasons, date_from, date_to)
     rows = [dict(r) for r in conn.execute(
         "SELECT ap.match_id, th.name AS home, ta.name AS away, m.league,"
         " m.season, m.date, ap.p_home, ap.p_draw, ap.p_away, ap.p_over25,"

@@ -1,6 +1,7 @@
 """A 线 · 回测总览：log-loss/Brier vs 去水收盘（设计 §3 页5）。
 
 口径 = walk-forward 全样本复算（与 m2-verdict 同一判据，spec §8.2）。
+v2（2026-09-07）：顶部统一时间范围筛选器，与联赛/赛季叠加过滤。
 """
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from components.time_filter import time_range_filter
 from loaders import overview
 from queries import COL_BILINGUAL
 
@@ -55,11 +57,25 @@ if full["empty"]:
 leagues_all = sorted(full["by_league"])
 seasons_all = sorted(full["by_season"])
 
+# ── 时间范围筛选器 ──
+last_season = max(int(s) for s in seasons_all) if seasons_all else 2025
+anchor_date = pd.Timestamp(f"{last_season}-06-30").date()
+
+start_date, end_date, grain = time_range_filter(
+    key="a5_overview",
+    default_preset="all",
+    anchor_date=anchor_date,
+)
+
+date_from_str = start_date.isoformat() if start_date.year > 2000 else None
+date_to_str = end_date.isoformat() if end_date.year < 2090 else None
+
 # 过滤控件
 c1, c2 = st.columns(2)
 sel_l = c1.multiselect("联赛 Leagues", leagues_all, default=leagues_all)
 sel_s = c2.multiselect("赛季 Seasons", seasons_all, default=seasons_all)
-o = overview(sel_l or None, sel_s or None)
+
+o = overview(sel_l or None, sel_s or None, date_from_str, date_to_str)
 if o["empty"]:
     st.info("该过滤组合无预测行 / No rows for this filter")
     st.stop()
@@ -93,36 +109,41 @@ cross = pd.DataFrame(
     [{"league": k.split("|")[0], "season": int(k.split("|")[1]), **{
         "degradation_pct": v["degradation_pct"], "n": v["n"]}}
      for k, v in o["by_league_season"].items()])
-piv = cross.pivot(index="league", columns="season", values="degradation_pct")
 
-st.markdown("#### 🔥 劣化热图：联赛 × 赛季 Heatmap")
-st.caption("model_ll/market_ll − 1（负 = 模型优；判据线 Gate +1%）")
-fig = px.imshow(
-    piv,
-    text_auto=".2f",
-    aspect="auto",
-    color_continuous_scale="RdBu_r",
-    color_continuous_midpoint=0,
-    zmin=max(piv.min().min(), -3) if not piv.empty else -3,
-    zmax=min(piv.max().max(), 3) if not piv.empty else 3,
-    labels=dict(x="赛季", y="联赛", color="劣化 %"),
-)
-fig.update_traces(
-    hovertemplate="联赛: %{y}<br>赛季: %{x}<br>劣化: %{z:.2f}%<extra></extra>",
-    textfont=dict(size=11),
-)
-_chart_template(fig, height=max(320, len(piv) * 38 + 80))
-fig.update_layout(
-    coloraxis_colorbar=dict(
-        title="劣化 %",
-        thickness=14,
-        len=0.7,
-        x=1.02,
-    ),
-    xaxis_title="赛季 Season",
-    yaxis_title="联赛 League",
-)
-st.plotly_chart(fig, use_container_width=True, config=dict(displayModeBar=False))
+if not cross.empty:
+    piv = cross.pivot(index="league", columns="season", values="degradation_pct")
+
+    st.markdown("#### 🔥 劣化热图：联赛 × 赛季 Heatmap")
+    st.caption("model_ll/market_ll − 1（负 = 模型优；判据线 Gate +1%）"
+               " · 按当前时间范围与联赛/赛季筛选交集渲染")
+    fig = px.imshow(
+        piv,
+        text_auto=".2f",
+        aspect="auto",
+        color_continuous_scale="RdBu_r",
+        color_continuous_midpoint=0,
+        zmin=max(piv.min().min(), -3) if not piv.empty else -3,
+        zmax=min(piv.max().max(), 3) if not piv.empty else 3,
+        labels=dict(x="赛季", y="联赛", color="劣化 %"),
+    )
+    fig.update_traces(
+        hovertemplate="联赛: %{y}<br>赛季: %{x}<br>劣化: %{z:.2f}%<extra></extra>",
+        textfont=dict(size=11),
+    )
+    _chart_template(fig, height=max(320, len(piv) * 38 + 80))
+    fig.update_layout(
+        coloraxis_colorbar=dict(
+            title="劣化 %",
+            thickness=14,
+            len=0.7,
+            x=1.02,
+        ),
+        xaxis_title="赛季 Season",
+        yaxis_title="联赛 League",
+    )
+    st.plotly_chart(fig, use_container_width=True, config=dict(displayModeBar=False))
+else:
+    st.info("当前筛选条件下无联赛×赛季交叉数据")
 
 st.divider()
 

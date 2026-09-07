@@ -600,6 +600,10 @@ def _seed_three_tracks(db):
         " (7, 1, 1, 'model_persona_nokb', 'H', 'am', 0.55, 0.50, 2.5, 'Pinnacle',"
         " 0.05, 0.175, 0.009, '2026-09-04T11:30:00'),"
         " (8, 1, 1, 'model_persona_nokb', 'A', 'am', 0.40, 0.35, 2.5, 'Pinnacle',"
+        " 0.05, 0.20, 0.007, '2026-09-04T11:30:00'),"
+        " (99, 1, 1, 'model_persona_kb_self', 'H', 'am', 0.55, 0.50, 2.5, 'Pinnacle',"
+        " 0.05, 0.175, 0.009, '2026-09-04T11:30:00'),"
+        " (100, 1, 1, 'model_persona_kb_self', 'A', 'am', 0.40, 0.35, 2.5, 'Pinnacle',"
         " 0.05, 0.20, 0.007, '2026-09-04T11:30:00')")
     db.execute(
         "INSERT INTO bets (id, recommendation_id, mode, placed_at, bookmaker, odds_taken,"
@@ -618,6 +622,11 @@ def _seed_three_tracks(db):
         " (24, 7, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 8.0, 'won',"
         " '2026-09-05T06:30:00', 20.0, 2.31, 0.08),"
         " (25, 8, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 8.0, 'lost',"
+        " '2026-09-06T06:30:00', 0.0, 2.53, -0.01),"
+        # model_persona_kb_self（与 nokb 同口径：won stake=8 ret=20 clv +0.08, lost stake=8 clv -0.01）
+        " (96, 99, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 8.0, 'won',"
+        " '2026-09-05T06:30:00', 20.0, 2.31, 0.08),"
+        " (97, 100, 'paper', '2026-09-04T12:00:00', 'Pinnacle', 2.5, 8.0, 'lost',"
         " '2026-09-06T06:30:00', 0.0, 2.53, -0.01)")
     db.commit()
 
@@ -625,12 +634,13 @@ def _seed_three_tracks(db):
 # —— b_ab_tracks 三轨测试 ——
 
 def test_b_ab_tracks_three_tracks(db):
-    """三轨全量：返回 3 键、排序正确（model_only → model_persona → model_persona_nokb）。"""
+    """多轨全量：返回所有轨、排序正确（CHECK 枚举序）。"""
     from queries import b_ab_tracks
 
     _seed_three_tracks(db)
     t = b_ab_tracks(db)
-    assert list(t.keys()) == ["model_only", "model_persona", "model_persona_nokb"]
+    assert list(t.keys()) == ["model_only", "model_persona", "model_persona_nokb",
+                               "model_persona_kb_self"]
     # 各轨 2 注都已结算
     for k in t:
         assert t[k]["n"] == 2
@@ -643,11 +653,12 @@ def test_b_ab_tracks_three_tracks(db):
 
 
 def test_b_ab_tracks_empty_three(db):
-    """空库返回三轨零值骨架（UI 三列不塌陷。"""
+    """空库返回所有轨零值骨架（UI 多列不塌陷）。"""
     from queries import b_ab_tracks
 
     t = b_ab_tracks(db)
-    assert set(t.keys()) == {"model_only", "model_persona", "model_persona_nokb"}
+    assert set(t.keys()) == {"model_only", "model_persona", "model_persona_nokb",
+                             "model_persona_kb_self"}
     for k in t:
         assert t[k]["n"] == 0 and t[k]["n_settled"] == 0
         assert t[k]["roi"] is None and t[k]["clv_median"] is None
@@ -657,7 +668,7 @@ def test_b_ab_tracks_empty_three(db):
 # —— b_summary by_strategy 测试 ——
 
 def test_b_summary_by_strategy(db):
-    """by_strategy 三轨分账：bankroll 独立、各指标独立计数正确。"""
+    """by_strategy 多轨分账：bankroll 独立、各指标独立计数正确。"""
     from queries import b_summary
 
     _seed_three_tracks(db)
@@ -667,7 +678,8 @@ def test_b_summary_by_strategy(db):
     s = b_summary(db)
 
     bs = s["by_strategy"]
-    assert set(bs.keys()) == {"model_only", "model_persona", "model_persona_nokb"}
+    assert set(bs.keys()) == {"model_only", "model_persona", "model_persona_nokb",
+                             "model_persona_kb_self"}
 
     mo = bs["model_only"]
     assert mo["bankroll"] == 980.0
@@ -685,12 +697,13 @@ def test_b_summary_by_strategy(db):
 
 
 def test_b_summary_by_strategy_empty(db):
-    """空库 by_strategy 三轨全零，bankroll=None。"""
+    """空库 by_strategy 多轨全零，bankroll=None。"""
     from queries import b_summary
 
     s = b_summary(db)
     bs = s["by_strategy"]
-    assert set(bs.keys()) == {"model_only", "model_persona", "model_persona_nokb"}
+    assert set(bs.keys()) == {"model_only", "model_persona", "model_persona_nokb",
+                             "model_persona_kb_self"}
     for k in bs:
         assert bs[k]["bankroll"] is None
         assert bs[k]["n"] == 0
@@ -704,7 +717,7 @@ def test_b_summary_by_strategy_empty(db):
 # —— b_breakdown 三维度测试 ——
 
 def test_b_breakdown_market(db):
-    """market 维度：3 轨 × 2 市场（H/A）的交叉矩阵。"""
+    """market 维度：多轨 × 2 市场（H/A）的交叉矩阵。"""
     from queries import b_breakdown
 
     _seed_three_tracks(db)
@@ -714,9 +727,10 @@ def test_b_breakdown_market(db):
                           "roi", "clv_median", "avg_odds", "pnl"}
     # 三轨都有 H 和 A 两个市场
     strategies = df["strategy"].unique().tolist()
-    assert len(strategies) == 3
+    assert len(strategies) == 4
     # 排序正确
-    assert strategies == ["model_only", "model_persona", "model_persona_nokb"]
+    assert strategies == ["model_only", "model_persona",
+                              "model_persona_nokb", "model_persona_kb_self"]
     # model_only 有 H（won）和 A（lost）各一注
     mo_h = df[(df["strategy"] == "model_only") & (df["market"] == "H")].iloc[0]
     assert mo_h["n"] == 1 and mo_h["n_settled"] == 1
@@ -731,7 +745,7 @@ def test_b_breakdown_market(db):
 
 
 def test_b_breakdown_league(db):
-    """league 维度：单联赛 E0，三轨都有数据。"""
+    """league 维度：单联赛 E0，多轨都有数据。"""
     from queries import b_breakdown
 
     _seed_three_tracks(db)
@@ -739,11 +753,11 @@ def test_b_breakdown_league(db):
     assert not df.empty
     assert "league" in df.columns
     assert (df["league"] == "E0").all()
-    assert len(df) == 3  # 三轨各一行
+    assert len(df) == 4  # 四轨各一行
 
 
 def test_b_breakdown_settled_date(db):
-    """settled_date 维度：北京日口径，两日各三轨各有一注。"""
+    """settled_date 维度：北京日口径，两日各四轨各有一注。"""
     from queries import b_breakdown
 
     _seed_three_tracks(db)
@@ -754,8 +768,8 @@ def test_b_breakdown_settled_date(db):
     # d1 = 2026-09-05T06:30:00Z = 北京 2026-09-05 14:30 → 北京日 09-05
     # d2 = 2026-09-06T06:30:00Z = 北京 2026-09-06 14:30 → 北京日 09-06
     assert dates == ["2026-09-05", "2026-09-06"]
-    # 每天三轨各一注，共 6 行
-    assert len(df) == 6
+    # 每天四轨各一注，共 8 行
+    assert len(df) == 8
     # 09-05 model_only：won，pnl = +15
     mo_d1 = df[(df["strategy"] == "model_only") & (df["settled_date"] == "2026-09-05")].iloc[0]
     assert mo_d1["n_settled"] == 1

@@ -1,6 +1,7 @@
 """B 线 · 总览：bankroll / P&L / 未结注 / 额度水位 / 三轨汇总 / 在途注（设计 §3 页1，v2）。
 
 v2 变更（2026-09-07）：新增三轨汇总条（P0）+ 在途注列表（P1）。
+v3 变更（2026-09-07）：顶部统一时间范围筛选器，指标量按范围重算，状态量保留全量标注。
 """
 import sys
 from pathlib import Path
@@ -13,8 +14,11 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from loaders import pending_bets, runs, summary
+from components.time_filter import time_range_filter
+from loaders import pending_bets, paper_bets, runs, summary
 from queries import COL_BILINGUAL
+from time_utils import (anchor_from_series, filter_by_date_range,
+                        to_bj_dates)
 
 _BEIJING = timezone(timedelta(hours=8))
 
@@ -92,41 +96,111 @@ STRAT_LABELS = {
     "model_persona_kb_self": "C' 轨 · 自反思知识",
 }
 
+
+def _calc_strat_summary(bets_df: pd.DataFrame) -> dict:
+    """从 bets 明细按 strategy 计算汇总指标。"""
+    if bets_df.empty:
+        return {}
+    out = {}
+    for strat, g in bets_df.groupby("strategy"):
+        settled = g[g["status"] == "settled"]
+        pending = g[g["status"] == "pending"]
+        n_settled = len(settled)
+        pnl = settled["pnl"].sum() if n_settled else 0.0
+        staked = settled["stake"].sum() if n_settled else 0.0
+        roi = pnl / staked if staked else None
+        n_won = int((settled["result"] == "won").sum()) if n_settled else 0
+        win_rate = n_won / n_settled if n_settled else None
+        clv = settled["clv"].dropna()
+        clv_med = float(clv.median()) if len(clv) else None
+        out[strat] = {
+            "n_settled": n_settled,
+            "n_pending": len(pending),
+            "pnl": pnl,
+            "roi": roi,
+            "win_rate": win_rate,
+            "clv_median": clv_med,
+            "bankroll": None,  # 状态量不重算
+        }
+    return out
+
+
 st.header("B 线 · 总览（paper 运营）")
 try:
     s = summary()
+    all_bets = paper_bets()
 except FileNotFoundError as e:
     st.error(str(e))
     st.stop()
+
+# ── 时间范围筛选器 ──
+anchor = anchor_from_series(all_bets["settled_at"]) if not all_bets.empty else None
+start_date, end_date, grain = time_range_filter(
+    key="b1_overview",
+    default_preset="30d",
+    anchor_date=anchor,
+)
+
+# 按结算日过滤 bets（指标量口径）
+bets = filter_by_date_range(all_bets, "settled_at", start_date, end_date) \
+    if not all_bets.empty else all_bets
+
+# 按落注日过滤 pending（在途注口径）
+pend_all = pending_bets()
+pend = filter_by_date_range(pend_all, "placed_at", start_date, end_date) \
+    if not pend_all.empty else pend_all
+
+# 额度曲线按 started_at 过滤
+quota_all = s["quota_series"]
+if quota_all:
+    quota_df = pd.DataFrame(quota_all)
+    quota_df = filter_by_date_range(quota_df, "started_at", start_date, end_date)
+    quota_pts = [(r["started_at"], r["credits_after"])
+                 for _, r in quota_df.iterrows()
+                 if r["credits_after"] is not None]
+else:
+    quota_pts = []
+
+# 计算过滤后的全局指标
+if not bets.empty:
+    settled_bets = bets[bets["status"] == "settled"]
+    n_settled = len(settled_bets)
+    total_pnl = float(settled_bets["pnl"].sum()) if n_settled else 0.0
+    total_staked = float(settled_bets["stake"].sum()) if n_settled else 0.0
+    range_roi = total_pnl / total_staked if total_staked else 0.0
+else:
+    n_settled = 0
+    total_pnl = 0.0
+    range_roi = 0.0
+
+n_pending_range = len(pend) if not pend.empty else 0
 
 # —— 第一行：核心 KPI 卡片 ——
 st.markdown("#### 🎯 核心指标 Key Metrics")
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("💰 bankroll 余额",
           "—" if s["bankroll"] is None else f"{s['bankroll']:.0f}",
-          help="模拟盘总资金池（meta.paper_bankroll）")
-c2.metric("📈 累计 P&L（已结算）",
-          f"{s['pnl']:+.2f}",
-          delta=f"{(s['pnl'] / s['staked'] * 100):+.1f}% ROI" if s["staked"] else None,
-          delta_color="normal" if s["pnl"] >= 0 else "inverse",
-          help="已结算注的盈亏总和（不含 pending）")
+          help="模拟盘总资金池（meta.paper_bankroll）· 当前状态量，不受时间范围影响")
+c2.metric(f"📈 累计 P&L（已结算）",
+          f"{total_pnl:+.2f}",
+          delta=f"{range_roi:+.1%} ROI" if total_staked > 0 else None,
+          delta_color="normal" if total_pnl >= 0 else "inverse",
+          help=f"当前时间范围内已结算注的盈亏总和（不含 pending）· 共 {n_settled} 注")
 c3.metric("⏳ 在途注 Pending",
-          s["n_pending"],
-          help="尚未结算的 paper 注")
+          n_pending_range,
+          help="当前时间范围内落注、尚未结算的 paper 注")
 c4.metric("🎟️ Odds API 额度",
           "—" if s["quota_remaining"] is None else int(s["quota_remaining"]),
           delta="充足" if (s["quota_remaining"] or 0) > 200 else "偏低" if s["quota_remaining"] else None,
           delta_color="normal" if (s["quota_remaining"] or 0) > 200 else "inverse",
-          help="oddsapi 剩余调用额度（spec §3.4 节流：<100 跳拉盘）")
+          help="oddsapi 剩余调用额度（spec §3.4 节流：<100 跳拉盘）· 当前状态量，不受时间范围影响")
 
 # —— 额度曲线 ——
-pts = [(r["started_at"], r["credits_after"]) for r in s["quota_series"]
-       if r["credits_after"] is not None]
-if pts:
+if quota_pts:
     st.markdown("#### 📊 额度水位趋势 Quota Trend")
     fig = go.Figure()
     fig.add_trace(go.Scatter(
-        x=[p[0] for p in pts], y=[p[1] for p in pts],
+        x=[p[0] for p in quota_pts], y=[p[1] for p in quota_pts],
         mode="lines+markers",
         name="剩余额度",
         line=dict(color=PALETTE["primary"], width=2),
@@ -142,64 +216,69 @@ if pts:
     _chart_template(fig, height=260)
     st.plotly_chart(fig, use_container_width=True, config=dict(displayModeBar=False))
 else:
-    st.caption("暂无 run 记录——额度曲线待首个 run 落库后出现 / No runs yet")
+    st.caption("当前时间范围内无 run 记录——额度曲线待首个 run 落库后出现 / No runs in range")
 
 st.divider()
 
 # —— 三轨汇总条（P0）——
 st.markdown("#### 🛤️ 三轨汇总 Track Summary")
-by_strat = s["by_strategy"]
-strats = list(by_strat.keys())  # 已按 STRATEGIES 排序
+strat_sum = _calc_strat_summary(bets)
+# 用全量的 strategy 顺序（保证排序稳定）
+strats = list(s["by_strategy"].keys())
+# 过滤掉范围内没有数据的轨
+strats_in_range = [st_name for st_name in strats if st_name in strat_sum]
 
-# 每行最多 4 轨，多行自适应
-n_per_row = min(len(strats), 4)
-for row_start in range(0, len(strats), n_per_row):
-    row_strats = strats[row_start:row_start + n_per_row]
-    cols = st.columns(len(row_strats))
-    for col, strat in zip(cols, row_strats):
-        tr = by_strat[strat]
-        label = STRAT_LABELS.get(strat, strat)
-        color = STRAT_COLORS.get(strat, PALETTE["primary"])
-        with col:
-            # 轨标题（带色块标记）
-            st.markdown(
-                f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
-                f'<div style="width:4px;height:18px;background:{color};border-radius:2px;"></div>'
-                f'<span style="font-weight:600;font-size:0.92rem;">{label}</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            st.caption(f"`{strat}`")
+if not strats_in_range:
+    st.info("当前时间范围内无已结算注 / No settled bets in range")
+else:
+    n_per_row = min(len(strats_in_range), 4)
+    for row_start in range(0, len(strats_in_range), n_per_row):
+        row_strats = strats_in_range[row_start:row_start + n_per_row]
+        cols = st.columns(len(row_strats))
+        for col, strat in zip(cols, row_strats):
+            tr = strat_sum[strat]
+            label = STRAT_LABELS.get(strat, strat)
+            color = STRAT_COLORS.get(strat, PALETTE["primary"])
+            full_br = s["by_strategy"].get(strat, {}).get("bankroll")
+            with col:
+                st.markdown(
+                    f'<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'
+                    f'<div style="width:4px;height:18px;background:{color};border-radius:2px;"></div>'
+                    f'<span style="font-weight:600;font-size:0.92rem;">{label}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+                st.caption(f"`{strat}`")
 
-            c1, c2 = st.columns(2)
-            c1.metric("Bankroll",
-                      "—" if tr["bankroll"] is None else f"{tr['bankroll']:.0f}")
-            c2.metric("已结注", tr["n_settled"])
-            c3, c4 = st.columns(2)
-            c3.metric("胜率",
-                      "—" if tr["win_rate"] is None else f"{tr['win_rate']:.1%}")
-            roi_val = tr["roi"]
-            c4.metric("ROI",
-                      "—" if roi_val is None else f"{roi_val:+.1%}",
-                      delta_color="normal" if (roi_val or 0) >= 0 else "inverse")
-            c5, c6 = st.columns(2)
-            clv_val = tr["clv_median"]
-            c5.metric("CLV 中位",
-                      "—" if clv_val is None else f"{clv_val:+.2%}",
-                      delta_color="normal" if (clv_val or 0) >= 0 else "inverse")
-            c6.metric("在途", tr["n_pending"])
+                c1, c2 = st.columns(2)
+                c1.metric("Bankroll",
+                          "—" if full_br is None else f"{full_br:.0f}",
+                          help="当前余额，不受时间范围影响")
+                c2.metric("已结注", tr["n_settled"])
+                c3, c4 = st.columns(2)
+                c3.metric("胜率",
+                          "—" if tr["win_rate"] is None else f"{tr['win_rate']:.1%}")
+                roi_val = tr["roi"]
+                c4.metric("ROI",
+                          "—" if roi_val is None else f"{roi_val:+.1%}",
+                          delta_color="normal" if (roi_val or 0) >= 0 else "inverse")
+                c5, c6 = st.columns(2)
+                clv_val = tr["clv_median"]
+                c5.metric("CLV 中位",
+                          "—" if clv_val is None else f"{clv_val:+.2%}",
+                          delta_color="normal" if (clv_val or 0) >= 0 else "inverse")
+                c6.metric("在途", tr["n_pending"])
 
-            if tr["n_settled"] < 300:
-                st.caption("⚠️ 样本 < 300 注，仅供观察")
+                if tr["n_settled"] < 300:
+                    st.caption("⚠️ 样本 < 300 注，仅供观察")
 
 st.divider()
 
 # —— 在途注列表（P1）——
-with st.expander(f"⏳ 在途注 Pending Bets（{s['n_pending']} 注）",
-                 expanded=s["n_pending"] > 0):
-    pend = pending_bets()
+with st.expander(f"⏳ 在途注 Pending Bets（{n_pending_range} 注）",
+                 expanded=n_pending_range > 0):
     if pend.empty:
-        st.info("当前无在途注 / No pending bets")
+        st.info("当前时间范围内无在途注 / No pending bets in range")
     else:
         pend["kickoff_bj"] = pend["kickoff_utc"].map(
             lambda x: _bj_time(x) if x else "—")
@@ -214,12 +293,16 @@ with st.expander(f"⏳ 在途注 Pending Bets（{s['n_pending']} 注）",
             hide_index=True,
             height=min(420, max(200, len(pend) * 36 + 40)),
         )
+    st.caption("在途注按落注日（placed_at）的北京日落在范围内筛选。")
 
 # —— 最近 run ——
 st.markdown("#### 🕐 最近 run Recent Runs")
-df = runs().head(5)
+runs_all = runs()
+runs_filtered = filter_by_date_range(runs_all, "started_at", start_date, end_date) \
+    if not runs_all.empty else runs_all
+df = runs_filtered.head(5)
 if df.empty:
-    st.caption("暂无 run 记录 / No runs yet")
+    st.caption("当前时间范围内无 run 记录 / No runs in range")
 else:
     st.dataframe(
         df.rename(columns=COL_BILINGUAL),

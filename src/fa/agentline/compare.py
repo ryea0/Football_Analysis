@@ -28,8 +28,11 @@ def merge_rows(bp_rows: list[dict], agent_rows: list[dict]) -> list[dict]:
     return out
 
 
-def _bp_filter(leagues, seasons) -> tuple[str, list]:
-    """bp 侧联赛/赛季过滤子句（线指标取数与成员审计共用，语义单点维护）。"""
+def _bp_filter(leagues, seasons, date_from=None, date_to=None) -> tuple[str, list]:
+    """bp 侧联赛/赛季/日期过滤子句（线指标取数与成员审计共用，语义单点维护）。
+
+    ``date_from`` / ``date_to``：比赛日（YYYY-MM-DD 字符串，含两端），None=不限。
+    """
     sql, args = "", []
     if leagues:
         sql += f" AND bp.league IN ({','.join('?' * len(leagues))})"
@@ -37,10 +40,17 @@ def _bp_filter(leagues, seasons) -> tuple[str, list]:
     if seasons:
         sql += f" AND bp.season IN ({','.join('?' * len(seasons))})"
         args += list(seasons)
+    if date_from:
+        sql += " AND bp.date >= ?"
+        args.append(date_from)
+    if date_to:
+        sql += " AND bp.date <= ?"
+        args.append(date_to)
     return sql, args
 
 
-def _fetch_agent(conn, line, leagues, seasons, attributor=None) -> list[dict]:
+def _fetch_agent(conn, line, leagues, seasons, attributor=None,
+                 date_from=None, date_to=None) -> list[dict]:
     sql = ("SELECT * FROM agentline_predictions ap"
            " JOIN backtest_predictions bp ON bp.match_id = ap.match_id"
            " WHERE ap.line=? AND ap.status='ok'")
@@ -50,34 +60,37 @@ def _fetch_agent(conn, line, leagues, seasons, attributor=None) -> list[dict]:
         # merge_rows 的 by_mid 一对一折叠会静默吃进成员概率（AM-T1 审查点）。
         sql += " AND ap.attributor=?"
         args.append(attributor)
-    w, a = _bp_filter(leagues, seasons)
+    w, a = _bp_filter(leagues, seasons, date_from, date_to)
     return [dict(r) for r in conn.execute(sql + w, args + a)]
 
 
-def compare_lines(conn, leagues=None, seasons=None) -> dict:
-    # 线 P 行直接复用回测读取器（联赛/赛季过滤语义单点维护）
+def compare_lines(conn, leagues=None, seasons=None,
+                  date_from=None, date_to=None) -> dict:
+    # 线 P 行直接复用回测读取器（联赛/赛季/日期过滤语义单点维护）
     from fa.backtest.metrics import fetch_predictions
-    bp = fetch_predictions(conn, leagues, seasons)
+    bp = fetch_predictions(conn, leagues, seasons, date_from, date_to)
     e_p = evaluate(bp)                      # 只评一次：market 列与 P 行共用同一份
     cmp = {"n": len(bp), "P": e_p,
            "market": {"ll": e_p["market_ll"]}}
     roi_rows = {"P": bp}
     for line, attr in (("A_base", 1), ("A_enh", 1), ("A_multi", 0),
                        ("A_debate", 1), ("A_division", 1)):
-        ag = _fetch_agent(conn, line, leagues, seasons, attributor=attr)
+        ag = _fetch_agent(conn, line, leagues, seasons,
+                          attributor=attr, date_from=date_from, date_to=date_to)
         rows = merge_rows(bp, ag)
         # evaluate 自带该子集的 market_ll——报告按行展示，分母不再混用全量值
         cmp[line] = evaluate(rows) if rows else {"n": 0}
         roi_rows[line] = rows
     cmp["roi"] = {k: simulate_flat(candidates(v)) if v else {"n": 0}
                   for k, v in roi_rows.items()}
-    enh = _fetch_agent(conn, "A_enh", leagues, seasons, attributor=1)
+    enh = _fetch_agent(conn, "A_enh", leagues, seasons, attributor=1,
+                       date_from=date_from, date_to=date_to)
     cmp["audit"] = {"enh_sources": sum(
         len(json.loads(r["sources_json"] or "[]")) for r in enh)}
     # A_multi 成员级审计：成员分母必须含非 ok 行（parse_fail/timeout 也是成员，
     # 吞掉会把聚合质量虚高）——口径与线指标取数（只看 ok）不同，故不复用
     # _fetch_agent 的 status 过滤，单开计数（成员级行数 + ok 数）。
-    w, a = _bp_filter(leagues, seasons)
+    w, a = _bp_filter(leagues, seasons, date_from, date_to)
     multi = [dict(r) for r in conn.execute(
         "SELECT ap.attributor, ap.status FROM agentline_predictions ap"
         " JOIN backtest_predictions bp ON bp.match_id = ap.match_id"
@@ -85,12 +98,13 @@ def compare_lines(conn, leagues=None, seasons=None) -> dict:
     cmp["audit"]["multi_members"] = len(multi)
     cmp["audit"]["multi_member_ok"] = sum(
         1 for r in multi if r["status"] == "ok")
-    cmp["debate"] = debate_gain(conn, leagues, seasons)
-    cmp["division"] = division_stratified(conn, leagues, seasons)
+    cmp["debate"] = debate_gain(conn, leagues, seasons, date_from, date_to)
+    cmp["division"] = division_stratified(conn, leagues, seasons, date_from, date_to)
     return cmp
 
 
-def debate_gain(conn, leagues=None, seasons=None) -> dict:
+def debate_gain(conn, leagues=None, seasons=None,
+                date_from=None, date_to=None) -> dict:
     """修订增益（2026-09-05 设计 §2.5）：v0 vs 终版同场对比 + 分歧相关性。
 
     v0 取 rounds 表 round=0 的 generator ok 行 payload；终版取 predictions
@@ -100,8 +114,9 @@ def debate_gain(conn, leagues=None, seasons=None) -> dict:
     Spearman 未定义返回 nan，如实记 None，不渲染 ρ=nan（仿 retro._mwu_p）。
     """
     from fa.backtest.metrics import fetch_predictions
-    bp = fetch_predictions(conn, leagues, seasons)
-    finals = _fetch_agent(conn, "A_debate", leagues, seasons, attributor=1)
+    bp = fetch_predictions(conn, leagues, seasons, date_from, date_to)
+    finals = _fetch_agent(conn, "A_debate", leagues, seasons,
+                          attributor=1, date_from=date_from, date_to=date_to)
     by_mid = {r["match_id"]: r for r in finals}
     if not by_mid:
         return {"n": 0}
@@ -158,7 +173,8 @@ def _mwu_p(a: list, b: list):
 _SEVERITY_HIGH = 0.5
 
 
-def division_stratified(conn, leagues=None, seasons=None) -> dict:
+def division_stratified(conn, leagues=None, seasons=None,
+                       date_from=None, date_to=None) -> dict:
     """质询标签分层检验（2026-09-05 设计 §3.4，retro 关卡3 口径）。
 
     分层键 = 五标签任一命中；jumpN_fail 是管线降级信号、不进分层键（判决
@@ -180,9 +196,10 @@ def division_stratified(conn, leagues=None, seasons=None) -> dict:
     """
     from fa.backtest.metrics import fetch_predictions, log_loss
     from fa.agentline.division import derive_flags
-    bp = fetch_predictions(conn, leagues, seasons)
-    rows = merge_rows(bp, _fetch_agent(conn, "A_division", leagues, seasons,
-                                       attributor=1))
+    bp = fetch_predictions(conn, leagues, seasons, date_from, date_to)
+    rows = merge_rows(bp, _fetch_agent(
+        conn, "A_division", leagues, seasons,
+        attributor=1, date_from=date_from, date_to=date_to))
     flagged, unflagged = [], []
     high, low = [], []
     n_no_attack = 0

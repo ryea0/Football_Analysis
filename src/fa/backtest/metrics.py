@@ -11,8 +11,11 @@ _IDX = {"H": 0, "D": 1, "A": 2}
 
 
 def fetch_predictions(conn: sqlite3.Connection, leagues=None,
-                      seasons=None) -> list[dict]:
-    """读 backtest_predictions（Task 2/6 产出的表），可选联赛/赛季过滤。"""
+                      seasons=None, date_from=None, date_to=None) -> list[dict]:
+    """读 backtest_predictions（Task 2/6 产出的表），可选联赛/赛季/日期过滤。
+
+    ``date_from`` / ``date_to``：比赛日（YYYY-MM-DD 字符串，含两端），None=不限。
+    """
     sql = "SELECT * FROM backtest_predictions WHERE 1=1"
     args: list = []
     if leagues:
@@ -21,6 +24,12 @@ def fetch_predictions(conn: sqlite3.Connection, leagues=None,
     if seasons:
         sql += f" AND season IN ({','.join('?' * len(seasons))})"
         args += list(seasons)
+    if date_from:
+        sql += " AND date >= ?"
+        args.append(date_from)
+    if date_to:
+        sql += " AND date <= ?"
+        args.append(date_to)
     return [dict(r) for r in conn.execute(sql, args)]
 
 

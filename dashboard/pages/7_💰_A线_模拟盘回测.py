@@ -1,4 +1,7 @@
-"""A 线 · 模拟盘回测：flat vs ¼ Kelly（设计 §3 页7）。"""
+"""A 线 · 模拟盘回测：flat vs ¼ Kelly（设计 §3 页7）。
+
+v2（2026-09-07）：顶部统一时间范围筛选器，累计曲线从范围起点重算。
+"""
 import sys
 from pathlib import Path
 
@@ -8,7 +11,8 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from loaders import paper_sim
+from components.time_filter import time_range_filter
+from loaders import overview, paper_sim
 from queries import COL_BILINGUAL
 
 PALETTE = {
@@ -40,10 +44,36 @@ def _chart_template(fig: go.Figure, height: int = 320) -> go.Figure:
 
 st.header("A 线 · 模拟盘回测（flat / ¼ Kelly）")
 try:
-    s = paper_sim()
+    full = overview()
 except FileNotFoundError as e:
     st.error(str(e))
     st.stop()
+if full["empty"]:
+    st.info("backtest_predictions 为空——先跑回测")
+    st.stop()
+
+leagues_all = sorted(full["by_league"])
+seasons_all = sorted(full["by_season"])
+
+# ── 时间范围筛选器 ──
+last_season = max(int(s) for s in seasons_all) if seasons_all else 2025
+anchor_date = pd.Timestamp(f"{last_season}-06-30").date()
+
+start_date, end_date, grain = time_range_filter(
+    key="a7_paper_sim",
+    default_preset="all",
+    anchor_date=anchor_date,
+)
+
+# ── 联赛 + 赛季筛选 ──
+c1, c2 = st.columns(2)
+sel_l = c1.multiselect("联赛 Leagues", leagues_all, default=leagues_all)
+sel_s = c2.multiselect("赛季 Seasons", seasons_all, default=seasons_all)
+
+date_from_str = start_date.isoformat() if start_date.year > 2000 else None
+date_to_str = end_date.isoformat() if end_date.year < 2090 else None
+
+s = paper_sim(sel_l or None, sel_s or None, date_from_str, date_to_str)
 if s["empty"]:
     st.info("无候选注——回测候选由 §5.2 门槛筛出（EV≥3% 且 edge≥2% 且赔率∈[1.4,6.0]）"
             " / No candidates — gated by §5.2 thresholds")
@@ -154,3 +184,4 @@ st.caption(
     " / Fill price = Pinnacle closing (conservative); O2.5 excluded "
     "(no closing odds in backtest candidates); same basis as M2 report."
 )
+st.caption("累计曲线从当前时间范围起点重算（flat 从 0 起，Kelly 从 1000 起）。")

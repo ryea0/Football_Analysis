@@ -1,5 +1,7 @@
 """A' 线 · 范式对比（DSH agent 当大脑 vs 确定性模型）。
 
+v2（2026-09-07）：顶部统一时间范围筛选器 + 联赛/赛季过滤。
+
 口径 = 同场交集对比（线 P / A_base / A_enh / A_multi / A_debate / A_division
 共六条线，在同一批场次上用同一判据——market 为各自子集的去水收盘）。
 
@@ -15,8 +17,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from loaders import al_compare, al_divergence, al_runs, al_samples
+from components.time_filter import time_range_filter
+from loaders import al_compare, al_divergence, al_runs, al_samples, overview
 from queries import COL_BILINGUAL
+from time_utils import filter_by_date_range, to_bj_dates
 
 PALETTE = {
     "primary": "#2563eb",
@@ -68,21 +72,37 @@ if full["empty"]:
     st.info("agentline_predictions 为空——先运行 `fa agentline export` + `fa agentline run --line A_base`")
     st.stop()
 
-# ---- 小样本警告（诚实性约束，n<100 必须醒目）----
-n_max = max((full.get(k, {}).get("n", 0) for k in
-             ("A_base", "A_enh", "A_multi", "A_debate", "A_division")),
-            default=0)
-if n_max < 100:
-    st.warning(
-        "⚠️ 本页为链路验证样本（各线 n < 100），数字**无统计意义**，"
-        "仅用于验证管线可用性。结论以 100 场以上的滚动报告为准。",
-        icon="⚠️")
+# ---- 时间范围筛选器 ----
+# 锚点用 A 线最新赛季 6 月末（同 A 线页的口径）
+try:
+    a_full = overview()
+    seasons_all_a = sorted(a_full.get("by_season", {}).keys())
+    leagues_all_a = sorted(a_full.get("by_league", {}).keys())
+except Exception:
+    seasons_all_a = []
+    leagues_all_a = []
 
-# ---- 过滤控件说明 ----
-st.caption("当前为全量对比（所有有 agentline 预测的场次）。"
-           "按联赛/赛季过滤待后续版本加入。")
+last_season = max(int(s) for s in seasons_all_a) if seasons_all_a else 2025
+anchor_date = pd.Timestamp(f"{last_season}-06-30").date()
 
-cmp = full
+start_date, end_date, grain = time_range_filter(
+    key="a8_agentline",
+    default_preset="all",
+    anchor_date=anchor_date,
+)
+
+date_from_str = start_date.isoformat() if start_date.year > 2000 else None
+date_to_str = end_date.isoformat() if end_date.year < 2090 else None
+
+# ---- 联赛 / 赛季筛选 ----
+c1, c2 = st.columns(2)
+sel_l = c1.multiselect("联赛 Leagues", leagues_all_a, default=leagues_all_a)
+sel_s = c2.multiselect("赛季 Seasons", seasons_all_a, default=seasons_all_a)
+
+cmp = al_compare(sel_l or None, sel_s or None, date_from_str, date_to_str)
+if cmp["empty"]:
+    st.info("当前筛选条件下无数据——放宽时间范围或联赛/赛季。")
+    st.stop()
 
 # ---- 核心对照指标 ----
 st.markdown("#### 📊 六线对照 Six-Line Comparison")
@@ -208,7 +228,7 @@ st.divider()
 
 # ---- A_multi 成员分歧 ----
 st.markdown("#### 🔀 A_multi · 成员分歧 Member Divergence")
-div = al_divergence()
+div = al_divergence(sel_l or None, sel_s or None, date_from_str, date_to_str)
 if div["n_matches"] == 0:
     st.info("A_multi 无成员数据（或成员数 < 2）")
 else:
@@ -311,20 +331,25 @@ if not runs_list:
     st.info("暂无运行记录")
 else:
     runs_df = pd.DataFrame(runs_list)
-    show_cols = ["id", "line", "n_ok", "n_parse_fail", "n_timeout",
-                 "n_error", "started_at", "finished_at"]
-    show_cols = [c for c in show_cols if c in runs_df.columns]
-    st.dataframe(
-        runs_df[show_cols].rename(columns=COL_BILINGUAL),
-        use_container_width=True,
-        hide_index=True,
-        height=min(420, max(200, len(runs_df) * 36 + 40)),
-    )
+    # 按时间范围过滤（started_at 的北京日）
+    runs_df = filter_by_date_range(runs_df, "started_at", start_date, end_date)
+    if runs_df.empty:
+        st.info("当前时间范围内无运行记录")
+    else:
+        show_cols = ["id", "line", "n_ok", "n_parse_fail", "n_timeout",
+                     "n_error", "started_at", "finished_at"]
+        show_cols = [c for c in show_cols if c in runs_df.columns]
+        st.dataframe(
+            runs_df[show_cols].rename(columns=COL_BILINGUAL),
+            use_container_width=True,
+            hide_index=True,
+            height=min(420, max(200, len(runs_df) * 36 + 40)),
+        )
 
 # ---- 示例比赛 ----
 st.divider()
 st.markdown("#### 🎯 示例比赛 · agent 推理 Sample Predictions")
-samples = al_samples(limit=3)
+samples = al_samples(sel_l or None, sel_s or None, date_from_str, date_to_str, limit=3)
 if not samples:
     st.info("暂无 A_base 样本")
 else:

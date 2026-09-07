@@ -70,25 +70,25 @@ def unknown():
 
 
 @st.cache_data(ttl=300)
-def overview(leagues=None, seasons=None) -> dict:
-    return _run(a_overview, leagues, seasons)
+def overview(leagues=None, seasons=None, date_from=None, date_to=None) -> dict:
+    return _run(a_overview, leagues, seasons, date_from, date_to)
 
 
 @st.cache_data(ttl=300)
-def calibration(leagues=None, seasons=None) -> dict:
-    return _run(a_calibration, leagues, seasons)
+def calibration(leagues=None, seasons=None, date_from=None, date_to=None) -> dict:
+    return _run(a_calibration, leagues, seasons, date_from, date_to)
 
 
 @st.cache_data(ttl=300)
-def paper_sim(leagues=None, seasons=None) -> dict:
-    return _run(a_paper_sim, leagues, seasons)
+def paper_sim(leagues=None, seasons=None, date_from=None, date_to=None) -> dict:
+    return _run(a_paper_sim, leagues, seasons, date_from, date_to)
 
 
 # ---- 范式对比线（A' 线 / agentline）----
 
 @st.cache_data(ttl=300)
-def al_compare(leagues=None, seasons=None) -> dict:
-    return _run(agentline_compare, leagues, seasons)
+def al_compare(leagues=None, seasons=None, date_from=None, date_to=None) -> dict:
+    return _run(agentline_compare, leagues, seasons, date_from, date_to)
 
 
 @st.cache_data(ttl=300)
@@ -97,10 +97,10 @@ def al_runs() -> list:
 
 
 @st.cache_data(ttl=300)
-def al_divergence(leagues=None, seasons=None) -> dict:
-    return _run(agentline_member_divergence, leagues, seasons)
+def al_divergence(leagues=None, seasons=None, date_from=None, date_to=None) -> dict:
+    return _run(agentline_member_divergence, leagues, seasons, date_from, date_to)
 
 
 @st.cache_data(ttl=300)
-def al_samples(leagues=None, seasons=None, limit=5) -> list:
-    return _run(agentline_sample_matches, leagues, seasons, limit)
+def al_samples(leagues=None, seasons=None, date_from=None, date_to=None, limit=5) -> list:
+    return _run(agentline_sample_matches, leagues, seasons, date_from, date_to, limit)
