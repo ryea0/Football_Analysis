@@ -257,29 +257,28 @@ def _bj_days(df: pd.DataFrame, column: str) -> pd.Series:
     return parsed.dt.tz_convert(_BEIJING).dt.strftime("%Y-%m-%d")
 
 
-def b_ab_tracks(conn: sqlite3.Connection) -> dict:
-    """页3：三轨注数/ROI/CLV 中位数 + 按结算日累计 P&L（§6.6/§12.3 + C 线对照）。
+def b_multi_tracks(conn: sqlite3.Connection) -> dict:
+    """页3：多轨注数/ROI/CLV 中位数 + 按结算日累计 P&L（§6.6/§12.3/§12.7）。
 
-    策略轨从数据动态发现，排序参照后端 STRATEGIES（单一事实源）；空库
-    仍返回三轨的零值骨架（保持 UI 三列布局稳定）。
+    从 recommendations.strategy 列的 CHECK 枚举自动发现所有轨（新增轨零配置生效）。
     样本量语义交给页面展示（进度条 + 警示）；这里只算数，不判结论。
+    返回 ``{strategy_label: {...}}``，顺序按 strategy 在库中出现的稳定序。
     """
+    # 发现所有 strategy（读 CHECK 枚举更准；取不到就退化为 distinct）
+    strategies = _discover_strategies(conn)
     df = pd.read_sql_query("""
         SELECT r.strategy AS strategy, b.status, b.stake, b.return_amt,
                b.clv, b.settled_at
         FROM bets b JOIN recommendations r ON r.id = b.recommendation_id
         WHERE b.mode = 'paper'""", conn)
     out: dict = {}
-    # 以 STRATEGIES 为骨架：缺数据的轨补零值，保证 UI 三列稳定
-    present = set(df["strategy"].unique()) if not df.empty else set()
-    strats = [s for s in _STRATEGIES if s in present] + \
-             [s for s in _STRATEGIES if s not in present]
-    for strat in strats:
-        g = df[df["strategy"] == strat] if not df.empty else df.iloc[0:0]
+    for strat in strategies:
+        g = df[df["strategy"] == strat]
         settled = g[g["status"].isin(["won", "lost"])].sort_values("settled_at")
         pnl = float(settled["return_amt"].fillna(0).sum() - settled["stake"].sum()) if len(settled) else 0.0
         staked = float(settled["stake"].sum()) if len(settled) else 0.0
-        out[strat] = {
+        out[_track_label(strat)] = {
+            "strategy": strat,
             "n": int(len(g)),
             "n_settled": int(len(settled)),
             "roi": (pnl / staked) if staked else None,
@@ -454,6 +453,54 @@ def b_pending(conn: sqlite3.Connection) -> pd.DataFrame:
         LEFT JOIN teams ta ON ta.id = f.away_team_id
         WHERE b.mode = 'paper' AND b.status = 'pending'
         ORDER BY f.kickoff_utc ASC, b.id ASC""", conn)
+_TRACK_LABELS = {
+    "model_only": "模型-only 基线",
+    "model_persona": "模型 + 人格（C 线知识）",
+    "model_persona_nokb": "模型 + 人格（无知识库）",
+    "model_persona_kb_self": "模型 + 人格（C' 自反思知识）",
+}
+
+
+def _track_label(strategy: str) -> str:
+    return _TRACK_LABELS.get(strategy, strategy)
+
+
+def _discover_strategies(conn: sqlite3.Connection) -> list[str]:
+    """从 recommendations.strategy 的 CHECK 约束枚举里读全部 strategy。
+
+    读不到（表未建 / 约束格式变了）→ 退化为从数据里 distinct。结果稳定排序。
+    """
+    try:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name='recommendations'"
+        ).fetchone()
+        if row and row[0]:
+            import re
+            m = re.search(
+                r"CHECK\s*\(\s*strategy\s+IN\s*\(([^)]+)\)", row[0], re.IGNORECASE)
+            if m:
+                items = [s.strip().strip("'\"") for s in m.group(1).split(",")]
+                if items:
+                    return items
+    except sqlite3.Error:
+        pass
+    # 退化：从数据里 distinct
+    rows = conn.execute(
+        "SELECT DISTINCT strategy FROM recommendations WHERE strategy IS NOT NULL"
+        " ORDER BY strategy").fetchall()
+    return [r[0] for r in rows]
+
+
+# 向后兼容：旧版页3/旧测试调用 b_ab_tracks，现在转发到 b_multi_tracks
+# （用 strategy 名做键 + 去掉 strategy 字段，保持旧 API 形状）
+def b_ab_tracks(conn: sqlite3.Connection) -> dict:
+    """兼容旧调用：返回所有轨（用 strategy 名做键，无 strategy 字段）。"""
+    full = b_multi_tracks(conn)
+    out = {}
+    for _label, tr in full.items():
+        strat = tr["strategy"]
+        out[strat] = {k: v for k, v in tr.items() if k != "strategy"}
+    return out
 
 
 def b_runs(conn: sqlite3.Connection) -> pd.DataFrame:

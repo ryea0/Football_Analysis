@@ -125,3 +125,4 @@ def persona_path(league: str) -> Path:
 EVOLUTION_EPOCH = date(2026, 9, 4)      # §12.3 cron 激活日 = B 线前向窗口锚点
 EVOLUTION_WINDOW_DAYS = 42              # 6 周/窗（设计档 §1）
 KB_MAX_CHARS = 2400                     # 知识文件长度上限（设计档 §4）
+KB_SELF_MAX_CHARS = 8000                # C' 线自反思知识库上限（时间线式，内容更多）

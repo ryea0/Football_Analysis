@@ -299,48 +299,79 @@ def test_phase_degrades_unmapped_league_as_persona_file(conn_seeded, monkeypatch
 
 def test_phase_degrades_all_when_snapshot_unbuildable(conn_seeded, monkeypatch,
                                                       fix, persona_files):
-    """M6 终审 F3（相级缝）：``ensure_current_snapshot`` 抛 OSError → 该相全部
-    待判场两轨同降 reason='kb_snapshot'，verdict 保持 NULL、零调用、不抛——
-    matchday phase 不被一个知识快照 IO 故障炸掉（§6.5 降级语义）。"""
+    """M6 终审 F3（相级缝）：两条知识轨快照都抛 OSError → 该相知识轨降级，
+    nokb 对照轨不受影响（§12.7 对照轨独立降级语义）。verdict 保持 NULL、
+    不抛——matchday phase 不被知识快照 IO 故障炸掉（§6.5 降级语义）。"""
     conn, fx, run_id = conn_seeded
     _seed_nokb(conn, run_id, fx)
+    # 给 self 轨也 seed 一行
+    conn.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " final_stake_frac, created_at)"
+        " SELECT run_id, fixture_id, 'model_persona_kb_self', market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " final_stake_frac, created_at FROM recommendations"
+        " WHERE strategy='model_persona_nokb'")
+    conn.commit()
 
     def boom():
         raise OSError("disk gone")
 
     monkeypatch.setattr(apply_mod, "ensure_current_snapshot", boom)
+    monkeypatch.setattr(apply_mod, "ensure_current_snapshot_self", boom)
     monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
     out = run_persona_phase(conn, run_id, ["D1"])
-    assert out["called"] == 0 and out["nokb_called"] == 0     # 未触达调用
+    assert out["called"] == 0                                   # kb 轨：未触达调用
+    assert out["self_called"] == 0                              # self 轨：未触达调用
+    assert out["nokb_called"] == 1                              # nokb 对照轨：不受影响
     assert out["degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
-    assert out["nokb_degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
+    assert out["self_degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
+    assert out["nokb_degraded"] == []                           # nokb 不降
     assert out["attempted"] == [fx]                            # 记账契约不变
-    assert all(r["verdict"] is None for r in recs(conn, fx))
-    assert all(r["verdict"] is None for r in conn.execute(
+    assert all(r["verdict"] is None for r in recs(conn, fx))   # C 线 kb 轨
+    assert all(r["verdict"] is None for r in conn.execute(     # C' 线 self 轨
+        "SELECT verdict FROM recommendations"
+        " WHERE strategy='model_persona_kb_self'").fetchall())
+    # nokb 对照轨不受影响，正常落判决
+    assert all(r["verdict"] is not None for r in conn.execute(
         "SELECT verdict FROM recommendations"
         " WHERE strategy='model_persona_nokb'").fetchall())
 
 
 def test_phase_degrades_fixture_when_snapshot_unreadable(conn_seeded, monkeypatch,
                                                          fix, persona_files):
-    """M6 终审 F3（场级缝）：``window_kb_text`` 抛 OSError → 该场两轨同降
-    reason='kb_snapshot'，其余逻辑照走、不抛（快照目录被外力动过的真实形态）。"""
+    """M6 终审 F3（场级缝）：``window_kb_text`` 抛 OSError → 知识轨该场降级，
+    nokb 对照轨不受影响（§12.7 对照轨独立降级语义）。"""
     conn, fx, run_id = conn_seeded
     _seed_nokb(conn, run_id, fx)
+    # 给 self 轨也 seed 一行
+    conn.execute(
+        "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " final_stake_frac, created_at)"
+        " SELECT run_id, fixture_id, 'model_persona_kb_self', market, phase,"
+        " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
+        " final_stake_frac, created_at FROM recommendations"
+        " WHERE strategy='model_persona_nokb'")
+    conn.commit()
 
     def boom(idx, league):
         raise OSError("snapshot vanished")
 
     monkeypatch.setattr(apply_mod, "window_kb_text", boom)
+    monkeypatch.setattr(apply_mod, "window_kb_text_self", boom)
     monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
     out = run_persona_phase(conn, run_id, ["D1"])
-    assert out["called"] == 0 and out["nokb_called"] == 0
+    assert out["called"] == 0 and out["self_called"] == 0      # 知识轨：未触达
+    assert out["nokb_called"] == 1                              # nokb 对照轨：不受影响
     assert out["degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
-    assert out["nokb_degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
+    assert out["self_degraded"] == [{"fixture_id": fx, "reason": "kb_snapshot"}]
+    assert out["nokb_degraded"] == []
     assert all(r["verdict"] is None for r in recs(conn, fx))
     assert all(r["verdict"] is None for r in conn.execute(
         "SELECT verdict FROM recommendations"
-        " WHERE strategy='model_persona_nokb'").fetchall())
+        " WHERE strategy='model_persona_kb_self'").fetchall())
 
 
 def test_phase_degradation_isolates_fixtures(conn_seeded, tmp_path, monkeypatch,

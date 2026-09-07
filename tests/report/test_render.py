@@ -545,19 +545,21 @@ def test_pm_update_excludes_nokb_track(conn):
 
 
 def test_status_shows_three_tracks(conn):
-    """fa status 的 B 线栏三轨（paper_summary 单源自动）——验证不被 render
+    """fa status 的 B 线栏多轨（paper_summary 单源自动）——验证不被 render
     过滤误伤（status 走 cli._b_line_summary，不经 render）。"""
     from fa.pipeline.paper import paper_summary
     assert set(paper_summary(conn)) == {"model_only", "model_persona",
-                                        "model_persona_nokb"}
+                                        "model_persona_nokb",
+                                        "model_persona_kb_self"}
 
 
 def test_strategy_label_map_still_covers_nokb():
-    """`_REC_SQL` 已把 nokb 挡在 TG 正文外，但展示标签表保持三键完整——
+    """`_REC_SQL` 已把 nokb 挡在 TG 正文外，但展示标签表保持多键完整——
     非 TG 语境（status/dashboard 复用本表）不得跌回裸英文回退。"""
     assert _STRATEGY["model_persona_nokb"] == "模型+persona·无知识库"
-    assert set(_STRATEGY) == {"model_only", "model_persona",
-                              "model_persona_nokb"}
+    assert "model_persona_kb_self" in _STRATEGY  # C' 线自反思轨也有标签
+    assert {"model_only", "model_persona", "model_persona_nokb",
+            "model_persona_kb_self"}.issubset(set(_STRATEGY))
 
 
 # ------------------------------------------------- 降级分支（T4/T7 交互）

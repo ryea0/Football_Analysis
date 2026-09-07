@@ -972,6 +972,115 @@ def evolve_shelve_cmd(
     _evolve_ruled_action("shelved", window, league, note)
 
 
+# ---- C' 线自反思进化（对照实验线）----
+
+evolve_self_app = typer.Typer(help="C' 线（自反思知识库对照线，实验级）")
+app.add_typer(evolve_self_app, name="evolve-self")
+
+
+@evolve_self_app.command("status")
+def evolve_self_status_cmd() -> None:
+    """当前窗/自反思知识库版本/最近反思记录"""
+    from fa.evolve_self.runner import evolve_self_status_text
+    conn = connect()
+    try:
+        typer.echo(evolve_self_status_text(conn))
+    finally:
+        conn.close()
+
+
+@evolve_self_app.command("tick")
+def evolve_self_tick_cmd() -> None:
+    """周检：窗口收口触发自反思 + 自动落账（cron 入口）"""
+    from fa.evolve_self import EvolutionSelfError
+    from fa.evolve_self.runner import run_tick_self
+    conn = connect()
+    try:
+        typer.echo(run_tick_self(conn))
+    except EvolutionSelfError as exc:
+        typer.echo(f"tick 失败：{exc}")
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+
+@evolve_self_app.command("reflect")
+def evolve_self_reflect_cmd(
+    window: int = typer.Option(None, "--window", help="窗口序号；缺省=最新到期窗"),
+    league: str = typer.Option(None, "--league", help="联赛码；缺省=五联赛全跑"),
+    calibrate: bool = typer.Option(False, "--calibrate",
+                                   help="校准模式：不落库、产物进 calibration 目录"),
+) -> None:
+    """手动自反思一个窗口（自动落账）"""
+    from fa.evolve_self import EvolutionSelfError
+    from fa.evolve_self.runner import run_reflect_self
+    conn = connect()
+    try:
+        out = run_reflect_self(conn, window, league, calibrate=calibrate)
+    except (ValueError, EvolutionSelfError) as exc:
+        typer.echo(f"参数错误：{exc}")
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+    if out["calibrate"]:
+        typer.echo(f"校准自反思完成：w{out['window']} {out['leagues']}——产物在"
+                   " evolution/proposals_self/calibration-*/，未落任何 DB 行")
+    else:
+        for r in out["results"]:
+            reason = r.get("no_change_reason")
+            applied = r.get("applied")
+            typer.echo(f"w{out['window']} {r['league']}：{r['status']}"
+                       + (f"（{reason}）" if reason else "")
+                       + (" → 自动落账" if applied else ""))
+        typer.echo("fa evolve-self diff 查看变更 → fa evolve-self rollback 回滚")
+
+
+@evolve_self_app.command("diff")
+def evolve_self_diff_cmd(
+    window: int = typer.Option(None, "--window"),
+    league: str = typer.Option(None, "--league"),
+) -> None:
+    """查看自反思 diff"""
+    from fa.evolve_self.runner import diff_self_text
+    conn = connect()
+    try:
+        typer.echo(diff_self_text(conn, window, league))
+    finally:
+        conn.close()
+
+
+@evolve_self_app.command("rollback")
+def evolve_self_rollback_cmd(
+    window: int = typer.Option(..., "--window"),
+    league: str = typer.Option(..., "--league"),
+    note: str = typer.Option(..., "--note", help="回滚理由（强制）"),
+) -> None:
+    """回滚自反思落账（从 git 历史恢复 + 记 Ruling）"""
+    from fa.evolve_self import EvolutionSelfError
+    from fa.evolve_self import apply as A
+    if not note.strip():
+        typer.echo("回滚必须留理由（note 强制非空）")
+        raise typer.Exit(code=1)
+    conn = connect()
+    try:
+        wrow = conn.execute("SELECT id FROM evolution_self_windows WHERE idx=?",
+                            (window,)).fetchone()
+        if wrow is None:
+            typer.echo(f"窗口 w{window} 无自反思记录")
+            raise typer.Exit(code=1)
+        msg = A.rollback_self(conn, wrow["id"], league, note)
+        typer.echo(f"已回滚：{league}")
+        typer.echo(f"建议 commit message：{msg}")
+    except EvolutionSelfError as exc:
+        typer.echo(f"错误：{exc}")
+        raise typer.Exit(code=1)
+    except OSError as exc:
+        typer.echo(f"文件操作失败：{type(exc).__name__}: {exc}")
+        raise typer.Exit(code=1)
+    finally:
+        conn.close()
+
+
 # ---- B 线 run 命令（T9/T10）----
 
 run_app = typer.Typer(help="运营 run（比赛日 / 结算日课，spec §9.6 调度）")

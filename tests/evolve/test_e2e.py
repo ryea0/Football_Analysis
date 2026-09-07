@@ -144,7 +144,7 @@ def test_full_loop_merge_snapshot_and_prompt(root, db, monkeypatch):
     # 鉴别标记用**完整条目正文**：真人格文件 epl.md 本身含「密集期」字样
     # （密集期的联赛排阵…），只有新条目整句才是 kb 轨独有的注入内容
     ENTRY = "密集期 downweight 需更谨慎"
-    assert "联赛知识库（快照 w3）" in kb_prompt and ENTRY in kb_prompt
+    assert "联赛知识库（C线快照 w3）" in kb_prompt and ENTRY in kb_prompt
     assert "联赛知识库" not in nokb_prompt and ENTRY not in nokb_prompt
     # ⑥ 全库版本戳：新旧行并存（w1 行 NULL=纪元前、新 run 行 64 hex）
     assert len(new_hash) == 64

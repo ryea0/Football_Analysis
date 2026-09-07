@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -84,7 +84,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     fixture_id       INTEGER NOT NULL REFERENCES fixtures(id),
     strategy         TEXT NOT NULL
         CHECK (strategy IN ('model_only', 'model_persona',
-                            'model_persona_nokb')),       -- §6.6 双轨 + M6 C 线对照轨
+                            'model_persona_nokb',
+                            'model_persona_kb_self')),  -- §6.6 双轨 + C线nokb + C'线自反思
     market           TEXT NOT NULL
         CHECK (market IN ('H', 'D', 'A', 'O2.5')),             -- 每个结果一行
     phase            TEXT NOT NULL
@@ -102,6 +103,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     key_factors      TEXT,                   -- M4 persona：JSON 数组串（§6.3，1–5 条）
     report_md        TEXT,                   -- M4 persona：点评 ≤500 字（§6.3）
     personas_hash    TEXT,             -- M6：本 run 读取的 personas 树内容 hash（§12.7）
+    personas_self_hash TEXT,           -- C' 线：自反思知识库树 hash
     created_at       TEXT NOT NULL,
     UNIQUE (fixture_id, market, strategy, phase)
 );
@@ -224,6 +226,46 @@ CREATE TABLE IF NOT EXISTS evolution_rulings (
     kb_hash_after TEXT,
     note          TEXT NOT NULL,
     decided_at    TEXT NOT NULL
+);
+"""
+
+# C' 线（自反思知识库对照线）三表：与 C 线同构但独立命名空间。
+# v11 新增，重建 recommendations 时一并扩 strategy 枚举 + 加 personas_self_hash 列。
+_EVOLUTION_SELF_TABLE = """
+CREATE TABLE IF NOT EXISTS evolution_self_windows (
+    id           INTEGER PRIMARY KEY,
+    idx          INTEGER NOT NULL UNIQUE,
+    opened_at    TEXT NOT NULL,
+    closes_at    TEXT NOT NULL,
+    reflected_at TEXT,
+    closed_at    TEXT
+);
+
+CREATE TABLE IF NOT EXISTS evolution_self_runs (
+    id               INTEGER PRIMARY KEY,
+    window_id        INTEGER NOT NULL REFERENCES evolution_self_windows(id),
+    league           TEXT NOT NULL,
+    kb_hash_before   TEXT NOT NULL,
+    status           TEXT NOT NULL
+        CHECK (status IN ('ok', 'no_change', 'timeout', 'exit',
+                          'contract', 'sanity', 'error')),
+    no_change_reason TEXT,
+    proposal_path    TEXT,
+    added_chars      INTEGER DEFAULT 0,
+    changed_lines    INTEGER DEFAULT 0,
+    duration_s       REAL NOT NULL,
+    created_at       TEXT NOT NULL,
+    UNIQUE (window_id, league)
+);
+
+CREATE TABLE IF NOT EXISTS evolution_self_rulings (
+    id            INTEGER PRIMARY KEY,
+    run_id        INTEGER NOT NULL REFERENCES evolution_self_runs(id),
+    ruling        TEXT NOT NULL
+        CHECK (ruling IN ('kept', 'rolled_back')),
+    kb_hash_after TEXT,
+    note          TEXT NOT NULL,
+    created_at    TEXT NOT NULL
 );
 """
 
@@ -360,7 +402,7 @@ CREATE INDEX IF NOT EXISTS idx_matches_league_date ON matches (league, date);
 
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """ + _BP_TABLE + _BLINE_TABLE + _RETRO_TABLE + _AL_TABLE + _AL_DEBATE_TABLE \
-    + _AL_DIV_TABLE + _EVOLUTION_TABLE
+    + _AL_DIV_TABLE + _EVOLUTION_TABLE + _EVOLUTION_SELF_TABLE
 
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
@@ -384,7 +426,7 @@ def init_db(path: Path | None = None) -> None:
         # 表重建类迁移的保守护栏（设计档 §14）：v8 重建 recommendations、v9 重建
         # agentline_predictions，各在升级前落一份 .bak-vN 快照（同名不覆盖，
         # 二次 init 幂等）；老库跨多个重建版本就多备几份，代价可忽略。
-        for guard in (8, 9):
+        for guard in (8, 9, 11):
             if row["version"] < guard:
                 bak = p.with_name(p.name + f".bak-v{guard}")
                 if not bak.exists():
@@ -423,7 +465,11 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     影子表名换 _v8，影子恢复仍优先于幂等跳过；
     v9->v10 纯加法——新表 agentline_division_jumps（A_division 三跳产物，
     2026-09-05 设计 §3.4）；line 词表五词 v9 已备齐，无需重建，IF NOT EXISTS
-    幂等补表。"""
+    幂等补表；
+    v10->v11 重建 recommendations——strategy 扩四轨枚举（加
+    model_persona_kb_self）、加 personas_self_hash 列（C' 线版本戳）；
+    evolution_self 三表就位（C' 线自反思对照线）；影子表名 _v10，
+    影子恢复优先于幂等跳过；init_db 自动备份 .bak-v11。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -601,6 +647,54 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
         # v10：新表 division_jumps（2026-09-05 设计 §3.4）。纯加法——词表
         # 五词已在 v9 备齐，无需重建；IF NOT EXISTS 幂等。
         conn.executescript(_AL_DIV_TABLE)
+    if from_v < 11:
+        # v11：C' 线（自反思知识库对照线）。
+        # 1) 重建 recommendations——strategy 扩四轨枚举（加 model_persona_kb_self）、
+        #    加 personas_self_hash 列（C' 线版本戳）。
+        #    CHECK 无法 ALTER 后补，唯一路径 = rename-copy-drop（v8 先例）。
+        # 2) 建 evolution_self_* 三表（纯加法，IF NOT EXISTS 幂等）。
+        # 影子表名取 _v10，与 v7→v8 的 _v7、v8→v9 的 _v8 同惯例。
+        cur = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table'"
+            " AND name='recommendations'")
+        ddl = cur.fetchone()
+        stale = ddl is not None and "model_persona_kb_self" not in ddl["sql"]
+        if stale:
+            # 影子恢复优先于幂等跳过：v10 影子在 = 上一次半途失败 = 从影子重放
+            shadow = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name='recommendations_v10'").fetchone()
+            if shadow is not None:
+                # 弃用半建活动表（一定是不完整的）、从影子恢复
+                conn.execute("DROP TABLE IF EXISTS recommendations;")
+                conn.execute(
+                    "ALTER TABLE recommendations_v10 RENAME TO recommendations;")
+            # 前置：idx_recs_run 占名（v8 先例）——rename 路径里它随旧表改名
+            conn.execute(
+                "DROP INDEX IF EXISTS idx_recs_run_v10;")
+            conn.execute(
+                "ALTER TABLE recommendations RENAME TO recommendations_v10;")
+            # 新形状：四轨枚举 + personas_self_hash 列
+            conn.executescript(_BLINE_TABLE)
+            # 存量行：personas_self_hash 补 NULL（语义 = 「C'线纪元前」）
+            conn.execute(
+                "INSERT INTO recommendations (id, run_id, fixture_id, strategy,"
+                " market, phase, model_p, market_p, best_odds, bookmaker, edge,"
+                " ev, kelly_stake_frac, verdict, confidence_delta, final_stake_frac,"
+                " key_factors, report_md, personas_hash, personas_self_hash,"
+                " created_at)"
+                " SELECT id, run_id, fixture_id, strategy, market, phase,"
+                " model_p, market_p, best_odds, bookmaker, edge, ev,"
+                " kelly_stake_frac, verdict, confidence_delta, final_stake_frac,"
+                " key_factors, report_md, personas_hash, NULL, created_at"
+                " FROM recommendations_v10;")
+            # 重建索引
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recs_run"
+                " ON recommendations (run_id);")
+            conn.execute("DROP TABLE recommendations_v10;")
+        # C' 线三表（纯加法，IF NOT EXISTS 幂等）
+        conn.executescript(_EVOLUTION_SELF_TABLE)
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
