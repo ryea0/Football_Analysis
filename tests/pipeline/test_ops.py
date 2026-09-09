@@ -195,6 +195,26 @@ def test_cron_wrapper_evolve_branch_bash_syntax():
     assert proc.returncode == 0, proc.stderr
 
 
+# ------------------------------------------------- C' 线 evolve-self job（周检）
+
+
+def test_cron_wrapper_accepts_evolve_self_job():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    script = (root / "scripts" / "fa_cron.sh").read_text()
+    assert '"$JOB" != evolve-self' in script
+    assert "evolve-self)  CMD=(fa evolve-self tick) ;;" in script
+
+
+def test_cron_jobs_file_has_evolve_self_weekly_slot():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    jobs = (root / "scripts" / "cron_jobs.txt").read_text()
+    lines = [l for l in jobs.splitlines() if l.startswith("evolve-self\t")]
+    assert len(lines) == 1
+    assert lines[0].split("\t")[1] == "33 3 * * 0"
+
+
 # ------------------------------------------------- 数据链巡检（spec v0.12 §9.6）
 
 
