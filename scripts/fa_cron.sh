@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # fa 定时 job 唯一入口（system crontab 与 hermes cron 双载体共用，spec §9.6）
 #
-# 用法：fa_cron.sh <daily|am|pm|weekly|evolve>
+# 用法：fa_cron.sh <daily|am|pm|weekly|evolve|evolve-self>
 #
 # 职责（与载体无关）：
 #   1. 环境补齐：PATH 补 ~/.local/bin（uv 所在，cron 默认 PATH 没有）；
@@ -16,8 +16,9 @@
 set -u
 
 JOB="${1:-}"
-if [[ "$JOB" != daily && "$JOB" != am && "$JOB" != pm && "$JOB" != weekly && "$JOB" != evolve ]]; then
-  echo "用法: $0 <daily|am|pm|weekly|evolve>" >&2
+if [[ "$JOB" != daily && "$JOB" != am && "$JOB" != pm && "$JOB" != weekly \
+   && "$JOB" != evolve && "$JOB" != evolve-self ]]; then
+  echo "用法: $0 <daily|am|pm|weekly|evolve|evolve-self>" >&2
   exit 64
 fi
 
@@ -40,6 +41,11 @@ case "$JOB" in
   # 失败告警沿用本 wrapper 的 fa ops alert（「静默停摆」=不触碰 A/B 线，
   # 不指对运维静默——设计档 R7）
   evolve)  CMD=(fa evolve tick) ;;
+  # C' 线（自反思知识库对照线）周检——与 C 线 tick 串行、先后顺序不影响
+  # （设计 Stage 3「接入 cron 周检 tick」）。周日 03:33：错开 C 线 03:17，
+  # 窗口收口日 C 线反思最坏 ~5 联赛×120s，16 分钟余量够串行。
+  # 失败告警同上走 fa ops alert；C' 线无 DB 写权、不触碰生产轨
+  evolve-self)  CMD=(fa evolve-self tick) ;;
 esac
 
 cd "$PROJECT_ROOT"
