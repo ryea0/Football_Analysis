@@ -66,14 +66,15 @@ def test_sync_all_ok_and_drift(mem_root):
     assert not bad["ok"] and not bad["leagues"]["E0"]["ok"]
 
 
-def test_sync_all_retriever_init_failure_reported(mem_root):
+def test_sync_all_retriever_init_failure_reported(mem_root, monkeypatch):
     write_kb(mem_root)
 
     class Broken:
         def __init__(self):
             raise RuntimeError("ARK_API_KEY 未配置")
 
-    out = I.sync_all(retriever=Broken())
+    monkeypatch.setattr(I, "get_retriever", Broken)      # 默认解析缝：构造失败→上报不抛
+    out = I.sync_all()
     assert out["ok"] is False and "ARK_API_KEY" in out["error"]
 
 
