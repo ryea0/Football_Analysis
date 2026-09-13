@@ -624,3 +624,77 @@ def test_propagate_verdict_per_strategy(conn_seeded, monkeypatch, fix,
     assert nokb["confidence_delta"] == 0.0
     assert nokb["final_stake_frac"] == 0.0
     assert nokb["key_factors"] == '["a"]' and nokb["report_md"] == "x"
+
+
+# ---------------------------------------------------------------- M7a kbmem 轨
+
+KB_D1 = """<!-- kb: league=D1 -->
+# D1 知识库
+
+## 结构性认知
+- [D1-S01] 拜仁主场对保级队常出大比分
+"""
+
+
+def _write_mem_kb(tmp_path, text=KB_D1):
+    d = tmp_path / "personas" / "knowledge"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "bundesliga.md").write_text(text, encoding="utf-8")
+
+
+def _add_mem_rec(c, run_id, fx):
+    add_rec(c, run_id, fx, "H", kelly=0.02,
+            strategy="model_persona_kbmem")
+
+
+def test_phase_mem_track_ok(conn_seeded, monkeypatch, fix, persona_files,
+                            tmp_path):
+    """mem 轨正常：fake 检索注入、called/ok 记账、无内联降级标记。"""
+    conn, fx, run_id = conn_seeded
+    _write_mem_kb(tmp_path)
+    _add_mem_rec(conn, run_id, fx)
+    monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "fake")
+    out = run_persona_phase(conn, run_id, [LEAGUE])
+    assert out["mem_called"] == 1 and out["mem_ok"] == 1
+    assert "kbmem_degraded" not in out            # 检索成功无内联
+    rows = conn.execute(
+        "SELECT verdict FROM recommendations WHERE fixture_id=?"
+        " AND strategy='model_persona_kbmem'", (fx,)).fetchall()
+    assert rows and rows[0]["verdict"] == "agree"  # 判决落在 mem 轨行
+
+
+def test_phase_mem_inline_fallback(conn_seeded, monkeypatch, fix, persona_files,
+                                   tmp_path):
+    """检索链路坏 → 内联降级：mem_inline 计数、kbmem_degraded=="inline"、
+    kb/nokb 轨不连坐（设计档 §8 一级）。"""
+    conn, fx, run_id = conn_seeded
+    _write_mem_kb(tmp_path)
+    _add_mem_rec(conn, run_id, fx)
+    monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "fake")
+
+    def boom(*a, **k):
+        raise RuntimeError("embedder down")
+
+    monkeypatch.setattr(apply_mod, "window_mem_topk", boom)
+    out = run_persona_phase(conn, run_id, [LEAGUE])
+    assert out["mem_inline"] == 1 and out["kbmem_degraded"] == "inline"
+    assert out["mem_ok"] == 1                      # 降级只换注入形态，判决照出
+    assert out["ok"] == 1 and out["nokb_ok"] == 1  # kb/nokb 不连坐
+
+
+def test_phase_mem_snapshot_failure_degrades_track(conn_seeded, monkeypatch,
+                                                   fix, persona_files, tmp_path):
+    """快照建不起（知识文件语法破损）→ mem 轨整轨降级 reason=mem_snapshot、
+    零调用；kb/nokb 轨不受影响（C 线 md 快照不解析，只有 mem 派生解析）。"""
+    conn, fx, run_id = conn_seeded
+    _write_mem_kb(tmp_path, text="## 结构性认知\n- [bad anchor] x\n")
+    _add_mem_rec(conn, run_id, fx)
+    monkeypatch.setenv("HERMES_BIN", str(fix / "hermes_ok"))
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "fake")
+    out = run_persona_phase(conn, run_id, [LEAGUE])
+    assert out["mem_called"] == 0 and out["mem_degraded"]
+    assert out["mem_degraded"][0]["reason"] == "mem_snapshot"
+    assert "kbmem_degraded" not in out             # 未走到检索，不算内联
+    assert out["ok"] == 1 and out["nokb_ok"] == 1

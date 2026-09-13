@@ -20,3 +20,6 @@ __pycache__/
 
 # Serena 工具状态（会话产物，不入库）
 .serena/
+
+# M7a kbmem 运行时索引缓存（hash 键控纯派生，可随时删重建）
+data/mem_cache/

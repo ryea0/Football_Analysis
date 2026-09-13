@@ -192,3 +192,40 @@ def test_tick_all_due_already_reflected(conn, seeded, monkeypatch, hermes_ok):
     out = runner.run_tick(conn)                  # w1 仍是唯一到期窗、已反思
     assert "到期窗口均已反思" in out
     assert "无到期窗口" not in out and "顺延" not in out
+
+
+# ---------------------------------------------------------------- M7a tick 尾步
+
+
+def _write_kb_file(root):
+    d = root / "personas" / "knowledge"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "epl.md").write_text("## 结构性认知\n- [E0-S01] x\n",
+                              encoding="utf-8")
+
+
+def test_tick_tail_sync_mem_failure_alerts_but_not_fails(conn, root, seeded,
+                                                         monkeypatch, hermes_ok):
+    """tick 尾步 sync 失败：文本记「未成功」、TG 告警尽力而为、tick 本身
+    退正常（静默停摆不炸 tick，设计档 §8 写入侧）。"""
+    _write_kb_file(root)
+    alerts: list[str] = []
+    import fa.pipeline.ops as ops
+    monkeypatch.setattr(ops, "send_alert",
+                        lambda text: alerts.append(text) or True)
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "mem0")     # 无 ARK key → 构造失败
+    monkeypatch.delenv("ARK_API_KEY", raising=False)
+    out = runner.run_tick(conn)                        # 不抛 = tick 不被炸
+    assert "sync-mem 未成功" in out
+    assert alerts and "sync-mem" in alerts[0]
+
+
+def test_tick_tail_sync_ok_no_alert(conn, root, seeded, monkeypatch, hermes_ok):
+    _write_kb_file(root)
+    alerts: list[str] = []
+    import fa.pipeline.ops as ops
+    monkeypatch.setattr(ops, "send_alert",
+                        lambda text: alerts.append(text) or True)
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "fake")
+    out = runner.run_tick(conn)
+    assert "sync-mem 未成功" not in out and not alerts

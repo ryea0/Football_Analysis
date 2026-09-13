@@ -3,7 +3,14 @@ name = "fa"
 version = "0.1.0"
 description = "fa — 足球量化分析与投注推荐（spec.md）"
 requires-python = ">=3.11"
-dependencies = ["pandas>=2.0,<3", "scipy>=1.11", "typer>=0.12", "numpy>=1.26"]
+dependencies = [
+    "pandas>=2.0,<3",
+    "scipy>=1.11",
+    "typer>=0.12",
+    "numpy>=1.26",
+    "mem0ai>=2.0.20",
+    "chromadb>=1.5.9",
+]
 
 [project.scripts]
 fa = "fa.cli:app"

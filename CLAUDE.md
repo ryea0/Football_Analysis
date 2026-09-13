@@ -21,6 +21,7 @@
 - **retro 线 Stage 2 落地**（paper_t1 日批接线，S3 agentline_aligned 选择器未开工）；看板 v2/v3 迭代（B 线多轨化、多维盈亏分解、全 8 页时间维度筛选、UI 美化）
 - **fdorg 赛果备用源 fallback（spec v0.13，2026-09-13 全链落地）**：api.football-data.org 免费层兜底赛果（纯结果驱动触发、配对三判据、恢复闭环三告警），上线首日结算 140 注；**football-data 主源 2026-09-08 起断供观察中**（当前赛季 CSV 停在 09-06，watchdog 监控、CLV 待主源恢复后自动回填）；schema 已至 v11
 - **settled_at 口径修正**（2026-09-13）：结算时间戳按比赛实际完赛时间估算（match.date + kickoff + 105min），`fa ops backfill-settled-at` 回填历史注
+- **M7a kbmem 检索轨（spec v0.15，2026-09-14 落地）**：第五轨 model_persona_kbmem——mem0 作 C 线知识库派生检索索引（markdown 权威链路不动、`infer=False` 零生成式 LLM、JSONL 快照冻结 `evolution/snapshots_mem/`、hash 缓存索引 `data/mem_cache/`）；schema v12（personas_mem_hash）；`fa evolve sync-mem/mem-verify` + tick 尾步；检索故障降级整文件内联（`kbmem_degraded=inline` 记账）。设计 `docs/superpowers/specs/2026-09-13-m7a-mem0-kbmem-design.md`、Gate 0 报告 `docs/m7a-gate0-report.md`（**ark live 三项 BLOCKED：`ARK_API_KEY` 入 `.env` 后跑 `fa evolve sync-mem` 补验**）；M7b（A_mem 臂）占位待立项。新依赖：mem0ai + chromadb（主依赖）
 
 ## 关键约束（详见 spec 对应章节）
 

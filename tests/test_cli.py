@@ -326,15 +326,17 @@ def test_status_b_line_three_track_lines(tmp_path, monkeypatch):
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 0, result.output
     tracks = [l for l in result.output.splitlines() if l.startswith("[model_")]
-    assert len(tracks) == 4, result.output  # model_only / persona / nokb / kb_self
+    assert len(tracks) == 5, result.output  # model_only/persona/nokb/kb_self/kbmem
     assert tracks[0].startswith("[model_only]")
     assert tracks[1].startswith("[model_persona]")
     assert tracks[2].startswith("[model_persona_nokb]")
     assert tracks[3].startswith("[model_persona_kb_self]")
+    assert tracks[4].startswith("[model_persona_kbmem]")
     assert "注数=1" in tracks[0] and "bankroll=1000.00" in tracks[0]
     assert "注数=0" in tracks[1] and "bankroll=未初始化" in tracks[1]
     assert "注数=0" in tracks[2] and "bankroll=未初始化" in tracks[2]
     assert "注数=0" in tracks[3] and "bankroll=未初始化" in tracks[3]
+    assert "注数=0" in tracks[4] and "bankroll=未初始化" in tracks[4]
 
 
 def test_status_pct_scales_fraction_values(tmp_path, monkeypatch):

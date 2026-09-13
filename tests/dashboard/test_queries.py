@@ -640,11 +640,13 @@ def test_b_ab_tracks_three_tracks(db):
     _seed_three_tracks(db)
     t = b_ab_tracks(db)
     assert list(t.keys()) == ["model_only", "model_persona", "model_persona_nokb",
-                               "model_persona_kb_self"]
-    # 各轨 2 注都已结算
-    for k in t:
+                               "model_persona_kb_self", "model_persona_kbmem"]
+    # 种子四轨各 2 注已结算；kbmem 新轨零值骨架在列（多列不塌陷）
+    for k in ("model_only", "model_persona", "model_persona_nokb",
+              "model_persona_kb_self"):
         assert t[k]["n"] == 2
         assert t[k]["n_settled"] == 2
+    assert t["model_persona_kbmem"]["n"] == 0
     # nokb 手算：won +20-8=+12, lost -8 → pnl = +4, staked = 16, roi = 4/16 = 0.25
     nokb = t["model_persona_nokb"]
     assert nokb["roi"] == pytest.approx(4.0 / 16.0)
@@ -658,7 +660,7 @@ def test_b_ab_tracks_empty_three(db):
 
     t = b_ab_tracks(db)
     assert set(t.keys()) == {"model_only", "model_persona", "model_persona_nokb",
-                             "model_persona_kb_self"}
+                             "model_persona_kb_self", "model_persona_kbmem"}
     for k in t:
         assert t[k]["n"] == 0 and t[k]["n_settled"] == 0
         assert t[k]["roi"] is None and t[k]["clv_median"] is None
@@ -679,7 +681,7 @@ def test_b_summary_by_strategy(db):
 
     bs = s["by_strategy"]
     assert set(bs.keys()) == {"model_only", "model_persona", "model_persona_nokb",
-                             "model_persona_kb_self"}
+                             "model_persona_kb_self", "model_persona_kbmem"}
 
     mo = bs["model_only"]
     assert mo["bankroll"] == 980.0
@@ -703,7 +705,7 @@ def test_b_summary_by_strategy_empty(db):
     s = b_summary(db)
     bs = s["by_strategy"]
     assert set(bs.keys()) == {"model_only", "model_persona", "model_persona_nokb",
-                             "model_persona_kb_self"}
+                             "model_persona_kb_self", "model_persona_kbmem"}
     for k in bs:
         assert bs[k]["bankroll"] is None
         assert bs[k]["n"] == 0
@@ -725,12 +727,13 @@ def test_b_breakdown_market(db):
     assert not df.empty
     assert set(df.columns) == {"strategy", "market", "n", "n_settled", "win_rate",
                           "roi", "clv_median", "avg_odds", "pnl"}
-    # 三轨都有 H 和 A 两个市场
+    # 种子四轨都有 H 和 A 两个市场
     strategies = df["strategy"].unique().tolist()
     assert len(strategies) == 4
     # 排序正确
     assert strategies == ["model_only", "model_persona",
                               "model_persona_nokb", "model_persona_kb_self"]
+    # （kbmem 无行不在矩阵——breakdown 只含有行之轨；空值骨架归 b_ab_tracks）
     # model_only 有 H（won）和 A（lost）各一注
     mo_h = df[(df["strategy"] == "model_only") & (df["market"] == "H")].iloc[0]
     assert mo_h["n"] == 1 and mo_h["n_settled"] == 1

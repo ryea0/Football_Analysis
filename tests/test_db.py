@@ -115,10 +115,12 @@ def test_fresh_db_is_current(tmp_path):
     assert cols["report_md"] == ("TEXT", 0, 0)
     assert cols["personas_hash"] == ("TEXT", 0, 0)    # v8：M6 hash 位，可空
     assert cols["personas_self_hash"] == ("TEXT", 0, 0)  # v11：C' 线自反思 hash
+    assert cols["personas_mem_hash"] == ("TEXT", 0, 0)   # v12：M7a kbmem 版本戳
     order = list(cols)
-    # 紧跟 final_stake_frac 之后（v6 brief + v8 personas_hash + v11 personas_self_hash）
+    # 紧跟 final_stake_frac 之后（v6 brief + v8/v11/v12 三个版本戳列）
     assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
-        ["key_factors", "report_md", "personas_hash", "personas_self_hash"]
+        ["key_factors", "report_md", "personas_hash", "personas_self_hash",
+         "personas_mem_hash"]
     c.close()
 
 
@@ -894,9 +896,11 @@ def test_fresh_recommendations_has_persona_columns(tmp_path):
     assert cols["key_factors"] == ("TEXT", 0, 0)
     assert cols["report_md"] == ("TEXT", 0, 0)
     order = list(cols)
-    # v8 起 personas_hash（M6），v11 起 personas_self_hash（C' 线）
+    # v8 起 personas_hash（M6），v11 起 personas_self_hash（C' 线），v12 起
+    # personas_mem_hash（M7a kbmem）
     assert order[order.index("final_stake_frac") + 1:order.index("created_at")] == \
-        ["key_factors", "report_md", "personas_hash", "personas_self_hash"]
+        ["key_factors", "report_md", "personas_hash", "personas_self_hash",
+         "personas_mem_hash"]
     c.close()
 
 
@@ -1357,7 +1361,8 @@ def _make_v10_db(path):
 
 
 def test_migrate_v10_to_v11(tmp_path):
-    """v10→v11 正常迁移：四轨枚举、personas_self_hash 列、self 三表都就位。"""
+    """v10→v11→当前（v12）全链迁移：四/五轨枚举、两个新版本戳列、self 三表
+    都就位（版本断言钉 SCHEMA_VERSION——schema 再演进无须改此用例）。"""
     from fa import db as dbmod
     p = tmp_path / "fa.db"
     _make_v10_db(p)
@@ -1366,12 +1371,13 @@ def test_migrate_v10_to_v11(tmp_path):
     conn = connect(p)
     # 版本号到位
     assert conn.execute("SELECT version FROM schema_version").fetchone()[
-        "version"] == 11
+        "version"] == SCHEMA_VERSION
     # recommendations 含四轨枚举
     ddl = conn.execute("SELECT sql FROM sqlite_master WHERE type='table'"
                        " AND name='recommendations'").fetchone()["sql"]
     assert "model_persona_kb_self" in ddl
     assert "personas_self_hash" in ddl
+    assert "personas_mem_hash" in ddl
     # evolution_self 三表就位
     for t in ("evolution_self_windows", "evolution_self_runs",
               "evolution_self_rulings"):
@@ -1445,3 +1451,107 @@ def test_migrate_v10_to_v11_keeps_bets_ledger_intact(tmp_path):
     conn.close()
 
 
+
+
+# ---------------------------------------------------------------- M7a v12
+
+
+_V11_RECS = """CREATE TABLE recommendations (
+    id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL, fixture_id INTEGER NOT NULL,
+    strategy TEXT NOT NULL CHECK (strategy IN ('model_only', 'model_persona',
+        'model_persona_nokb', 'model_persona_kb_self')),
+    market TEXT NOT NULL, phase TEXT NOT NULL, model_p REAL NOT NULL,
+    market_p REAL NOT NULL, best_odds REAL NOT NULL, bookmaker TEXT NOT NULL,
+    edge REAL NOT NULL, ev REAL NOT NULL, kelly_stake_frac REAL NOT NULL,
+    verdict TEXT, confidence_delta REAL, final_stake_frac REAL,
+    key_factors TEXT, report_md TEXT,
+    personas_hash TEXT, personas_self_hash TEXT, created_at TEXT NOT NULL,
+    UNIQUE (fixture_id, market, strategy, phase))"""
+
+
+def test_v11_migrates_to_v12(tmp_path):
+    """v11 库（四轨枚举、无 personas_mem_hash）经 init_db 重建表升级：
+    存量行保全（mem 戳补 NULL=「M7a 纪元前」）、五轨枚举生效、影子收尾
+    干净、幂等重跑、迁移库与 fresh 库列序逐位一致（v10→v11 同款验收）。"""
+    db = tmp_path / "v11.db"
+    init_db(db)
+    conn = connect(db)
+    conn.execute("DROP TABLE recommendations")
+    conn.executescript(_V11_RECS)
+    conn.execute("CREATE INDEX idx_recs_run ON recommendations (run_id)")
+    # FK 种子（v3 用例同款）：runs/fixtures 各一行，老行挂在真实引用上
+    conn.execute(
+        "INSERT INTO runs (type, phase, started_at, status) VALUES "
+        "('matchday', 'am', '2026-09-13T11:00:00Z', 'ok')")
+    conn.execute(
+        "INSERT INTO fixtures (league, event_key, source, kickoff_utc, status,"
+        " created_at) VALUES ('E0', 'ev-v11', 'oddsapi', '2026-09-14T14:00:00Z',"
+        " 'scheduled', '2026-09-13T11:00:00Z')")
+    conn.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy,"
+        " market, phase, model_p, market_p, best_odds, bookmaker, edge,"
+        " ev, kelly_stake_frac, personas_hash, personas_self_hash, created_at)"
+        " VALUES (1, 1, 1, 'model_persona_kb_self', 'H', 'am', .5, .4, 2.1,"
+        " 'b', .1, .1, .05, 'ph', 'psh', '2026-09-13')")
+    conn.execute("UPDATE schema_version SET version=11")
+    conn.commit()
+    conn.close()
+    init_db(db)                                   # v11 -> v12
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT version FROM schema_version"
+                            ).fetchone()["version"] == SCHEMA_VERSION == 12
+        ddl = conn.execute("SELECT sql FROM sqlite_master"
+                           " WHERE name='recommendations'").fetchone()["sql"]
+        assert "model_persona_kbmem" in ddl and "personas_mem_hash" in ddl
+        row = conn.execute("SELECT personas_hash, personas_self_hash,"
+                           " personas_mem_hash, strategy FROM recommendations"
+                           " WHERE id=1").fetchone()
+        assert (row["personas_hash"], row["personas_self_hash"]) == ("ph", "psh")
+        assert row["personas_mem_hash"] is None    # 「M7a 纪元前」
+        # 新枚举可写（第五轨）
+        conn.execute(
+            "INSERT INTO recommendations (id, run_id, fixture_id, strategy,"
+            " market, phase, model_p, market_p, best_odds, bookmaker, edge,"
+            " ev, kelly_stake_frac, personas_mem_hash, created_at)"
+            " VALUES (2, 1, 1, 'model_persona_kbmem', 'H', 'am', .5, .4, 2.1,"
+            " 'b', .1, .1, .05, 'pmh', '2026-09-14')")
+        conn.commit()
+        # 影子表收尾干净
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='recommendations_v11'"
+        ).fetchone() is None
+        # 形状一致性：迁移库与 fresh 库列序逐位一致
+        init_db(tmp_path / "fresh.db")
+        fc = connect(tmp_path / "fresh.db")
+        assert [r["name"] for r in conn.execute(
+            "PRAGMA table_info(recommendations)")] == \
+            [r["name"] for r in fc.execute("PRAGMA table_info(recommendations)")]
+        fc.close()
+    finally:
+        conn.close()
+    init_db(db)                                   # 幂等重跑：不炸不重放
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) c FROM recommendations"
+                            ).fetchone()["c"] == 2
+    finally:
+        conn.close()
+
+
+def test_v12_migration_guard_skips_rebuilt_table(tmp_path):
+    """护栏：表已是 v12 形状而版本号仍是 11（迁移半途中断重跑）——
+    不重建、数据无损（v7 护栏同款）。"""
+    db = tmp_path / "half.db"
+    init_db(db)
+    conn = connect(db)
+    conn.execute("UPDATE schema_version SET version=11")
+    conn.commit()
+    conn.close()
+    init_db(db)                                   # 表已新形状，护栏应跳过
+    conn = connect(db)
+    try:
+        assert conn.execute("SELECT version FROM schema_version"
+                            ).fetchone()["version"] == 12
+    finally:
+        conn.close()

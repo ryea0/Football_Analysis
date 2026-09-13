@@ -18,7 +18,11 @@ import json
 import sqlite3
 
 from fa.config import persona_path
+from fa.evolve import EvolutionError
 from fa.evolve.knowledge import ensure_current_snapshot, window_kb_text
+from fa.evolve_mem.retrieve import (build_query, window_mem_inline,
+                                    window_mem_topk)
+from fa.evolve_mem.snapshot import ensure_current_snapshot_mem
 from fa.evolve_self.knowledge import (
     ensure_current_snapshot_self, window_kb_text_self,
 )
@@ -34,7 +38,8 @@ from fa.persona.contract import (
 STRATEGY = "model_persona"
 NOKB_STRATEGY = "model_persona_nokb"
 SELF_STRATEGY = "model_persona_kb_self"
-_TRACKS = (STRATEGY, NOKB_STRATEGY, SELF_STRATEGY)
+MEM_STRATEGY = "model_persona_kbmem"     # M7a：mem0 检索注入轨（§12.7 增补）
+_TRACKS = (STRATEGY, NOKB_STRATEGY, SELF_STRATEGY, MEM_STRATEGY)
 
 # 降级词表（写进 runs.summary.persona 的取值域）：timeout/exit 来自 caller，
 # extract/contract 来自契约层；无 reason 的 PersonaError 归 unknown。
@@ -108,23 +113,26 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                       attempted: set[int] | None = None) -> dict:
     """一窗（am 或 pm）的阶段编排：选该 run 的候选 fixture 去重逐场处理——
 
-    M6 起每场**三轨三次调用**（§12.7 对照轨 + C' 线自反思轨）：
+    M6 起每场**多轨多次调用**，M7a 起四轨（§12.7 对照轨 + C' 线 + kbmem）：
     - kb 轨（persona + C 线知识快照）→ model_persona 行
     - nokb 轨（纯 persona，无知识库）→ model_persona_nokb 行
     - self 轨（persona + C' 线自反思知识快照）→ model_persona_kb_self 行
-    顺序固定 kb→nokb→self。降级按轨分别记账，persona 文件缺失 / 本场输入
-    组装失败三轨同降（未触达调用不计入 called）；知识快照建不起（相级）/
+    - kbmem 轨（persona + C 线知识**检索 top-k**，坏则整文件内联）→
+      model_persona_kbmem 行（内联降级只换注入形态不降判决，inline 计数
+      记账 runs.summary.kbmem_degraded）
+    顺序固定 kb→nokb→self→kbmem。降级按轨分别记账，persona 文件缺失 / 本场
+    输入组装失败四轨同降（未触达调用不计入 called）；知识快照建不起（相级）/
     读不了（场级）对应轨降级、nokb 不受影响。
     ``attempted`` 里的场跳过且零调用，改做判决传播（pm 沿用 am，§6.2）——按轨
     各自传播。恰一次 ``conn.commit()``。
 
     返回 ``{"called","ok","veto","degraded":[...],"attempted"}
-    （kb 轨语义不变，保 ops/watchdog 兼容）+ nokb_*/self_* 镜像键``。
+    （kb 轨语义不变，保 ops/watchdog 兼容）+ nokb_*/self_*/mem_* 镜像键``。
     """
     seen = set(attempted or ())
-    counts = {t: {"called": 0, "ok": 0, "veto": 0, "degraded": []}
+    counts = {t: {"called": 0, "ok": 0, "veto": 0, "degraded": [], "inline": 0}
               for t in _TRACKS}
-    # 快照：两个知识轨各自建自己的快照，失败各降各的；nokb 永不因快照失败降级
+    # 快照：三个知识轨各自建自己的快照，失败各降各的；nokb 永不因快照失败降级
     try:
         kb_idx = ensure_current_snapshot()  # C 线快照（幂等；B 线读取口）
     except OSError:
@@ -133,12 +141,16 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
         self_idx = ensure_current_snapshot_self()  # C' 线自反思快照
     except OSError:
         self_idx = None
+    try:
+        mem_idx = ensure_current_snapshot_mem()  # M7a mem JSONL 快照
+    except (OSError, ValueError, EvolutionError):
+        mem_idx = None
     rows = conn.execute(
         "SELECT DISTINCT r.fixture_id, f.league FROM recommendations r"
         " JOIN fixtures f ON f.id = r.fixture_id"
-        " WHERE r.run_id=? AND r.strategy IN (?, ?, ?)"
+        " WHERE r.run_id=? AND r.strategy IN (?, ?, ?, ?)"
         " ORDER BY r.fixture_id",
-        (run_id, STRATEGY, NOKB_STRATEGY, SELF_STRATEGY)).fetchall()
+        (run_id, STRATEGY, NOKB_STRATEGY, SELF_STRATEGY, MEM_STRATEGY)).fetchall()
     league_set = set(leagues)
     for row in rows:
         fid, league = row["fixture_id"], row["league"]
@@ -156,10 +168,14 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
             snapshot_failed_tracks.add(STRATEGY)
         if self_idx is None:
             snapshot_failed_tracks.add(SELF_STRATEGY)
+        if mem_idx is None:
+            snapshot_failed_tracks.add(MEM_STRATEGY)   # 降级 reason 见下（mem_snapshot）
         if snapshot_failed_tracks:
             for t in snapshot_failed_tracks:
                 counts[t]["degraded"].append({"fixture_id": fid,
-                                              "reason": "kb_snapshot"})
+                                              "reason": ("mem_snapshot"
+                                                         if t == MEM_STRATEGY
+                                                         else "kb_snapshot")})
         try:
             persona_md = persona_path(league).read_text(encoding="utf-8")
         except (FileNotFoundError, ValueError):
@@ -197,6 +213,20 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                 counts[t]["degraded"].append({"fixture_id": fid,
                                               "reason": _REASON.get(reason, reason)})
             continue
+        # mem 轨知识：检索优先，坏则内联降级（设计档 §8 一级）——降级只换注入
+        # 形态不降判决（hermes 照调），inline 计数供 runs.summary 记账归因。
+        # ``except Exception`` 收 mem0/chroma/embedder 全家族：检索链路任何失败
+        # 都只降级不炸场（与 caller timeout 的场级降级同哲学）。
+        mem_lines: list[str] | None = None
+        if mem_idx is not None and MEM_STRATEGY not in snapshot_failed_tracks:
+            try:
+                mem_lines = window_mem_topk(
+                    mem_idx, league, build_query(input_obj)) or None
+            except Exception:
+                inline = window_mem_inline(mem_idx, league)
+                if inline:
+                    mem_lines = inline.splitlines()
+                    counts[MEM_STRATEGY]["inline"] += 1
         # 逐轨调用 hermes
         for track in _TRACKS:
             c = counts[track]
@@ -209,6 +239,10 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
                     track_kb, track_label = kb_md, f"（C线快照 w{kb_idx}）"
                 elif track == SELF_STRATEGY:
                     track_kb, track_label = self_md, f"（C'线自反思 w{self_idx}）"
+                elif track == MEM_STRATEGY:  # M7a：检索 top-k（坏则内联降级文本）
+                    track_kb = ("\n".join(mem_lines)
+                                if mem_lines else None)
+                    track_label = f"（C线检索快照 w{mem_idx}）"
                 else:  # nokb
                     track_kb, track_label = None, ""
                 prompt = build_prompt(persona_md, input_obj,
@@ -227,6 +261,7 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
     kb = counts[STRATEGY]
     nokb = counts[NOKB_STRATEGY]
     slf = counts[SELF_STRATEGY]
+    mem = counts[MEM_STRATEGY]
     return {
         "called": kb["called"], "ok": kb["ok"], "veto": kb["veto"],
         "degraded": kb["degraded"], "attempted": sorted(seen),
@@ -234,4 +269,8 @@ def run_persona_phase(conn: sqlite3.Connection, run_id: int,
         "nokb_veto": nokb["veto"], "nokb_degraded": nokb["degraded"],
         "self_called": slf["called"], "self_ok": slf["ok"],
         "self_veto": slf["veto"], "self_degraded": slf["degraded"],
+        "mem_called": mem["called"], "mem_ok": mem["ok"],
+        "mem_veto": mem["veto"], "mem_degraded": mem["degraded"],
+        "mem_inline": mem["inline"],
+        **({"kbmem_degraded": "inline"} if mem["inline"] else {}),
     }

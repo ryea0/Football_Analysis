@@ -75,18 +75,20 @@ def _hermes_contract(root, name="hermes_contract.sh", contract=CONTRACT):
     return str(s)
 
 
-def _hermes_seq_dumper(root, seq_file, kb_file, nokb_file):
-    """按调用序把 prompt 落盘（1→kb、2→nokb），回合法 persona JSON。
+def _hermes_seq_dumper(root, seq_file, out_dir):
+    """按调用序把 prompt 分文件落盘（01.prompt、02.prompt…），回合法 persona JSON。
 
     prompt 走 argv 第 2 参（``hermes -z <prompt> -t search``，caller.build_command
     唯一事实源）——与实跑同一代码路径（C1），不做任何额外 mock。
+    M7a 起一场四调用（kb→nokb→self→kbmem），按序分文件避免「≥2 全覆写」
+    把后轨 prompt 冒充前轨。
     """
+    out_dir.mkdir(parents=True, exist_ok=True)
     s = root / "hermes_seq.sh"
     s.write_text(
         "#!/usr/bin/env bash\n"
         f'n=$(cat "{seq_file}" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{seq_file}"\n'
-        f'if [ "$n" = 1 ]; then printf \'%s\' "$2" > "{kb_file}";'
-        f' else printf \'%s\' "$2" > "{nokb_file}"; fi\n'
+        f'printf \'%s\' "$2" > "{out_dir}/$(printf %02d "$n").prompt"\n'
         'echo \'{"verdict":"agree","confidence_delta":0.0,"key_factors":["x"],'
         '"report_md":"r"}\'\n', encoding="utf-8")
     s.chmod(0o755)
@@ -133,19 +135,26 @@ def test_full_loop_merge_snapshot_and_prompt(root, db, monkeypatch):
                (new_hash, run2))            # B 线落行时的版本戳（value.py 同值）
     db.commit()
     monkeypatch.setenv("HERMES_BIN", _hermes_seq_dumper(
-        root, root / "seq", root / "kb.prompt", root / "nokb.prompt"))
+        root, root / "seq", root / "prompts"))
     res = run_persona_phase(db, run2, ["E0"])
     assert res["called"] == 1 and res["ok"] == 1          # 一场 × kb 轨一次
     assert res["nokb_called"] == 1 and res["nokb_ok"] == 1
+    assert res["self_called"] == 1 and res["mem_called"] == 1
     assert res["degraded"] == [] and res["nokb_degraded"] == []
+    assert res["mem_degraded"] == []                      # mem 走内联不是降级判决
     assert res["veto"] == 0 and res["nokb_veto"] == 0
-    kb_prompt = (root / "kb.prompt").read_text(encoding="utf-8")
-    nokb_prompt = (root / "nokb.prompt").read_text(encoding="utf-8")
+    kb_prompt = (root / "prompts" / "01.prompt").read_text(encoding="utf-8")
+    nokb_prompt = (root / "prompts" / "02.prompt").read_text(encoding="utf-8")
+    mem_prompt = (root / "prompts" / "04.prompt").read_text(encoding="utf-8")
     # 鉴别标记用**完整条目正文**：真人格文件 epl.md 本身含「密集期」字样
     # （密集期的联赛排阵…），只有新条目整句才是 kb 轨独有的注入内容
     ENTRY = "密集期 downweight 需更谨慎"
     assert "联赛知识库（C线快照 w3）" in kb_prompt and ENTRY in kb_prompt
     assert "联赛知识库" not in nokb_prompt and ENTRY not in nokb_prompt
+    # M7a：kbmem 轨（第 4 调用）——本环境无 ARK key → 检索失败 → 内联降级
+    # 注入（window_mem_inline 渲染全部条目），且 summary 记账
+    assert "联赛知识库（C线检索快照 w3）" in mem_prompt and ENTRY in mem_prompt
+    assert res["mem_inline"] == 1 and res["kbmem_degraded"] == "inline"
     # ⑥ 全库版本戳：新旧行并存（w1 行 NULL=纪元前、新 run 行 64 hex）
     assert len(new_hash) == 64
     assert db.execute("SELECT COUNT(*) AS n FROM recommendations"

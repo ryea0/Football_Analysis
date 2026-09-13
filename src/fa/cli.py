@@ -1011,6 +1011,57 @@ def evolve_shelve_cmd(
     _evolve_ruled_action("shelved", window, league, note)
 
 
+# ---- M7a kbmem 检索索引（spec §12.7 增补）----
+
+
+@evolve_app.command("sync-mem")
+def evolve_sync_mem_cmd(
+        dry_run: bool = typer.Option(
+            False, "--dry-run", help="只派生+hash 报告，不建索引不对账"),
+) -> None:
+    """M7a：活树派生 → mem0 索引重建 → 导出对账（drift/失败退码 1）"""
+    from fa.evolve_mem.snapshot import derive_live_jsonl, jsonl_map_hash
+    if dry_run:
+        live = derive_live_jsonl()
+        typer.echo(f"live leagues={sorted(live)} hash={jsonl_map_hash(live)}")
+        return
+    from fa.evolve_mem.index import sync_all
+    out = sync_all()
+    for lg, r in sorted(out["leagues"].items()):
+        status = "ok" if r["ok"] else f"DRIFT {r['error']}"
+        typer.echo(f"{lg}: entries={r['entries']} {status}")
+    if not out["ok"]:
+        typer.echo(f"sync-mem 未成功：{out['error'] or '见上'}")
+        raise typer.Exit(1)
+
+
+@evolve_app.command("mem-verify")
+def evolve_mem_verify_cmd() -> None:
+    """M7a：只读对账——现有缓存索引 vs 活树派生（drift/缺缓存退码 1）"""
+    from fa.evolve_mem.index import get_retriever, index_store_dir, reconcile
+    from fa.evolve_mem.snapshot import derive_live_jsonl, jsonl_map_hash
+    live = derive_live_jsonl()
+    h = jsonl_map_hash(live)
+    try:
+        r = get_retriever()
+    except Exception as exc:                       # 构造期外部依赖地界
+        typer.echo(f"retriever 未就绪：{exc}")
+        raise typer.Exit(1)
+    bad = []
+    for lg, b in sorted(live.items()):
+        store = index_store_dir(h, lg)
+        if not (store / "READY").is_file():
+            bad.append(lg)
+            typer.echo(f"{lg}: 无缓存（先跑 fa evolve sync-mem）")
+            continue
+        ok = reconcile(b, r.export_entries(store))
+        typer.echo(f"{lg}: {'ok' if ok else 'DRIFT'}")
+        if not ok:
+            bad.append(lg)
+    if bad:
+        raise typer.Exit(1)
+
+
 # ---- C' 线自反思进化（对照实验线）----
 
 evolve_self_app = typer.Typer(help="C' 线（自反思知识库对照线，实验级）")

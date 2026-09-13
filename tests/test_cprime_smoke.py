@@ -85,11 +85,11 @@ def _seed_basic_data(conn: sqlite3.Connection) -> None:
 
 
 class TestDbMigration:
-    """v11 迁移：C' 线表 + recommendations 四轨枚举 + personas_self_hash 列。"""
+    """v11 迁移（现库已至 v12）：C' 线表 + 四轨枚举 + personas_self_hash 列。"""
 
     def test_v11_schema(self, tmp_project):
         from fa.db import SCHEMA_VERSION
-        assert SCHEMA_VERSION == 11
+        assert SCHEMA_VERSION == 12
         from fa.config import db_path
         conn = sqlite3.connect(db_path())
         conn.row_factory = sqlite3.Row
@@ -109,7 +109,8 @@ class TestDbMigration:
     def test_self_strategy_in_value(self):
         from fa.pipeline.value import STRATEGIES
         assert "model_persona_kb_self" in STRATEGIES
-        assert len(STRATEGIES) == 4
+        assert "model_persona_kbmem" in STRATEGIES   # M7a 第五轨
+        assert len(STRATEGIES) == 5
 
 
 class TestKnowledgeSelf:
