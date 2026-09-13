@@ -14,6 +14,15 @@ def _rows_hash(rows: list[MatchRow]) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+# fallback 行识别谓词（spec v0.13 单一事实源，sync.py 复用）——统一认
+# raw_line JSON 的 source 键：fallback=正式机制行、stopgap=09-10 人工应急
+# 历史行（设计 §5：两个键都认）。json.dumps 默认带空格、紧凑序列化不带，
+# 两种拼写都匹配（官方 CSV 行是 {"Div": ...} 形态，不含这些键）。
+FALLBACK_MARKER_SQL = (
+    "(raw_line LIKE '%\"fallback\": true%' OR raw_line LIKE '%\"fallback\":true%'"
+    " OR raw_line LIKE '%\"stopgap\": true%' OR raw_line LIKE '%\"stopgap\":true%')")
+
+
 def ingest_rows(conn: sqlite3.Connection, league: str, season: int,
                 rows: list[MatchRow]) -> int:
     if not rows:
@@ -29,9 +38,8 @@ def ingest_rows(conn: sqlite3.Connection, league: str, season: int,
     # 主源恢复后官方重建不得被备用源拉来的行顶住；对无 fallback 行的分区，
     # 基线 = 现存总数，行为与 v0.12 完全一致
     fallback = conn.execute(
-        "SELECT COUNT(*) c FROM matches WHERE league=? AND season=?"
-        " AND (raw_line LIKE '%\"fallback\":true%'"
-        "      OR raw_line LIKE '%\"stopgap\":true%')",
+        f"SELECT COUNT(*) c FROM matches WHERE league=? AND season=?"
+        f" AND {FALLBACK_MARKER_SQL}",
         (league, season)).fetchone()["c"]
     if len(rows) < existing - fallback:   # 收缩保护（spec v0.12 §9.5）：
         raise ValueError(                 # 上游/缓存回退时宁可不动分区也不删赛果

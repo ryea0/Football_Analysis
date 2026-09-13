@@ -4,7 +4,7 @@ from datetime import date
 
 from fa.config import LEAGUES, SEASONS_FROM
 from fa.data.download import download_csv
-from fa.data.ingest import backfill_bfe_rows, ingest_rows
+from fa.data.ingest import FALLBACK_MARKER_SQL, backfill_bfe_rows, ingest_rows
 from fa.data.parse import parse_csv
 from fa.data.reader import read_csv_text
 
@@ -18,6 +18,11 @@ class SyncReport:
     missing: list[tuple[str, int]] = field(default_factory=list)
     file_errors: list[tuple[str, int, str]] = field(default_factory=list)
     rows_no_date: int = 0
+    # v0.13 恢复闭环：官方行覆盖 fallback 行后的比分 diff（一致静默、不一致
+    # 记账供 daily/CLI 层告警不改账）；fail_streak = 主源当前赛季失败连续天数
+    fallback_diffs: list[tuple[str, int, str, str, str]] = field(
+        default_factory=list)
+    fail_streak: int = 0
 
 
 def _current_season_start() -> int:
@@ -58,7 +63,14 @@ def sync_history(conn: sqlite3.Connection, seasons_from: int = SEASONS_FROM,
                 # matches.date NOT NULL：无日期行入库即失败，先过滤并计数
                 dated = [r for r in rows if r.date]
                 rep.rows_no_date += len(rows) - len(dated)
+                # v0.13 恢复闭环：当前赛季重建前快照 fallback 行、重建后 diff
+                # （官方行缺席则跳过，下轮再比）——数据层只记账，告警归调用层
+                snap = (_fallback_snapshot(conn, league, year)
+                        if year == to_year else None)
                 n = ingest_rows(conn, league, year, dated)
+                if snap:
+                    rep.fallback_diffs.extend(
+                        _diff_official(conn, league, year, snap))
             except Exception as e:   # 只记账：BaseException（如键盘中断）仍外溢
                 rep.file_errors.append((league, year, f"{type(e).__name__}: {e}"))
                 continue
@@ -67,7 +79,67 @@ def sync_history(conn: sqlite3.Connection, seasons_from: int = SEASONS_FROM,
                 rep.inserted += n
             else:
                 rep.skipped_seasons += 1
+    rep.fail_streak = _update_fail_streak(conn, rep.file_errors)
     return rep
+
+
+# ---------------------------------------------------------------- v0.13 恢复闭环
+
+FAIL_STREAK_META_KEY = "current_season_fail_streak"
+
+
+def _fallback_snapshot(conn: sqlite3.Connection, league: str,
+                       season: int) -> dict[str, tuple[int, int]]:
+    """该分区 fallback 行快照 ``{date|home_id|away_id: (fthg, ftag)}``（重建前抓）。"""
+    out: dict[str, tuple[int, int]] = {}
+    for r in conn.execute(
+            "SELECT date, home_team_id, away_team_id, fthg, ftag FROM matches"
+            f" WHERE league=? AND season=? AND {FALLBACK_MARKER_SQL}",
+            (league, season)):
+        out[f"{r['date']}|{r['home_team_id']}|{r['away_team_id']}"] = (
+            r["fthg"], r["ftag"])
+    return out
+
+
+def _diff_official(conn: sqlite3.Connection, league: str, season: int,
+                   snapshot: dict[str, tuple[int, int]]
+                   ) -> list[tuple[str, int, str, str, str]]:
+    """同 key 官方行比分 diff：一致 → ``[]``（幂等覆盖静默）；
+    不一致 → ``(league, season, key, fallback 比分, 官方比分)``（只记账不改账，
+    裁定②）。官方内容尚无该场（行缺席或仍是 fallback 行）→ 跳过，下轮再比。"""
+    diffs: list[tuple[str, int, str, str, str]] = []
+    for key, (fh, fa) in snapshot.items():
+        d, h, a = key.split("|")
+        row = conn.execute(
+            "SELECT fthg, ftag, raw_line FROM matches WHERE league=? AND season=?"
+            " AND date=? AND home_team_id=? AND away_team_id=?",
+            (league, season, d, int(h), int(a))).fetchone()
+        if row is None:
+            continue                     # 官方还没覆盖该场：下轮 sync 再比
+        raw = row["raw_line"] or ""
+        if "fallback" in raw or "stopgap" in raw:
+            continue                     # 仍是 fallback 行（重建未过/收缩拒绝）
+        if (row["fthg"], row["ftag"]) != (fh, fa):
+            diffs.append((league, season, f"{d} #{h}v#{a}",
+                          f"{fh}-{fa}", f"{row['fthg']}-{row['ftag']}"))
+    return diffs
+
+
+def _update_fail_streak(conn: sqlite3.Connection,
+                        file_errors: list[tuple[str, int, str]]) -> int:
+    """主源当前赛季失败连续天数（N=2 告警判据，裁定③；成功日归零）。
+
+    只看「当前赛季条目」的失败——历史赛季缓存失败不构成赛果断供。meta 计数
+    随手 commit（独立于分区入库的事务纪律）。返回更新后的 streak。
+    """
+    from fa.db import get_meta, set_meta
+    year_now = _current_season_start()
+    cur_season_failed = any(y == year_now for (_lg, y, _msg) in file_errors)
+    prev = int(get_meta(conn, FAIL_STREAK_META_KEY) or 0)
+    streak = prev + 1 if cur_season_failed else 0
+    set_meta(conn, FAIL_STREAK_META_KEY, str(streak))
+    conn.commit()
+    return streak
 
 
 @dataclass
