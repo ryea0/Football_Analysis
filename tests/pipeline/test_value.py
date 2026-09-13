@@ -615,6 +615,18 @@ def test_personas_hash_stamped_on_all_rows(priced):
     assert len(rows) == 5   # 五轨都带戳
 
 
+def test_personas_self_hash_stamped_on_all_rows(priced):
+    """C' 线版本戳补修：personas_self_hash 与 personas_hash 同款 INSERT-only
+    落行语义（缺口修复——v11 建列以来首次有写入者）。"""
+    c, fx, probs = priced
+    run = add_run(c)
+    generate_recommendations(c, [LEAGUE], "am", run, personas_self_hash="b" * 64)
+    rows = c.execute("SELECT DISTINCT personas_self_hash, strategy"
+                     " FROM recommendations WHERE run_id=?", (run,)).fetchall()
+    assert {r["personas_self_hash"] for r in rows} == {"b" * 64}
+    assert len(rows) == 5   # 五轨都带戳
+
+
 def test_personas_hash_not_stamped_by_default(priced):
     c, fx, probs = priced
     run = add_run(c)

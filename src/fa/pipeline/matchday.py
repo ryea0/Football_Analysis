@@ -57,6 +57,8 @@ from fa.evolve.knowledge import (ensure_current_snapshot, git_aux,
                                  personas_consumed_hash)
 from fa.evolve_mem.snapshot import (ensure_current_snapshot_mem,
                                     personas_mem_consumed_hash)
+from fa.evolve_self.knowledge import (ensure_current_snapshot_self,
+                                      personas_self_consumed_hash)
 from fa.model.fit import FitConfig, training_rows
 from fa.pipeline.fixtures import (DEFAULT_REGIONS, QUOTA_META_KEY,
                                   sync_fixtures)
@@ -109,6 +111,16 @@ def run_matchday(conn: sqlite3.Connection, phase: str,
 # ---------------------------------------------------------------- 流程
 
 
+def _wire_self_snapshot() -> tuple[int | None, str | None]:
+    """C' 线版本戳补修：self 快照同款纪律——先快照后取 hash；失败双 None，
+    self 轨按快照失败降级（apply 层既有路径），其余轨零影响。"""
+    try:
+        idx = ensure_current_snapshot_self()
+        return idx, personas_self_consumed_hash(idx)
+    except (OSError, ValueError):
+        return None, None
+
+
 def _wire_mem_snapshot() -> tuple[int | None, str | None]:
     """M7a（§12.7 增补）：mem 快照同款纪律——先快照后取 hash；失败双 None，
     kbmem 轨按快照失败降级（apply 层消费），其余轨零影响（设计档 §8）。"""
@@ -130,6 +142,7 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
     # knowledge 部分。窗口中途合并落盘也不再让戳与内容错位（归因命根）。
     kb_window = ensure_current_snapshot()
     personas_hash = personas_consumed_hash(kb_window)
+    kb_self_window, personas_self_hash = _wire_self_snapshot()
     kb_mem_window, personas_mem_hash = _wire_mem_snapshot()
     quota_before = _quota_left(conn)
     if odds_api_key() is None:
@@ -209,6 +222,7 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
 
     rec_ids = generate_recommendations(conn, leagues, phase, run_id,
                                        personas_hash=personas_hash,
+                                       personas_self_hash=personas_self_hash,
                                        personas_mem_hash=personas_mem_hash)
     # persona 必须在落注之前（§6.2 顺序裁定）：veto 判决先落库，paper 才不会按
     # 中性 kelly 给被否场下单——落注去重只挡重下、不撤旧注，倒置即无法挽回。
@@ -237,6 +251,9 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         "personas_hash": personas_hash,       # M6 版本戳 = 所消费 personas 工件
                                               # 内容 hash（活人格 + 本窗知识快照，
                                               # 终审 F2；recommendations 同值落行）
+        "personas_self_hash": personas_self_hash,   # C' 线工件 hash（v11 缺写入
+                                                    # 补修，None=该轨快照失败）
+        "kb_self_window": kb_self_window,            # self 快照窗口序号
         "personas_mem_hash": personas_mem_hash,   # M7a：mem 工件 hash（同上语义，
                                                   # None=该轨快照失败降级）
         "kb_mem_window": kb_mem_window,           # mem 快照窗口序号

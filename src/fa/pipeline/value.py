@@ -58,11 +58,13 @@ def generate_recommendations(conn: sqlite3.Connection, leagues: list[str],
                              phase: str, run_id: int,
                              cfg: FitConfig = FitConfig(),
                              personas_hash: str | None = None,
+                             personas_self_hash: str | None = None,
                              personas_mem_hash: str | None = None) -> list[int]:
     """对窗口内已对齐 fixture 生成/刷新推荐，返回受影响 ``recommendations.id``。
 
     无训练样本的联赛跳过（不中断 run）；无盘口/未对齐/出窗的 fixture 无推荐。
-    ``personas_hash``（M6 版本戳）与 ``personas_mem_hash``（M7a kbmem 版本戳）
+    ``personas_hash``（M6 版本戳）、``personas_self_hash``（C' 线版本戳，
+    v11 建列缺写入的补修）与 ``personas_mem_hash``（M7a kbmem 版本戳）
     只在 INSERT 生效——DO UPDATE 刷新价格不动它们
     （见 :func:`_upsert_recommendation`）。全程单 ``conn.commit()``。
     """
@@ -103,6 +105,7 @@ def generate_recommendations(conn: sqlite3.Connection, leagues: list[str],
                     kelly=kelly, created_at=_iso(now),
                     final=kelly if strategy != "model_only" else None,
                     personas_hash=personas_hash,
+                    personas_self_hash=personas_self_hash,
                     personas_mem_hash=personas_mem_hash))
     conn.commit()
     return ids
@@ -232,28 +235,30 @@ def _upsert_recommendation(conn: sqlite3.Connection, *, run_id: int, fixture_id:
                            edge: float, ev: float, kelly: float, created_at: str,
                            final: float | None,
                            personas_hash: str | None,
+                           personas_self_hash: str | None,
                            personas_mem_hash: str | None) -> int:
     """UNIQUE 冲突 → DO UPDATE 刷新价格类字段（persona 位不清，含 final）。
 
     ``final`` 只在 INSERT 生效：model_persona 中性初始为 kelly，model_only 落
     NULL（M3「退回 kelly」）；重跑经 DO UPDATE 时**不含**该列——am 判决落下的
-    final 不被 pm 的价格刷新抹掉。``personas_hash`` / ``personas_mem_hash``
-    同样只在 INSERT 生效——判决与判决语境同源，价格刷新不冒充新语境
-    （M6 §12.7；M7a kbmem 同款语义）。
+    final 不被 pm 的价格刷新抹掉。``personas_hash`` / ``personas_self_hash`` /
+    ``personas_mem_hash`` 同样只在 INSERT 生效——判决与判决语境同源，价格刷新
+    不冒充新语境（M6 §12.7；M7a 同款语义）。
     """
     conn.execute(
         "INSERT INTO recommendations (run_id, fixture_id, strategy, market, phase,"
         " model_p, market_p, best_odds, bookmaker, edge, ev, kelly_stake_frac,"
-        " final_stake_frac, personas_hash, personas_mem_hash, created_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " final_stake_frac, personas_hash, personas_self_hash,"
+        " personas_mem_hash, created_at)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT(fixture_id, market, strategy, phase) DO UPDATE SET"
         "   run_id=excluded.run_id, model_p=excluded.model_p,"
         "   market_p=excluded.market_p, best_odds=excluded.best_odds,"
         "   bookmaker=excluded.bookmaker, edge=excluded.edge, ev=excluded.ev,"
         "   kelly_stake_frac=excluded.kelly_stake_frac, created_at=excluded.created_at",
         (run_id, fixture_id, strategy, market, phase, model_p, market_p, best_odds,
-         bookmaker, edge, ev, kelly, final, personas_hash, personas_mem_hash,
-         created_at),
+         bookmaker, edge, ev, kelly, final, personas_hash, personas_self_hash,
+         personas_mem_hash, created_at),
     )
     row = conn.execute(
         "SELECT id FROM recommendations WHERE fixture_id=? AND market=? AND strategy=?"
