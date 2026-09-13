@@ -96,3 +96,157 @@ def fetch_teams(league: str) -> list[str]:
         raise FdorgError("parse", f"未知联赛 {league}")
     data = _get(f"/v4/competitions/{code}/teams", {})
     return sorted(t["name"] for t in data.get("teams", []) if t.get("name"))
+
+
+# ---------------------------------------------------------------- fallback 编排
+#
+# 注意：本模块属数据层，但逾期判定必须与结算判据**同锚**（paper._paired_match
+# 的同一套窗语义），故在函数体内延迟 import pipeline 层——避免模块级反向
+# 依赖（paper 不感知 fdorg，无环）。
+
+FINISHED_HOURS = 4   # kickoff+4h 视为必已完赛（90min+中场+补时+缓冲）
+
+
+def _normalize_name(name: str) -> str:
+    """队名归一（别名提案的 auto 判据）：NFKD 去变音符、只留字母数字、小写。"""
+    import unicodedata
+    txt = unicodedata.normalize("NFKD", name)
+    return "".join(c for c in txt if c.isalnum()).lower()
+
+
+def _overdue_fixtures(conn, now: datetime) -> list[dict]:
+    """已完赛但配不到完赛行的 pending 注对应 fixture（去重）。
+
+    修正裁定（2026-09-13）：纯结果驱动——不要求主源当日失败。
+    配对语义与结算判据同锚（``paper._paired_match`` 同一套窗），
+    不会出现「触发了但结算仍配不上」的口径分裂。
+    """
+    from fa.pipeline.paper import _paired_match
+    from fa.pipeline.value import _parse_kickoff
+    rows = conn.execute(
+        "SELECT DISTINCT f.id, f.league, f.kickoff_utc, f.home_team_id,"
+        " f.away_team_id FROM bets b"
+        " JOIN recommendations r ON r.id = b.recommendation_id"
+        " JOIN fixtures f ON f.id = r.fixture_id"
+        " WHERE b.mode='paper' AND b.status='pending'").fetchall()
+    out = []
+    for f in rows:
+        kickoff = _parse_kickoff(f["kickoff_utc"])
+        if kickoff is None or kickoff + timedelta(hours=FINISHED_HOURS) > now:
+            continue                      # 未到「必已完赛」时刻：不碰
+        if _paired_match(conn, f["league"], f["home_team_id"],
+                         f["away_team_id"], kickoff.date()) is not None:
+            continue                      # 官方行已配上：不算逾期
+        out.append({"id": f["id"], "league": f["league"],
+                    "kickoff_utc": f["kickoff_utc"], "kickoff": kickoff,
+                    "home_team_id": f["home_team_id"],
+                    "away_team_id": f["away_team_id"]})
+    return out
+
+
+def _alias_map(conn) -> dict[str, int]:
+    """``team_aliases(source='fdorg')`` → {alias: team_id}（一次载入）。"""
+    return {r["alias"]: r["team_id"] for r in conn.execute(
+        "SELECT alias, team_id FROM team_aliases WHERE source='fdorg'")}
+
+
+def _season_of(kickoff: datetime) -> int:
+    """kickoff → 赛季起始年（7 月及以后属新赛季；与 sync._current_season_start 同型）。"""
+    return kickoff.year if kickoff.month >= 7 else kickoff.year - 1
+
+
+def _pair_one(fixture: dict, cand: list[FdorgResult],
+              aliases: dict[str, int]) -> tuple[FdorgResult | None, str]:
+    """三判据配对（设计 §4）：① utcDate 严格相等 ② 别名方向一致 ③ FINISHED
+    （fetch_results 源侧已过滤）。返回 ``(命中行, ""`` 或 ``(None, reason)``；
+    reason ∈ kickoff_mismatch / alias_missing:<名,...> / not_found。"""
+    same_kickoff = [m for m in cand if m.utc_date == fixture["kickoff_utc"]]
+    if not same_kickoff:
+        # 同一对阵只差时间戳 → 明确点名（绝不能模糊对上，stopgap 实证靠的就是
+        # 时间戳严格相等；差一分钟也是另一场/数据错误）
+        for m in cand:
+            h, a = aliases.get(m.home_name), aliases.get(m.away_name)
+            if (h == fixture["home_team_id"] and a == fixture["away_team_id"]
+                    and h is not None and a is not None):
+                return None, "kickoff_mismatch"
+        return None, "not_found"
+    for m in same_kickoff:                # 同刻多场由判据②方向校验消歧
+        h, a = aliases.get(m.home_name), aliases.get(m.away_name)
+        if h is not None and a is not None and h == fixture["home_team_id"] \
+                and a == fixture["away_team_id"]:
+            return m, ""
+    missing = sorted({n for m in same_kickoff
+                      for n in (m.home_name, m.away_name)
+                      if aliases.get(n) is None})
+    if missing:
+        return None, "alias_missing:" + ",".join(missing)
+    return None, "not_found"
+
+
+def _insert_fallback_row(conn, fixture: dict, m: FdorgResult) -> None:
+    """落行与 T5 同约定（设计 §5）：对齐 team_id、date=kickoff UTC 日、season=
+    起始年、fthg/ftag、raw_line 记来源；同 UNIQUE key 已有行（官方或既有
+    fallback）→ INSERT OR IGNORE 不覆盖——官方为尊。"""
+    raw = {"source": "api.football-data.org", "fallback": True,
+           "fetched_at": datetime.now(timezone.utc).strftime(
+               "%Y-%m-%dT%H:%M:%SZ"),
+           "fixture_id": fixture["id"],
+           "match": f"{m.home_name} {m.fthg}-{m.ftag} {m.away_name}"}
+    conn.execute(
+        "INSERT OR IGNORE INTO matches (league, season, date, home_team_id,"
+        " away_team_id, fthg, ftag, raw_line) VALUES (?,?,?,?,?,?,?,?)",
+        (fixture["league"], _season_of(fixture["kickoff"]),
+         fixture["kickoff"].date().isoformat(), fixture["home_team_id"],
+         fixture["away_team_id"], m.fthg, m.ftag,
+         json.dumps(raw, ensure_ascii=False)))
+
+
+def results_fallback(conn, *, dry_run: bool = False,
+                     now: datetime | None = None) -> dict:
+    """备用源结算编排（spec v0.13 §9.5；与 daily 自动步 / ``fa data
+    sync-fallback`` 同一代码路径）。
+
+    逾期集 → 按 (联赛, 日期窗) 每联赛 1 次精准拉取（dateFrom/dateTo 夹紧）
+    → 三判据配对 → 落 ``matches``。返回形状恒含 ``triggered / fixtures /
+    filled / unmatched / error``；未触发零值；token 缺失 ``skipped:
+    "no_token"``（静默禁用，不告警——主源 N=2 告警已把人叫来）；``dry_run``
+    算与拉照常、不落库（审计/应急，额外带 ``would_fill``）。单联赛失败只记
+    ``error`` 不中断（T5 单文件容错同构）。**不 commit**——commit 归编排层
+    （daily / CLI）。
+    """
+    now = now or datetime.now(timezone.utc)
+    res: dict = {"triggered": False, "fixtures": 0, "filled": 0,
+                 "unmatched": [], "error": []}
+    overdue = _overdue_fixtures(conn, now)
+    res["fixtures"] = len(overdue)
+    if not overdue:
+        return res
+    if not fdorg_token():
+        res["skipped"] = "no_token"
+        return res
+    res["triggered"] = True
+    aliases = _alias_map(conn)
+    by_league: dict[str, list[dict]] = {}
+    for f in overdue:
+        by_league.setdefault(f["league"], []).append(f)
+    fetched: dict[str, list[FdorgResult]] = {}
+    for league, fixtures in sorted(by_league.items()):
+        days = sorted(f["kickoff"].date().isoformat() for f in fixtures)
+        try:
+            fetched[league] = fetch_results(league, days[0], days[-1])
+        except FdorgError as exc:
+            res["error"].append(f"{league}: {exc}")
+    for f in sorted(overdue, key=lambda x: x["id"]):
+        hit, reason = _pair_one(f, fetched.get(f["league"], []), aliases)
+        if hit is None:
+            res["unmatched"].append({"fixture_id": f["id"],
+                                     "league": f["league"],
+                                     "kickoff": f["kickoff_utc"],
+                                     "reason": reason})
+            continue
+        if not dry_run:
+            _insert_fallback_row(conn, f, hit)
+        res["filled"] += 1
+    if dry_run:
+        res["would_fill"] = res["filled"]
+    return res
