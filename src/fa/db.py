@@ -4,7 +4,7 @@ from pathlib import Path
 
 from fa.config import db_path
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # backtest_predictions 建表 DDL：新建与迁移共用同一常量，保证两条路径的表结构
 # 由构造即一致（否则未来加列只会出现在新库、老库迁移后缺列）。
@@ -85,7 +85,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     strategy         TEXT NOT NULL
         CHECK (strategy IN ('model_only', 'model_persona',
                             'model_persona_nokb',
-                            'model_persona_kb_self')),  -- §6.6 双轨 + C线nokb + C'线自反思
+                            'model_persona_kb_self',
+                            'model_persona_kbmem')),  -- §6.6 双轨 + C线nokb + C'线自反思 + M7a kbmem检索轨
     market           TEXT NOT NULL
         CHECK (market IN ('H', 'D', 'A', 'O2.5')),             -- 每个结果一行
     phase            TEXT NOT NULL
@@ -104,6 +105,7 @@ CREATE TABLE IF NOT EXISTS recommendations (
     report_md        TEXT,                   -- M4 persona：点评 ≤500 字（§6.3）
     personas_hash    TEXT,             -- M6：本 run 读取的 personas 树内容 hash（§12.7）
     personas_self_hash TEXT,           -- C' 线：自反思知识库树 hash
+    personas_mem_hash  TEXT,           -- M7a：kbmem 轨版本戳（mem JSONL 快照，§12.7 增补）
     created_at       TEXT NOT NULL,
     UNIQUE (fixture_id, market, strategy, phase)
 );
@@ -426,7 +428,7 @@ def init_db(path: Path | None = None) -> None:
         # 表重建类迁移的保守护栏（设计档 §14）：v8 重建 recommendations、v9 重建
         # agentline_predictions，各在升级前落一份 .bak-vN 快照（同名不覆盖，
         # 二次 init 幂等）；老库跨多个重建版本就多备几份，代价可忽略。
-        for guard in (8, 9, 11):
+        for guard in (8, 9, 11, 12):
             if row["version"] < guard:
                 bak = p.with_name(p.name + f".bak-v{guard}")
                 if not bak.exists():
@@ -469,7 +471,10 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
     v10->v11 重建 recommendations——strategy 扩四轨枚举（加
     model_persona_kb_self）、加 personas_self_hash 列（C' 线版本戳）；
     evolution_self 三表就位（C' 线自反思对照线）；影子表名 _v10，
-    影子恢复优先于幂等跳过；init_db 自动备份 .bak-v11。"""
+    影子恢复优先于幂等跳过；init_db 自动备份 .bak-v11；
+    v11->v12 重建 recommendations——strategy 扩五轨枚举（加
+    model_persona_kbmem）、加 personas_mem_hash 列（M7a kbmem 版本戳，
+    spec §12.7 增补）；影子表名 _v11；init_db 自动备份 .bak-v12。"""
     if from_v < 2:
         conn.executescript(_BP_TABLE)
     if from_v < 3:
@@ -706,6 +711,57 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
             conn.execute("DROP TABLE recommendations_v10;")
         # C' 线三表（纯加法，IF NOT EXISTS 幂等）
         conn.executescript(_EVOLUTION_SELF_TABLE)
+    if from_v < 12:
+        # v12：M7a kbmem 检索轨（spec §12.7 增补）。
+        # 重建 recommendations——strategy 扩五轨（加 model_persona_kbmem）、
+        # 加 personas_mem_hash 列。影子表 _v11（v8/_v7、v9/_v8、v11/_v10 同
+        # 惯例）；rename 圈 FK=OFF + legacy_alter_table（v8/v11 同款坑防护）。
+        cur = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table'"
+            " AND name='recommendations'")
+        ddl = cur.fetchone()
+        stale = ddl is not None and "model_persona_kbmem" not in ddl["sql"]
+        if stale:
+            shadow = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name='recommendations_v11'").fetchone()
+            conn.execute("DROP INDEX IF EXISTS idx_recs_run")
+            if conn.in_transaction:
+                conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("PRAGMA legacy_alter_table=ON")
+            try:
+                if shadow is not None:
+                    # 弃用半建活动表（一定是不完整的）、从影子恢复
+                    conn.execute("DROP TABLE IF EXISTS recommendations;")
+                    conn.execute(
+                        "ALTER TABLE recommendations_v11"
+                        " RENAME TO recommendations;")
+                conn.execute(
+                    "ALTER TABLE recommendations RENAME TO recommendations_v11;")
+            finally:
+                conn.execute("PRAGMA legacy_alter_table=OFF")
+                conn.execute("PRAGMA foreign_keys=ON")
+            # 新形状：五轨枚举 + personas_mem_hash 列（_BLINE_TABLE 单一事实源）
+            conn.executescript(_BLINE_TABLE)
+            # 存量行：personas_mem_hash 补 NULL（语义 = 「M7a 纪元前」）
+            conn.execute(
+                "INSERT INTO recommendations (id, run_id, fixture_id, strategy,"
+                " market, phase, model_p, market_p, best_odds, bookmaker, edge,"
+                " ev, kelly_stake_frac, verdict, confidence_delta, final_stake_frac,"
+                " key_factors, report_md, personas_hash, personas_self_hash,"
+                " personas_mem_hash, created_at)"
+                " SELECT id, run_id, fixture_id, strategy, market, phase,"
+                " model_p, market_p, best_odds, bookmaker, edge, ev,"
+                " kelly_stake_frac, verdict, confidence_delta, final_stake_frac,"
+                " key_factors, report_md, personas_hash, personas_self_hash,"
+                " NULL, created_at"
+                " FROM recommendations_v11;")
+            # 重建索引
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_recs_run"
+                " ON recommendations (run_id);")
+            conn.execute("DROP TABLE recommendations_v11;")
     conn.execute("UPDATE schema_version SET version=?", (SCHEMA_VERSION,))
 
 
