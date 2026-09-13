@@ -25,10 +25,19 @@ def ingest_rows(conn: sqlite3.Connection, league: str, season: int,
     existing = conn.execute(
         "SELECT COUNT(*) c FROM matches WHERE league=? AND season=?",
         (league, season)).fetchone()["c"]
-    if len(rows) < existing:         # 收缩保护（spec v0.12 §9.5）：
-        raise ValueError(            # 上游/缓存回退时宁可不动分区也不删赛果
-            f"收缩保护：{league}/{season} 分区库内 {existing} 行 > 新内容 "
-            f"{len(rows)} 行，拒绝重建（疑似上游/缓存回退），分区保持原样")
+    # fallback 行（含 09-10 stopgap 历史键）不计入收缩基线（spec v0.13）：
+    # 主源恢复后官方重建不得被备用源拉来的行顶住；对无 fallback 行的分区，
+    # 基线 = 现存总数，行为与 v0.12 完全一致
+    fallback = conn.execute(
+        "SELECT COUNT(*) c FROM matches WHERE league=? AND season=?"
+        " AND (raw_line LIKE '%\"fallback\":true%'"
+        "      OR raw_line LIKE '%\"stopgap\":true%')",
+        (league, season)).fetchone()["c"]
+    if len(rows) < existing - fallback:   # 收缩保护（spec v0.12 §9.5）：
+        raise ValueError(                 # 上游/缓存回退时宁可不动分区也不删赛果
+            f"收缩保护：{league}/{season} 分区库内官方 {existing - fallback} 行"
+            f"（另 fallback {fallback} 行）> 新内容 {len(rows)} 行，"
+            f"拒绝重建（疑似上游/缓存回退），分区保持原样")
     try:
         conn.execute("DELETE FROM matches WHERE league=? AND season=?",
                      (league, season))

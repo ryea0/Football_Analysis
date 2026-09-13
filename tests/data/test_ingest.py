@@ -165,3 +165,53 @@ def test_equal_count_rebuild_still_allowed(conn):
     ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))
     n = ingest_rows(conn, "E0", 1995, parse_csv(CSV_B_CORRECTED, "E0", 1995))
     assert n == 2 and count(conn) == 2
+
+
+FALLBACK_RAW = '{"source": "api.football-data.org", "fallback": true}'
+STAPGAP_RAW = '{"source": "api.football-data.org", "stopgap": true}'
+CSV_C = CSV_A + "E0,25/08/1995,Arsenal,Everton,3,1,H\n"
+
+
+def _team_id(conn, name: str) -> int:
+    return conn.execute("SELECT id FROM teams WHERE name=?",
+                        (name,)).fetchone()["id"]
+
+
+def _insert_fallback(conn, raw_line: str, date: str = "1995-08-25",
+                     home: str = "Arsenal", away: str = "Everton",
+                     fthg: int = 0, ftag: int = 0):
+    conn.execute(
+        "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
+        " fthg, ftag, raw_line) VALUES ('E0', 1995, ?, ?, ?, ?, ?, ?)",
+        (date, _team_id(conn, home), _team_id(conn, away),
+         fthg, ftag, raw_line))
+    conn.commit()
+
+
+def test_shrink_guard_excludes_fallback_rows(conn):
+    """v0.13：fallback 行不计收缩基线——主源恢复后官方重建不得被备用行顶住。
+
+    分区 = 2 官方 + 1 fallback；官方新内容 3 行（官方基线 2）→ 允许重建。
+    """
+    ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))
+    _insert_fallback(conn, FALLBACK_RAW)
+    n = ingest_rows(conn, "E0", 1995, parse_csv(CSV_C, "E0", 1995))
+    assert n == 3 and count(conn) == 3          # fallback 行被官方重建幂等覆盖
+
+
+def test_shrink_guard_excludes_stopgap_history_rows(conn):
+    """09-10 stopgap 历史行（stopgap 键）同样不计基线（设计 §5：两键都认）。"""
+    ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))
+    _insert_fallback(conn, STAPGAP_RAW)
+    n = ingest_rows(conn, "E0", 1995, parse_csv(CSV_C, "E0", 1995))
+    assert n == 3
+
+
+def test_shrink_guard_still_rejects_official_shrink(conn):
+    """排除 fallback 后官方行数真缩 → 照旧拒绝（v0.12 语义不放松）。"""
+    ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))
+    _insert_fallback(conn, FALLBACK_RAW)        # 官方 2 + fallback 1
+    shrunk = CSV_A.splitlines()[0] + "\n" + CSV_A.splitlines()[1] + "\n"
+    with pytest.raises(ValueError, match="收缩保护"):
+        ingest_rows(conn, "E0", 1995, parse_csv(shrunk, "E0", 1995))  # 1 行 < 2
+    assert count(conn) == 3                     # 分区原样（含 fallback 行）
