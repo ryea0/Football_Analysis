@@ -1514,7 +1514,7 @@ def test_v11_migrates_to_v12(tmp_path):
             "INSERT INTO recommendations (id, run_id, fixture_id, strategy,"
             " market, phase, model_p, market_p, best_odds, bookmaker, edge,"
             " ev, kelly_stake_frac, personas_mem_hash, created_at)"
-            " VALUES (2, 1, 2, 'model_persona_kbmem', 'H', 'am', .5, .4, 2.1,"
+            " VALUES (2, 1, 1, 'model_persona_kbmem', 'H', 'am', .5, .4, 2.1,"
             " 'b', .1, .1, .05, 'pmh', '2026-09-14')")
         conn.commit()
         # 影子表收尾干净
