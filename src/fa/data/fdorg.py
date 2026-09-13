@@ -80,13 +80,17 @@ def fetch_results(league: str, date_from: str, date_to: str) -> list[FdorgResult
         ft = (m.get("score") or {}).get("fullTime") or {}
         if m.get("status") != "FINISHED":
             continue
-        if ft.get("homeTeam") is None or ft.get("awayTeam") is None:
+        # v4 fullTime 实测键是 home/away（2026-09-13 真实响应实证）；个别
+        # 客户端文档/镜像用 homeTeam/awayTeam——两种拼写都认，其余丢行
+        home = ft["home"] if ft.get("home") is not None else ft.get("homeTeam")
+        away = ft["away"] if ft.get("away") is not None else ft.get("awayTeam")
+        if home is None or away is None:
             continue
         out.append(FdorgResult(
             utc_date=str(m["utcDate"]),
             home_name=str((m.get("homeTeam") or {}).get("name", "")),
             away_name=str((m.get("awayTeam") or {}).get("name", "")),
-            fthg=int(ft["homeTeam"]), ftag=int(ft["awayTeam"])))
+            fthg=int(home), ftag=int(away)))
     return out
 
 

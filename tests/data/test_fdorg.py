@@ -263,9 +263,10 @@ def test_league_codes_cover_five():
 
 
 def _payload(*matches):
+    """fixture 形状 = 2026-09-13 实拉的真实 v4 响应（fullTime 键 home/away）。"""
     return {"matches": [
         {"utcDate": m[0], "status": m[1],
-         "score": {"fullTime": {"homeTeam": m[5], "awayTeam": m[6]}},
+         "score": {"fullTime": {"home": m[5], "away": m[6]}},
          "homeTeam": {"name": m[3]}, "awayTeam": {"name": m[4]}}
         for m in matches]}
 
@@ -291,6 +292,18 @@ def test_fetch_results_filters_finished(monkeypatch):
                    FdorgResult("2026-09-12T19:00:00Z", "A", "B", 0, 0)]
     assert seen["path"] == "/v4/competitions/PL/matches"
     assert seen["params"] == {"dateFrom": "2026-09-12", "dateTo": "2026-09-12"}
+
+
+def test_fetch_results_accepts_hometeam_spelling(monkeypatch):
+    """个别镜像/文档用 homeTeam/awayTeam 拼写——兼容，不丢行。"""
+    payload = {"matches": [
+        {"utcDate": "2026-09-12T14:00:00Z", "status": "FINISHED",
+         "score": {"fullTime": {"homeTeam": 1, "awayTeam": 2}},
+         "homeTeam": {"name": "A"}, "awayTeam": {"name": "B"}}]}
+    monkeypatch.setattr("fa.data.fdorg._get", lambda p, q: payload)
+    monkeypatch.setenv("FOOTBALL_DATA_ORG_KEY", "k")
+    assert fetch_results("E0", "2026-09-12", "2026-09-12") == [
+        FdorgResult("2026-09-12T14:00:00Z", "A", "B", 1, 2)]
 
 
 def test_fetch_results_unknown_league():
