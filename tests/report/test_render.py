@@ -550,7 +550,8 @@ def test_status_shows_three_tracks(conn):
     from fa.pipeline.paper import paper_summary
     assert set(paper_summary(conn)) == {"model_only", "model_persona",
                                         "model_persona_nokb",
-                                        "model_persona_kb_self"}
+                                        "model_persona_kb_self",
+                                        "model_persona_kbmem"}
 
 
 def test_strategy_label_map_still_covers_nokb():
@@ -559,7 +560,8 @@ def test_strategy_label_map_still_covers_nokb():
     assert _STRATEGY["model_persona_nokb"] == "模型+persona·无知识库"
     assert "model_persona_kb_self" in _STRATEGY  # C' 线自反思轨也有标签
     assert {"model_only", "model_persona", "model_persona_nokb",
-            "model_persona_kb_self"}.issubset(set(_STRATEGY))
+            "model_persona_kb_self",
+            "model_persona_kbmem"}.issubset(set(_STRATEGY))
 
 
 # ------------------------------------------------- 降级分支（T4/T7 交互）

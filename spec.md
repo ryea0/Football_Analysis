@@ -20,6 +20,7 @@
 > v0.11 → v0.12 变更：数据链养护加固（§3.4/§9.5/§9.6）——daily 的 CSV 同步对**当前赛季分区**无条件强制重下（历史赛季维持缓存+内容哈希跳过）；matches 分区**收缩保护**（新内容行数少于库内现存即拒绝重建、记 file_errors）；watchdog 扩两项数据链巡检（赛果滞后 / 滞留 pending 注，宽限 3 天）。修复实况：daily 从不刷新缓存致 09-01 起赛果零入库（九月 158 注 paper 全 pending），run#9 分区哈希回退曾删除已入库的 09-03 赛果（F1/SP1 各 1 行）。
 > v0.12 → v0.13 变更：赛果备用源 fallback（§3.1/§9.5）——api.football-data.org 免费层为备用赛果源：**结果驱动触发**（存在「已完赛但配不到完赛行」的 pending paper 注即触发，按联赛日期窗精准拉取）；配对三判据（kickoff 时间戳严格相等 + fdorg 别名方向校验 + FINISHED）；落行与 T5 同约定（`raw_line` 记 source，同 UNIQUE key 主源恢复后分区重建幂等覆盖 + 比分 diff 告警**不改账**）；主源当前赛季连续 2 天失败 TG 告警；收缩保护基线排除 fallback 行（2026-09-13 修正裁定：触发判据去「主源失败」合取、纯结果驱动——负责人要求每日看到前一日赛果；设计 docs/superpowers/specs/2026-09-10-fallback-results-source-design.md）。
 > v0.13 → v0.14 变更：文档勘误 + 补实现（对齐现实，无设计变更）——§9.3 CLI 清单重写对齐实际命令面（原列 `fa data sync-odds` / `fa model fit` 已折入 run 管线、命令不存在，补 retro / evolve / evolve-self / agentline / ops 五族与 data 新子命令）；§9.6 调度表补 evolve（周日 03:17）/ evolve-self（周日 03:33）两 job——M6 与 C' 线上线时漏更，标题「三条」改「六条」；`fa report send` 自 M3 起未实现（docs/m3-report.md §7-2 点名），本次补齐。
+> v0.14 → v0.15 变更：§12.7 增补 M7a kbmem 检索轨——C 线知识库读取侧升级：markdown 仍为唯一权威源与人审载体，mem0（OSS library、`add(infer=False)` 零生成式 LLM、ark OpenAI 兼容 embedder）为派生检索索引（合并后 `fa evolve sync-mem` 全量重建 + hash 对账、挂 evolve tick 尾步），窗口冻结载体为 JSONL 快照（`evolution/snapshots_mem/w{idx}/`，git 版本化，运行时索引纯派生缓存）；B 线扩第五轨 `model_persona_kbmem`（按场检索 top-k 注入，与 kb 轨构成同源消融对），读取侧故障降级整文件内联并记 `runs.summary.persona.kbmem_degraded`；`recommendations` 增 `personas_mem_hash` 版本戳（schema v12）；M6 D5「无检索」条款正式触发升级、D1 agent 无状态不变（2026-09-13 负责人裁定：先 kb 后端、后 A_mem 臂两阶段，设计 docs/superpowers/specs/2026-09-13-m7a-mem0-kbmem-design.md，Gate 0 报告 docs/m7a-gate0-report.md——ark live 项 BLOCKED 待 key）。
 
 ---
 
@@ -282,9 +283,11 @@ hermes cron（调度）
 - 实盘按 model_persona 下注，但两套都跟踪命中 / 收盘对比
 - **用实盘数据回答「persona 到底加没加分」**——这是对方案 B 的诚实检验；样本量在 M5 结束时评估
 
-M6 起同刻三落（§12.7）：第三轨 `model_persona_nokb` 为 C 线对照轨（人格无
+M6 起同刻多落（§12.7）：第三轨 `model_persona_nokb` 为 C 线对照轨（人格无
 知识库、paper 独立 bankroll）；TG 推送正文保持双轨口径（nokb 不进推送），
 §12.3 预注册判据的 A/B 对比口径不变（仍 model_only vs model_persona）。
+C' 线第四轨 `model_persona_kb_self` 与 M7a 第五轨 `model_persona_kbmem`
+（v0.15）同规则：同刻五落、paper 独立 bankroll、不进 TG 推送正文。
 
 ---
 
@@ -403,6 +406,7 @@ fa report send             # 手动重发最近报告（v0.14 补实现）
 fa bet add|list|settle     # 投注台账（live 为唯一人工实盘入口）
 fa retro report|run|audit|runs|consistency|analyze  # 复盘归因子线
 fa evolve status|tick|reflect|review|merge|reject|shelve  # C 线（§12.7）
+fa evolve sync-mem|mem-verify                            # M7a kbmem 检索索引（§12.7 v0.15）
 fa evolve-self status|tick|reflect|diff|rollback      # C' 线（自反思对照）
 fa agentline export|run|runs|compare                  # 范式对比线（§12.5）
 fa ops alert|watchdog|weekly|backfill-clv|backfill-settled-at  # 运维族
@@ -434,7 +438,7 @@ fa ops alert|watchdog|weekly|backfill-clv|backfill-settled-at  # 运维族
 | matchday-am | 每日 11:00 | `fa run matchday --phase am`：拉盘→建模→价值→persona→**完整推荐报告**；管线内部检查当日赛程，无赛事即空跑退出，不耗额度 |
 | matchday-pm | 每日 17:00 | `fa run matchday --phase pm`：**更新版报告（已确认）**——与 11:00 对比只推差异：已推候选的盘口移动（CLV 预览）、新增/消失候选，去重不重发全量；persona 不重跑（沿用 11:00 判决），仅对新增候选场次补跑一次 |
 | weekly | 每周一 07:00 | `fa ops weekly`（M5 §10「周度小结」，v0.9）：上个自然周（北京时间）paper **双轨对照**（落注/结算/ROI/CLV 中位/bankroll）→ TG；空周（双落注且零结算）静默——daily 结算后、am 拉盘前的槽位 |
-| evolve | 每周日 03:17 | `fa evolve tick`（C 线周检，M6/§12.7）：窗口收口触发反思并停驻人审（`fa evolve review/merge/reject`），平时空转 |
+| evolve | 每周日 03:17 | `fa evolve tick`（C 线周检，M6/§12.7）：窗口收口触发反思并停驻人审（`fa evolve review/merge/reject`），平时空转；尾步 sync-mem（M7a/§12.7 v0.15）：活树派生→索引重建→对账，失败记事件+TG 尽力告警、不炸 tick |
 | evolve-self | 每周日 03:33 | `fa evolve-self tick`（C' 线周检，自反思对照线）：窗口收口触发自反思 + 自动落账（可 `rollback`），平时空转 |
 
 **载体与告警（2026-09-04 负责人裁定：双载体并行开发、实现可切换）**：六条 job 的
@@ -492,6 +496,8 @@ LLM，gateway 亦无须配 TG 代理，告警走 fa 自己的推送路径）。�
 | M4 | Hermes persona 接入 | 5 personas、契约校验、降级、A/B 双轨 | mock + 实跑测试通过；A/B 数据落库 | |
 | M5 | 实盘小注 4–6 周 | 小注运行、每日结算、周度小结 | 入场前提：**模拟盘 CLV 达标** + **组合风控三参数生效**（§5.3——总敞口 30%/同场 2 注/回撤 20% 节流，paper 期仅观测）；以 **CLV 为主、ROI 为辅**决策加码 / 维持 / 停止 / 滚球与平台对接二期立项 | 模拟盘数据自 M3 起积累 |
 | M6 | C 线进化栈 | C 线进化栈：知识库文件 + 反思任务（hermes -z 纯函数）+ 生产第三轨对照 + 版本戳入账 + 快照冻结 + 人审关卡 + 判据预注册 | 脚手架 E2E 全闭环（反思→diff→人审→合并→新窗口判决带新版本戳、nokb 轨无 KB）；降级路径实测三例（反思超时/契约破损/关卡拒绝）；校准实跑（真 hermes 真台账，预期 no_change）；C 线判据文档预注册存档。真实 W1 首合并（~2026-10-15）为监控点不阻塞验收 | 依赖：M4 合并✓、M5 节流✓ |
+| M7a | kbmem 检索轨 | mem0 记忆基建阶段一：evolve_mem 模块（JSONL 派生/窗口冻结/hash 缓存索引/对账）+ 第五轨 model_persona_kbmem + schema v12（personas_mem_hash）+ sync-mem/mem-verify CLI + tick 尾步 | Gate 0 五项（ark live 项 BLOCKED 待 key，机制项全过）；离线全链 E2E（派生→冻结→索引→检索→戳→窗口隔离）；降级实测（检索坏→内联+记账、快照坏→整轨降级、sync 坏→tick 不炸+告警）；看板多轨页自动发现 kbmem 轨。ark 真跑（key 到位后 sync-mem 实测）为上线监控点不阻塞验收 | 依赖：M6 已合入✓；设计 2026-09-13-m7a-mem0-kbmem-design.md |
+| M7b | A_mem 臂（占位） | 线 A 加「有记忆 dsh」臂：mem0 完整记忆管线（infer=True、独立 namespace、agent 自主 add/search）——mem0 主场 | 届时独立 brainstorm + 预注册判据 + 对 §12.5 无状态扩展的显式决策记录 | 依赖：M7a 落地 + 决策记录 |
 
 **一句重申：M2 是诚实的关卡——如果模型 log-loss 跑不赢收盘盘，后面的钱和精力都应该省下来。**
 
@@ -598,3 +604,23 @@ bankroll、不进 TG 推送正文）；§12.3 判据口径不变。合并经人�
 定性知识，不做统计调参——数字归模型与 Python 主控。设计文档：
 docs/superpowers/specs/2026-09-04-m6-evolution-line-design.md 与
 2026-09-04-m6-evolution-implementation-design.md。
+
+**v0.15 增补（M7a kbmem 检索轨）**：C 线知识库读取侧升级——markdown 仍为
+唯一权威源与人审载体，mem0（OSS library、`add(infer=False)` 零生成式
+LLM——llm 配置指向死端口为结构性保证、ark OpenAI 兼容 embedder）为其派生
+检索索引：合并后全量重建（`fa evolve sync-mem`，挂 evolve tick 尾步）+
+「索引导出条目集 vs 权威派生条目集」字节级对账（drift 即作废重建+告警）；
+窗口冻结载体为 JSONL 快照（`evolution/snapshots_mem/w{idx}/mem-{league}.jsonl`，
+git 版本化——回滚 = git revert），运行时索引为 hash 键控纯派生缓存
+（`data/mem_cache/`，gitignore，随时可删可重建）。B 线新增第五消费轨
+`model_persona_kbmem`：按场检索 top-k 条目（query = 联赛+主客队+候选市场）
+注入判决 prompt，与 kb 轨（全文内联）构成同源消融对；读取侧故障降级为
+整文件内联并记 `runs.summary.persona.kbmem_degraded="inline"`（降级只换
+注入形态不降判决）；`recommendations.personas_mem_hash` 记 mem 工件版本戳
+（活人格 + 本窗 JSONL 快照，先快照后取 hash）。M6 D5「无检索无 embedding」
+条款由本增补正式触发升级（触发理由：检索针对性 + M7b 基建前置）；D1
+agent 无状态不变——mem0 是外置检索视图，persona 输入输出契约不动。设计：
+docs/superpowers/specs/2026-09-13-m7a-mem0-kbmem-design.md；Gate 0：
+docs/m7a-gate0-report.md（ark live 三项 BLOCKED 待 ARK_API_KEY，补跑
+`ARK_API_KEY=... uv run python scripts/spike/m7a_gate0.py` 或
+`fa evolve sync-mem` 真跑）。
