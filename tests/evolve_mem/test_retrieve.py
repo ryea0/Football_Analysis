@@ -24,7 +24,7 @@ def test_topk_and_inline_and_empty(mem_root):
     write_kb(mem_root)
     idx = 3
     ensure_window_snapshot_mem(idx)
-    lines = R.window_mem_topk(idx, "E0", "E0 阿森纳 主场", top_k=2)
+    lines = R.window_mem_topk(idx, "E0", "阿森纳 主场", top_k=2)
     assert len(lines) == 2 and lines[0].startswith("[E0-S01]")
     inline = R.window_mem_inline(idx, "E0")
     assert inline is not None and inline.count("\n") == 3      # 4 条目
