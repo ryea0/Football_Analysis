@@ -950,3 +950,37 @@ uv run fa run daily
 1. **Spec 覆盖**：设计 §3 触发（修正版）→ T5/T7；§4 客户端+配对 → T2/T5；§5 记账 → T5（raw_line/summary）+T4（fail_streak meta）；§6 恢复闭环 → T3（收缩基线）+T4（快照/diff）+T7（CLV 回填）；§7 两条告警 → T7；§8 CLI → T6/T8；§10 测试 → 各任务内（金案例=stopgap 6 场形态的配对/方向/同刻用例）；§11 spec → T1。缺口：设计 §4「免费层别名约 98 队一次性确认」由 T6 propose + T9 人工清单承接。
 2. **占位符扫描**：T5 测试体含 `...断言...` 省略（执行者按用例名补全具体断言，测试意图与关键断言已给出）；其余任务代码完整。
 3. **类型一致性**：`results_fallback` 返回形状在 T5/T7 一致；`SyncReport.fallback_diffs` 元组形状 T4 定义=T7 消费；`_normalize_name` T5 定义=T6 使用。✓
+
+---
+
+## 上线记录（2026-09-13 20:40~21:10 北京）
+
+**别名两步**：`fa data aliases-fdorg` 拉全 96 队提案（auto 仅 2：RB Leipzig、
+Paris FC）；94 条按当前赛季名册人工对照映射一次性写入（fdorg 官方全称 →
+football-data canonical 简称，映射脚本见会话 tmp/confirm_aliases.py，明细可
+`SELECT * FROM team_aliases WHERE source='fdorg'` 审计）。实施中漏写
+Brentford FC（dry-run 的 alias_missing 抓出）后补全。
+
+**实施中发现并修复两处数据/解析缺陷**：
+1. **v4 fullTime 键名**：真实响应为 `home`/`away`（非文档直觉的 homeTeam/
+   awayTeam）——首次 dry-run 0 命中暴露，客户端已兼容双拼写，测试 fixture
+   换成真实响应形状（金案例从「臆造形状」变「实证形状」，正是设计 §10 要求）。
+2. **oddsapi 侧 Santander 错绑**（存量数据伤，非本机制引入）：别名
+   `Real Racing Club de Santander → team_id 92（Almeria，本赛季不在 SP1）`
+   污染 fixtures 29/43/115；#43 的注在错绑发生前已按正确绑定结算（H 赢/A 输
+   == 官方 Vallecano 3-2 Santander，账面无需重算）。已改绑 92→64 并重绑三
+   fixture（fix_santander.py）。fdorg 配对层在这件事上正确拒绝（not_found），
+   属设计防御的首次实战。
+3. **收缩保护交互**：fallback 行计入收缩基线会把主源恢复顶死——T3 排除之
+   （设计文档 §修正裁定已记）。
+
+**dry-run 终态**：25/25 would_fill、unmatched=[]、errors=[]。
+
+**真跑（run #42，2026-09-13T12:40~12:53Z）**：fallback 25/25 落行 →
+**结算 140 注（48 胜，净 +378.09）**，TG 简报送达；四轨各 35 注
+（model_only +90.17 / model_persona +95.90 / **kb_self 首批 +92.60** /
+nokb +99.42）。剩余 pending 116（未开赛场次）。football-data 当日仍零更新
+（inserted=0），全靠 fallback 达成「当日看到前一日赛果」。
+
+**注意**：daily 的 fallback 步在本分支；未合入 main 前，cron 06:30 的 daily
+仍是旧代码（无 fallback）。合入后即为全自动。
