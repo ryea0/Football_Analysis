@@ -1296,6 +1296,24 @@ def ops_backfill_clv_cmd() -> None:
     typer.echo(f"回填收盘基准：{out['filled']} 注（closing_source 记账实际基准）")
 
 
+@data_app.command("sync-fallback")
+def sync_fallback_cmd(
+    dry_run: bool = typer.Option(False, "--dry-run",
+                                  help="只算与拉取、不落库（审计/应急）"),
+) -> None:
+    """备用源赛果结算（spec v0.13；与 daily 自动步同一代码路径）。"""
+    from fa.data.fdorg import results_fallback
+    conn = connect()
+    try:
+        out = results_fallback(conn, dry_run=dry_run)
+        conn.commit()
+    finally:
+        conn.close()
+    typer.echo(json.dumps(out, ensure_ascii=False, indent=1))
+    if out.get("unmatched"):
+        raise typer.Exit(code=1)     # 配对失败 ≠ 成功：脚本/人眼都能察觉
+
+
 @data_app.command("backfill-bfe")
 def data_backfill_bfe_cmd(
     seasons_from: int = typer.Option(2024, "--from",
