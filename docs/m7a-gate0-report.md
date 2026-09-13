@@ -32,6 +32,16 @@ live 补跑法：`ARK_API_KEY=<key> uv run python scripts/spike/m7a_gate0.py`（
 - **chroma 无 keyword_search**：混合检索（BM25）被禁，纯语义召回（stderr 实证）。检索质量兜底 = kbmem vs kb 消融轨本身（设计档 §11）。
 - **离线测试缝**：`from_config` 的 embedder 白名单不收 `mock`/`chroma`；但 `Memory` 实例的 `embedding_model` 属性可事后替换（`m.embedding_model = MockEmbeddings()`，常量向量零网络）——`Mem0Retriever` 生产类可获离线机制覆盖（排名不作数）。
 
+## live 补跑实况（2026-09-14，负责人裁定「用现有 ark agent plan」后）
+
+用 agent-plan key（`/api/plan`，Anthropic 协议）跑 live spike：**401
+AuthenticationError**——plan key 只认 plan 端点，OpenAI 兼容数据面
+`/api/v3`（embedding 所需）不认。结论：**agent plan 无法供能 embedding**，
+属能力边界而非配置错误。候选出路（待负责人裁定）：① 授权使用 platform
+profile 名下现存的数据面 key（按量计费，月成本 1 元级）；② 维持 BLOCKED
+（生产 kbmem 轨继续内联降级形态，run 不受影响）；③ 换本地 embedding（设计
+变更，需过裁定）。
+
 ## BLOCKED 项与补跑路径
 
 | 项 | 阻塞 | 补跑 |
