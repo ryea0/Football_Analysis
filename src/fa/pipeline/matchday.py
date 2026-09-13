@@ -52,8 +52,11 @@ from datetime import date, datetime, timedelta, timezone
 
 from fa.config import odds_api_key
 from fa.db import get_meta, set_meta
+from fa.evolve import EvolutionError
 from fa.evolve.knowledge import (ensure_current_snapshot, git_aux,
                                  personas_consumed_hash)
+from fa.evolve_mem.snapshot import (ensure_current_snapshot_mem,
+                                    personas_mem_consumed_hash)
 from fa.model.fit import FitConfig, training_rows
 from fa.pipeline.fixtures import (DEFAULT_REGIONS, QUOTA_META_KEY,
                                   sync_fixtures)
@@ -117,6 +120,17 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
     # knowledge 部分。窗口中途合并落盘也不再让戳与内容错位（归因命根）。
     kb_window = ensure_current_snapshot()
     personas_hash = personas_consumed_hash(kb_window)
+
+    def _wire_mem_snapshot() -> tuple[int | None, str | None]:
+        # M7a（§12.7 增补）：mem 快照同款纪律——先快照后取 hash；失败双 None，
+        # kbmem 轨按快照失败降级（apply 层消费），其余轨零影响（设计档 §8）。
+        try:
+            idx = ensure_current_snapshot_mem()
+            return idx, personas_mem_consumed_hash(idx)
+        except (OSError, ValueError, EvolutionError):
+            return None, None
+
+    kb_mem_window, personas_mem_hash = _wire_mem_snapshot()
     quota_before = _quota_left(conn)
     if odds_api_key() is None:
         # 无 key：一行不拉、一场不落，runs 记 no_key（CLI exit 0，§12 冒烟口径）
@@ -194,7 +208,8 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
                   (probe_quota if probe == "found" else quota_before))
 
     rec_ids = generate_recommendations(conn, leagues, phase, run_id,
-                                       personas_hash=personas_hash)
+                                       personas_hash=personas_hash,
+                                       personas_mem_hash=personas_mem_hash)
     # persona 必须在落注之前（§6.2 顺序裁定）：veto 判决先落库，paper 才不会按
     # 中性 kelly 给被否场下单——落注去重只挡重下、不撤旧注，倒置即无法挽回。
     # pm 只补新增场次：attempted = 当日 am run 的名单（§6.2「不重跑沿用判决」）；
@@ -222,6 +237,9 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
         "personas_hash": personas_hash,       # M6 版本戳 = 所消费 personas 工件
                                               # 内容 hash（活人格 + 本窗知识快照，
                                               # 终审 F2；recommendations 同值落行）
+        "personas_mem_hash": personas_mem_hash,   # M7a：mem 工件 hash（同上语义，
+                                                  # None=该轨快照失败降级）
+        "kb_mem_window": kb_mem_window,           # mem 快照窗口序号
         "kb_window": kb_window,               # 本窗快照序号（冻结钉版语境）
         "git": git_aux(),                     # 辅助信息（尽力而为）
         "train_n": _train_n(conn, leagues),
