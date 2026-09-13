@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -250,3 +251,31 @@ def results_fallback(conn, *, dry_run: bool = False,
     if dry_run:
         res["would_fill"] = res["filled"]
     return res
+
+
+def propose_aliases(conn) -> list[dict]:
+    """fdorg 当前赛季队名 × teams 全表的别名提案（配对判据②的物料）。
+
+    每条 ``{"league","fdorg_name","team_id","team_name","auto"}``；auto =
+    归一化严格同名**且唯一命中**（跨联赛同名人多于一个 → 不自动，进人工
+    清单）。编辑距离候选有意不做——五大联赛队名差异大（缩写/官方全称），
+    机械近似易错，人工对照成本可接受（M3 oddsapi 44 条先例）。单联赛拉取
+    失败跳过（提案是巡览工具，不 fail-fast）。
+    """
+    norm_index: dict[str, list[sqlite3.Row]] = {}
+    for r in conn.execute("SELECT id, name FROM teams"):
+        norm_index.setdefault(_normalize_name(r["name"]), []).append(r)
+    out = []
+    for league in sorted(LEAGUE_CODES):
+        try:
+            names = fetch_teams(league)
+        except FdorgError:
+            continue
+        for n in names:
+            hits = norm_index.get(_normalize_name(n), [])
+            auto = len(hits) == 1
+            out.append({"league": league, "fdorg_name": n,
+                        "team_id": hits[0]["id"] if auto else None,
+                        "team_name": hits[0]["name"] if auto else None,
+                        "auto": auto})
+    return out

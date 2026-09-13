@@ -183,6 +183,45 @@ def _list_unknown(conn, source: str, league: str | None, top: int) -> None:
     typer.echo(f"确认方式：fa data aliases --confirm \"TEAM_ID=别名\"（建议范围：{scope}）")
 
 
+@data_app.command("aliases-fdorg")
+def aliases_fdorg_cmd(
+    write_auto: bool = typer.Option(False, "--write-auto",
+                                     help="把归一化同名（auto）条目直接写入 team_aliases"),
+) -> None:
+    """fdorg 别名提案（spec v0.13 配对判据②物料；5 请求，免费层）。
+
+    不带 --write-auto：只打印提案清单——[auto] 行可直接批量确认，[?] 行需
+    人工对照（缩写/全称差异，机械近似易错）；--write-auto 只写 auto 条目
+    （team_aliases source='fdorg'），其余仍走既有
+    ``fa data aliases --source fdorg --confirm`` 逐条确认。
+    """
+    from fa.data.fdorg import propose_aliases
+    conn = connect()
+    try:
+        rows = propose_aliases(conn)
+        n_auto = 0
+        for p in rows:
+            if p["auto"]:
+                n_auto += 1
+                if write_auto:
+                    conn.execute(
+                        "INSERT INTO team_aliases (team_id, source, alias)"
+                        " VALUES (?, 'fdorg', ?)"
+                        " ON CONFLICT(source, alias) DO UPDATE"
+                        " SET team_id=excluded.team_id",
+                        (p["team_id"], p["fdorg_name"]))
+                typer.echo(f"[auto] {p['team_id']}={p['fdorg_name']}"
+                           f"  # {p['league']} ← {p['team_name']}")
+            else:
+                typer.echo(f"[  ?  ] ???={p['fdorg_name']}  # {p['league']}"
+                           " 无归一化同名，需人工对照")
+        if write_auto:
+            conn.commit()
+        typer.echo(f"共 {len(rows)} 条：auto {n_auto}，人工 {len(rows) - n_auto}")
+    finally:
+        conn.close()
+
+
 # ---- 线 A：dsh agent 当大脑（spec §12.5）------------------------------------
 
 agentline_app = typer.Typer(help="范式对比线（spec §12.5）——线 A：dsh agent 当大脑")

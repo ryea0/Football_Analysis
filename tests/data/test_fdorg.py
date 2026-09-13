@@ -225,6 +225,38 @@ def test_results_fallback_official_row_not_overwritten(conn, monkeypatch):
     assert out["triggered"] is False                     # 官方行配上了，无逾期
 
 
+# ---------------------------------------------------------------- 别名提案
+
+def test_propose_aliases_auto_only_on_unique_normalized_hit(conn, monkeypatch):
+    """auto = 归一化严格同名且唯一命中；缩写/全称差异（Liverpool FC vs
+    Liverpool）不自动——机械近似易错，进人工清单（M3 44 条先例）。"""
+    from fa.data.fdorg import propose_aliases
+    get_or_create_team(conn, "E0", "Liverpool")
+    get_or_create_team(conn, "E0", "Chelsea")
+    monkeypatch.setattr("fa.data.fdorg.fetch_teams", lambda lg: (
+        ["Chelsea", "Liverpool FC"] if lg == "E0" else []))
+    rows = propose_aliases(conn)
+    got = {r["fdorg_name"]: r for r in rows}
+    assert got["Chelsea"]["auto"] is True
+    assert got["Chelsea"]["team_id"] == get_or_create_team(conn, "E0", "Chelsea")
+    assert got["Liverpool FC"]["auto"] is False
+    assert got["Liverpool FC"]["team_id"] is None
+
+
+def test_propose_aliases_league_fetch_failure_skipped(conn, monkeypatch):
+    from fa.data.fdorg import propose_aliases
+    get_or_create_team(conn, "E0", "Chelsea")
+
+    def flaky(lg):
+        if lg == "SP1":
+            raise FdorgError("http", "429")
+        return ["Chelsea"] if lg == "E0" else []
+
+    monkeypatch.setattr("fa.data.fdorg.fetch_teams", flaky)
+    rows = propose_aliases(conn)
+    assert [r["league"] for r in rows] == ["E0"]         # SP1 失败静默跳过
+
+
 def test_league_codes_cover_five():
     assert LEAGUE_CODES == {"E0": "PL", "SP1": "PD", "D1": "BL1",
                             "I1": "SA", "F1": "FL1"}
