@@ -7,6 +7,7 @@ T8 已合流，**降级分支已摘除**：这里只剩模块级直引 + 透传�
 与测试 monkeypatch 点（``reporting._render`` / ``reporting._telegram``）不变。
 """
 
+import json
 import time
 
 from fa.report import render as _render
@@ -45,3 +46,62 @@ def send(text: str) -> bool:
 def last_error() -> str | None:
     """最近一次推送失败原因（重试成功后为 ``None``，可溯源进 runs.summary）。"""
     return _telegram.LAST_TELEGRAM_ERROR
+
+
+def resend_report(conn, run_id: int | None = None) -> dict:
+    """按 run 重渲染并重推报告（``fa report send`` 内核，spec §9.3 v0.14）。
+
+    报告正文不落库（即时渲染即时推），但渲染是 DB + ``runs.summary`` 的
+    确定函数，故重发 = 按原 run 行重走同一渲染路径再推。支持 matchday
+    （am 全量 / pm 更新版）与 daily 结算简报（retro 段按 batch_id 重查，
+    行已不在则段落为空）。**重发不写库**——原 run 的 telegram 记录是历史
+    事实，重推结果只回给调用方。返回
+    ``{"run_id": int|None, "type": str|None, "sent": bool, "error": str|None}``。
+    """
+    if run_id is not None:
+        row = conn.execute(
+            "SELECT id, type, summary FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            return {"run_id": None, "type": None, "sent": False,
+                    "error": f"run {run_id} 不存在"}
+    else:
+        row = conn.execute(
+            "SELECT id, type, summary FROM runs"
+            " WHERE type IN ('matchday', 'daily') ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        if row is None:
+            return {"run_id": None, "type": None, "sent": False,
+                    "error": "无可重发的报告（仅支持 matchday / daily run）"}
+    rid, rtype = row["id"], row["type"]
+    summary = (json.loads(row["summary"]) if row["summary"] else {})
+
+    if rtype == "matchday":
+        degraded = bool(summary.get("degraded"))
+        quota = summary.get("quota_left")
+        if summary.get("report") == "pm_update":
+            text = render_pm_update(conn, summary.get("am_run_id"), rid,
+                                    quota, degraded)
+        else:
+            text = render_matchday_report(
+                conn, rid, summary.get("phase") or "am", summary, quota,
+                degraded)
+    else:
+        if not summary.get("settled"):
+            return {"run_id": rid, "type": rtype, "sent": False,
+                    "error": f"run {rid}（daily）当日零结算、原即无报告"}
+        settle = {k: summary.get(k) for k in
+                  ("settled", "won", "pnl", "clv_median")}
+        text = render_settlement_brief(settle)
+        retro = summary.get("retro")
+        if retro and retro.get("n_ok"):
+            rows = conn.execute(
+                "SELECT date, league, digest, primary_tag, tags_confidence"
+                " FROM retro_attributions WHERE batch_id=? AND status='ok'"
+                " AND attributor=1 ORDER BY date, match_id",
+                (retro["batch_id"],)).fetchall()
+            text += "\n" + _render.render_retro_brief(rows, retro)
+
+    sent = send(text)
+    return {"run_id": rid, "type": rtype, "sent": sent,
+            "error": (None if sent
+                      else last_error() or "推送失败（未记录原因）")}

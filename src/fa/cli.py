@@ -1125,6 +1125,28 @@ def evolve_self_rollback_cmd(
 run_app = typer.Typer(help="运营 run（比赛日 / 结算日课，spec §9.6 调度）")
 app.add_typer(run_app, name="run")
 
+report_app = typer.Typer(help="报告重发（spec §9.3）")
+app.add_typer(report_app, name="report")
+
+
+@report_app.command("send")
+def report_send_cmd(
+    run_id: int = typer.Option(None, "--run-id",
+                               help="指定 run id（缺省 = 最近一条 matchday/daily run）"),
+) -> None:
+    """手动重发最近报告：按 run 重渲染再推 TG（不写库，spec §9.3 v0.14）。"""
+    from fa.pipeline.reporting import resend_report
+
+    conn = connect()
+    try:
+        out = resend_report(conn, run_id)
+    finally:
+        conn.close()
+    if not out["sent"]:
+        typer.echo(f"重发失败：{out['error']}")
+        raise typer.Exit(code=1)
+    typer.echo(f"重发完成：run #{out['run_id']}（{out['type']}）已推送 Telegram")
+
 # runs.status 的中文判决位（词表单源在 fa.pipeline.runs）
 _STATUS_CN = {
     "ok": "ok（正常）",

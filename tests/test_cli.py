@@ -670,3 +670,35 @@ def test_agentline_run_division_dispatch(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "ok" in result.output
     assert seen["limit"] == 5               # --limit 透传 run_division
+
+
+# ---- fa report send（spec §9.3 v0.14 补实现）----
+
+def test_report_send_no_runs(tmp_path, monkeypatch):
+    _use_tmp_db(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["report", "send"])
+    assert result.exit_code == 1
+    assert "无可重发" in result.output
+
+
+def test_report_send_latest_ok(tmp_path, monkeypatch):
+    from fa.pipeline.runs import STATUS_OK, begin_run, finish_run
+
+    db = _use_tmp_db(tmp_path, monkeypatch)
+    conn = connect(db)
+    rid = begin_run(conn, "matchday", "am")
+    finish_run(conn, rid, STATUS_OK,
+               {"phase": "am", "report": "full", "quota_left": 100,
+                "degraded": False})
+    conn.close()
+    monkeypatch.setattr("fa.pipeline.reporting.send", lambda text: True)
+    result = runner.invoke(app, ["report", "send"])
+    assert result.exit_code == 0
+    assert "matchday" in result.output and f"#{rid}" in result.output
+
+
+def test_report_send_run_id_option(tmp_path, monkeypatch):
+    _use_tmp_db(tmp_path, monkeypatch)
+    result = runner.invoke(app, ["report", "send", "--run-id", "999"])
+    assert result.exit_code == 1
+    assert "999" in result.output
