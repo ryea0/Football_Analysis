@@ -1,0 +1,100 @@
+{
+  "league": "E0",
+  "window": {
+    "idx": 1,
+    "from": "2026-09-04",
+    "to": "2026-10-16"
+  },
+  "kb_track": {
+    "n_fixtures": 8,
+    "n_judged": 8,
+    "verdicts": {
+      "agree": 6,
+      "downweight": 2,
+      "veto": 0
+    },
+    "n_bets": 11,
+    "n_settled": 0,
+    "roi": null,
+    "clv_median": null,
+    "clv_mean": null
+  },
+  "nokb_track": {
+    "n_fixtures": 0,
+    "n_judged": 0,
+    "verdicts": {
+      "agree": 0,
+      "downweight": 0,
+      "veto": 0
+    },
+    "n_bets": 0,
+    "n_settled": 0,
+    "roi": null,
+    "clv_median": null,
+    "clv_mean": null
+  },
+  "model_only_ref": {
+    "n_bets": 11,
+    "n_settled": 0,
+    "roi": null
+  },
+  "kills": [
+    {
+      "fixture_id": 3,
+      "market": "H",
+      "kb_verdict": "downweight",
+      "nokb_verdict": null,
+      "kb_final_frac": 0.0184,
+      "mo_return_on_stake": null,
+      "date": "2026-09-05",
+      "home": "Hull",
+      "away": "Aston Villa"
+    },
+    {
+      "fixture_id": 3,
+      "market": "H",
+      "kb_verdict": "downweight",
+      "nokb_verdict": null,
+      "kb_final_frac": 0.0184,
+      "mo_return_on_stake": null,
+      "date": "2026-09-05",
+      "home": "Hull",
+      "away": "Aston Villa"
+    },
+    {
+      "fixture_id": 14,
+      "market": "H",
+      "kb_verdict": "downweight",
+      "nokb_verdict": null,
+      "kb_final_frac": 0.0184,
+      "mo_return_on_stake": null,
+      "date": "2026-09-05",
+      "home": "Nott'm Forest",
+      "away": "Tottenham"
+    },
+    {
+      "fixture_id": 14,
+      "market": "H",
+      "kb_verdict": "downweight",
+      "nokb_verdict": null,
+      "kb_final_frac": 0.0184,
+      "mo_return_on_stake": null,
+      "date": "2026-09-05",
+      "home": "Nott'm Forest",
+      "away": "Tottenham"
+    },
+    {
+      "fixture_id": 14,
+      "market": "O2.5",
+      "kb_verdict": "downweight",
+      "nokb_verdict": null,
+      "kb_final_frac": 0.009867,
+      "mo_return_on_stake": null,
+      "date": "2026-09-05",
+      "home": "Nott'm Forest",
+      "away": "Tottenham"
+    }
+  ],
+  "divergences": [],
+  "n_pending_settlement": 11
+}

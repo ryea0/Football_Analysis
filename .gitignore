@@ -17,3 +17,6 @@ __pycache__/
 
 # cron 运行日志（M5，scripts/fa_cron.sh 落盘）
 /logs/
+
+# Serena 工具状态（会话产物，不入库）
+.serena/

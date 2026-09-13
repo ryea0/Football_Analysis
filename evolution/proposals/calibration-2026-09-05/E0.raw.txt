@@ -1,0 +1,20 @@
+根据证据 JSON，这是 E0 知识库首个窗口（idx=1），8 场赛事全判完，6 agree + 2 downweight（2 场主队方向被降权），11 注全部未结算，ROI/CLV 均为 null。关键约束：证据不足时 no_change 优于编造。
+
+分析：
+1. **结算数据为零**——ROI/CLV 全 null，无法得出任何关于知识库有效性的结论性判断
+2. **旧条目不存在**（初始空状态）——无需 amendments / deprecations
+3. **仅有过程性数据**：8 fixtures / 8 judged / 6 agree / 2 downweight / 0 veto / 11 bets pending
+4. **2 场 downweight**（Hull vs Aston Villa H、Nott'm Forest vs Tottenham H + O2.5）可作为时效观察点，但因无结算结果，无法形成"教训"，也不足以支撑"结构性认知"
+5. 严格纪律：弱证据硬写条目是最严重错误。当前 0 结算样本，不应写入任何定性结论
+
+结论：证据不足，no_change。
+
+```json
+{
+  "league": "E0",
+  "appends": [],
+  "amendments": [],
+  "deprecations": [],
+  "no_change_reason": "首窗口（idx=1）8 场 11 注全部未结算，ROI/CLV 均为 null，无任何已验证的结果性证据。2 场 downweight 仅为过程记录，缺乏结算验证无法形成教训或结构性认知。按纪律，证据不足时不编造条目，待后续窗口积累结算数据后再写入。"
+}
+```
