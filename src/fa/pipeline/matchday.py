@@ -109,6 +109,16 @@ def run_matchday(conn: sqlite3.Connection, phase: str,
 # ---------------------------------------------------------------- 流程
 
 
+def _wire_mem_snapshot() -> tuple[int | None, str | None]:
+    """M7a（§12.7 增补）：mem 快照同款纪律——先快照后取 hash；失败双 None，
+    kbmem 轨按快照失败降级（apply 层消费），其余轨零影响（设计档 §8）。"""
+    try:
+        idx = ensure_current_snapshot_mem()
+        return idx, personas_mem_consumed_hash(idx)
+    except (OSError, ValueError, EvolutionError):
+        return None, None
+
+
 def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
          run_id: int) -> dict:
     now = _now()
@@ -120,16 +130,6 @@ def _run(conn: sqlite3.Connection, phase: str, leagues: list[str],
     # knowledge 部分。窗口中途合并落盘也不再让戳与内容错位（归因命根）。
     kb_window = ensure_current_snapshot()
     personas_hash = personas_consumed_hash(kb_window)
-
-    def _wire_mem_snapshot() -> tuple[int | None, str | None]:
-        # M7a（§12.7 增补）：mem 快照同款纪律——先快照后取 hash；失败双 None，
-        # kbmem 轨按快照失败降级（apply 层消费），其余轨零影响（设计档 §8）。
-        try:
-            idx = ensure_current_snapshot_mem()
-            return idx, personas_mem_consumed_hash(idx)
-        except (OSError, ValueError, EvolutionError):
-            return None, None
-
     kb_mem_window, personas_mem_hash = _wire_mem_snapshot()
     quota_before = _quota_left(conn)
     if odds_api_key() is None:
