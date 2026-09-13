@@ -5,7 +5,8 @@
 ``runs`` + ``recommendations``（T6 口径）。本层只写 ``bets`` / ``fixtures.status``
 / ``meta``，对 ``matches`` / ``backtest_predictions`` 只读（表边界 §12.1）。
 
-时间注入缝（**唯一**）：``fa.pipeline.paper._now``（placed_at / settled_at 取此）。
+时间注入缝：``fa.pipeline.paper._now``（placed_at 取此；settled_at 按比赛
+实际完赛时间估算，match.date + kickoff + 105min）。
 
 bankroll 经 ``meta`` 分轨持久化（D2，键 ``paper_bankroll:{strategy}``，旧单键
 ``paper_bankroll`` 仅迁移读）：落注按**当前**轨余额乘仓位分数，结算把各轨净额
@@ -254,7 +255,8 @@ def test_four_market_outcome_rules(conn, market, fthg, ftag, won):
     assert out["settled"] == 1
     row = bet_by_market(conn, market)
     assert row["status"] == ("won" if won else "lost")
-    assert row["settled_at"] == _TS
+    # settled_at = match.date + kickoff.time + 105min（比赛完赛时间估算）
+    assert row["settled_at"] == "2026-09-02T15:45:00Z"
     assert row["return_amt"] == (pytest.approx(40.0) if won else 0.0)  # 20 × 2.0
 
 

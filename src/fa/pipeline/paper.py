@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import sqlite3
 import statistics
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from fa.db import get_meta, set_meta
 from fa.pipeline.value import STRATEGIES
@@ -255,7 +255,6 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
     tracks: dict[str, dict] = {}          # 各轨累计器（含空轨，返回形状恒完整）
     for strategy in STRATEGIES:
         tracks[strategy] = {"settled": 0, "won": 0, "pnl": 0.0, "clvs": []}
-    settled_at = _iso(_now())             # 一次结算一个时间戳（同 T5 纪律）
     by_fixture: dict[int, list[sqlite3.Row]] = {}
     for row in pending:
         by_fixture.setdefault(row["fixture_id"], []).append(row)
@@ -263,10 +262,15 @@ def settle_paper_bets(conn: sqlite3.Connection) -> dict:
     for fixture_id in sorted(by_fixture):               # 稳定序：fixture id
         group = by_fixture[fixture_id]
         head = group[0]
+        kickoff = head["kickoff_utc"]
         match = _paired_match(conn, head["league"], head["home_team_id"],
-                              head["away_team_id"], _kickoff_date(head["kickoff_utc"]))
+                              head["away_team_id"], _kickoff_date(kickoff))
         if match is None:
             continue                                    # 无从判定 → 保持 pending
+        # 每注的 settled_at 按比赛实际完赛时间估算（反映真实比赛日，而非脚本运行时间）
+        match_date = _match_date(match["date"])
+        settled_at = (_estimate_settled_at(match_date, kickoff)
+                      if match_date else _iso(_now()))
         for bet in group:
             track = tracks.setdefault(                  # 未知轨也不丢账（防御）
                 bet["strategy"], {"settled": 0, "won": 0, "pnl": 0.0, "clvs": []})
@@ -358,6 +362,46 @@ def backfill_clv(conn: sqlite3.Connection) -> dict:
     return {"filled": filled}
 
 
+def backfill_settled_at(conn: sqlite3.Connection) -> dict:
+    """修正已结算 paper 注的 settled_at：从脚本运行时间改为比赛实际完赛时间。
+
+    历史遗留：早期结算逻辑把一轮所有注的 settled_at 都设为脚本运行时间戳，
+    导致不同比赛日的注挤在同一天，dashboard 时间筛选/累计曲线失真。
+    本函数按 matches.date + kickoff 时间重新估算每注的完赛时间并回填。
+    返回 ``{"updated": n, "skipped": m}``。
+    """
+    rows = conn.execute("""
+        SELECT b.id AS bet_id, b.settled_at, f.kickoff_utc,
+               f.league, f.home_team_id, f.away_team_id
+        FROM bets b
+        JOIN recommendations r ON r.id = b.recommendation_id
+        JOIN fixtures f ON f.id = r.fixture_id
+        WHERE b.mode = 'paper' AND b.status IN ('won', 'lost')
+        ORDER BY b.id
+    """).fetchall()
+    updated = 0
+    skipped = 0
+    for row in rows:
+        match = _paired_match(
+            conn, row["league"], row["home_team_id"], row["away_team_id"],
+            _kickoff_date(row["kickoff_utc"]))
+        if match is None:
+            skipped += 1
+            continue
+        match_date = _match_date(match["date"])
+        if match_date is None:
+            skipped += 1
+            continue
+        new_ts = _estimate_settled_at(match_date, row["kickoff_utc"])
+        if new_ts != row["settled_at"]:
+            conn.execute(
+                "UPDATE bets SET settled_at = ? WHERE id = ?",
+                (new_ts, row["bet_id"]))
+            updated += 1
+    conn.commit()
+    return {"updated": updated, "skipped": skipped}
+
+
 def paper_summary(conn: sqlite3.Connection) -> dict[str, dict]:
     """paper 台账汇总，**分轨**返回（D2，``fa status`` 消费）。
 
@@ -423,6 +467,31 @@ def _kickoff_date(kickoff_utc: str) -> date | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)   # 裸时间按 UTC 读（同 value 层）
     return parsed.astimezone(timezone.utc).date()
+
+
+def _estimate_settled_at(match_date: date, kickoff_utc: str) -> str:
+    """根据比赛实际日期 + kickoff 时间估算完赛时间（常规 90min + 15min 中场 + 补时余量）。
+
+    ``matches.date`` 只有日历日精度，取 ``fixtures.kickoff_utc`` 的时间部分，
+    加 105 分钟（90min 比赛 + 15min 中场）作为完赛时刻的保守估计。
+    若 kickoff 解析失败，回退到比赛日 23:59 UTC。
+    """
+    try:
+        parsed = datetime.fromisoformat(str(kickoff_utc).replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    if parsed is None:
+        # 回退：比赛日 23:59 UTC
+        end = datetime.combine(match_date, datetime.min.time()).replace(
+            tzinfo=timezone.utc) + timedelta(hours=23, minutes=59)
+    else:
+        # 把 kickoff 的日期换成 match 的实际日期（防推迟/提前导致的日期错位）
+        end = parsed.replace(
+            year=match_date.year, month=match_date.month, day=match_date.day,
+        ) + timedelta(minutes=105)
+    return _iso(end)
 
 
 def _match_date(text: str) -> date | None:

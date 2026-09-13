@@ -1314,6 +1314,21 @@ def sync_fallback_cmd(
         raise typer.Exit(code=1)     # 配对失败 ≠ 成功：脚本/人眼都能察觉
 
 
+@ops_app.command("backfill-settled-at")
+def ops_backfill_settled_at_cmd() -> None:
+    """修正已结算 paper 注的 settled_at：从脚本运行时间改为比赛实际完赛时间。"""
+    from fa.pipeline.paper import backfill_settled_at
+
+    conn = connect()
+    try:
+        out = backfill_settled_at(conn)
+    finally:
+        conn.close()
+    typer.echo(
+        f"修正 settled_at：{out['updated']} 注已更新，{out['skipped']} 注跳过"
+        f"（配不上比赛结果）")
+
+
 @data_app.command("backfill-bfe")
 def data_backfill_bfe_cmd(
     seasons_from: int = typer.Option(2024, "--from",
