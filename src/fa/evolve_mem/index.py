@@ -183,6 +183,9 @@ def sync_all(retriever: Retriever | None = None) -> dict:
     写入侧静默停摆）。权威源语法破损上抛 EvolutionError（重议级，不吞）。
     """
     live = derive_live_jsonl()
+    if not live:
+        # 空知识库 = 无事可同步（ok、不告警）——retriever 都不必构造
+        return {"ok": True, "error": None, "leagues": {}}
     try:
         r = retriever if retriever is not None else get_retriever()
     except Exception as exc:      # 构造期=外部依赖地界（缺 key/依赖/chroma），一律上报不抛

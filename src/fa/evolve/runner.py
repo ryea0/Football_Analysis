@@ -104,6 +104,23 @@ def run_tick(conn: sqlite3.Connection, today: date | None = None) -> str:
         lines.append("无到期窗口")
     elif not acted:
         lines.append("到期窗口均已反思")
+    # M7a 尾步（设计档 A6/§8 写入侧）：sync-mem 挂 tick 收尾——失败静默停摆
+    # 不炸 tick，记事件 + TG 尽力告警；B 线下窗快照仍按 markdown 派生，零影响。
+    try:
+        from fa.evolve_mem.index import sync_all
+        mem = sync_all()
+        if not mem["ok"]:
+            lines.append("sync-mem 未成功：" + str(
+                mem["error"] or "；".join(f"{lg}={v['error']}" for lg, v in
+                                          mem["leagues"].items() if not v["ok"])))
+            try:
+                from fa.pipeline.ops import send_alert
+                send_alert("fa evolve tick：sync-mem 未成功（mem 索引停摆，"
+                           "不影响 B 线——详见 cron 日志）")
+            except Exception:
+                pass                      # 告警也失败：只剩 cron 日志，可接受
+    except Exception as exc:
+        lines.append(f"sync-mem 未执行：{exc}")
     return "\n".join(lines)
 
 

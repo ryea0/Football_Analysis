@@ -131,3 +131,64 @@ def test_evolve_merge_missing_staged_json_is_exit_1(conn_with_proposal, root):
     assert result.exit_code == 1
     assert "暂存工件不可读" in result.output
     assert "Traceback" not in result.output
+
+
+# ---------------------------------------------------------------- M7a sync-mem/mem-verify
+
+
+def _write_e0_kb(root):
+    (root / "personas" / "knowledge" / "epl.md").write_text(
+        "<!-- kb: league=E0 -->\n# E0 知识库\n\n## 结构性认知\n"
+        "- [E0-S01] 阿森纳主场控球压制\n", encoding="utf-8")
+
+
+def test_sync_mem_ok_exit0(root, monkeypatch):
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "fake")
+    _write_e0_kb(root)
+    r = CliRunner().invoke(app, ["evolve", "sync-mem"])
+    assert r.exit_code == 0, r.output
+    assert "E0: entries=1 ok" in r.output
+
+
+def test_sync_mem_dry_run_no_cache(root, monkeypatch):
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "fake")
+    _write_e0_kb(root)
+    r = CliRunner().invoke(app, ["evolve", "sync-mem", "--dry-run"])
+    assert r.exit_code == 0, r.output
+    assert "live leagues=['E0'] hash=" in r.output
+    assert not (root / "data" / "mem_cache").exists()   # dry-run 不建缓存
+
+
+def test_sync_mem_drift_exit1(root, monkeypatch):
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "fake")
+    _write_e0_kb(root)
+
+    class Tamper:
+        def index_entries(self, entries, store_dir):
+            from fa.evolve_mem.index import FakeRetriever
+            FakeRetriever().index_entries(
+                [{**entries[0], "text": "被污染"}], store_dir)
+
+        def search(self, *a):
+            from fa.evolve_mem.index import FakeRetriever
+            return FakeRetriever().search(*a)
+
+        def export_entries(self, store_dir):
+            from fa.evolve_mem.index import FakeRetriever
+            return FakeRetriever().export_entries(store_dir)
+
+    import fa.evolve_mem.index as index_mod
+    monkeypatch.setattr(index_mod, "get_retriever", Tamper)
+    r = CliRunner().invoke(app, ["evolve", "sync-mem"])
+    assert r.exit_code == 1
+    assert "DRIFT" in r.output and "未成功" in r.output
+
+
+def test_mem_verify_ok_and_missing_cache(root, monkeypatch):
+    monkeypatch.setenv("FA_MEM_RETRIEVER", "fake")
+    _write_e0_kb(root)
+    r = CliRunner().invoke(app, ["evolve", "mem-verify"])
+    assert r.exit_code == 1 and "无缓存" in r.output    # 未 sync 先验 → 缺缓存
+    assert CliRunner().invoke(app, ["evolve", "sync-mem"]).exit_code == 0
+    r = CliRunner().invoke(app, ["evolve", "mem-verify"])
+    assert r.exit_code == 0 and "E0: ok" in r.output

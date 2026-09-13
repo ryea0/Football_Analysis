@@ -169,3 +169,12 @@ def seed_kill_with_double_cover(conn, fixture_id, run_id=None, day=DAY1,
         out[leg], out[f"{leg}_bet"] = rec, bet
     conn.commit()
     return out
+
+
+@pytest.fixture(autouse=True)
+def _stub_ops_alert(monkeypatch):
+    """M7a：evolve tick 尾步失败会走 fa ops 告警——evolve 线测试一律打桩
+    （防真 TG 外发），不返回值语义、只防副作用。需要断言告警的用例可再
+    monkeypatch 覆盖（后 patch 者生效）。"""
+    import fa.pipeline.ops as ops
+    monkeypatch.setattr(ops, "send_alert", lambda text: True)
