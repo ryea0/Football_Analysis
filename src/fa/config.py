@@ -74,6 +74,17 @@ def odds_api_key() -> str | None:
     return os.environ.get("ODDS_API_KEY") or None
 
 
+# ---------------------------------------------------------------- 备用赛果源（v0.13，spec §3.1/§9.5）
+
+FDORG_BASE_URL = "https://api.football-data.org"    # 测试以 env 指向本地桩
+
+
+def fdorg_token() -> str | None:
+    """api.football-data.org 免费层 token；未配置或空串视为 None（fallback
+    静默禁用的判定口，spec v0.13）。"""
+    return os.environ.get("FOOTBALL_DATA_ORG_KEY") or None
+
+
 # ---------------------------------------------------------------- persona（M4，spec §6）
 
 PERSONA_TIMEOUT_S = 120.0            # §6.2「超时默认 120s（可配）」

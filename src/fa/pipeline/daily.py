@@ -24,8 +24,9 @@ from __future__ import annotations
 import sqlite3
 
 from fa.config import project_root
+from fa.data.fdorg import results_fallback
 from fa.data.sync import SyncReport, sync_history
-from fa.pipeline.paper import settle_paper_bets
+from fa.pipeline.paper import backfill_clv, settle_paper_bets
 from fa.pipeline.reporting import last_error, render_settlement_brief, send
 from fa.pipeline.runs import (RUN_DAILY, STATUS_DEGRADED, STATUS_FAILED,
                               STATUS_OK, begin_run, finish_run)
@@ -65,6 +66,15 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
     except Exception as exc:                         # 整体性失败才到这（单文件已内记账）
         sync_error = f"{type(exc).__name__}: {exc}"
 
+    # v0.13 备用源结算（修正裁定：纯结果驱动）：sync 之后、settle 之前——
+    # fallback 落的行当日即被结算。整体异常只降级不中断（结算不依赖它成功）
+    fallback = None
+    try:
+        fallback = results_fallback(conn)
+    except Exception as exc:
+        fallback = {"triggered": False,
+                    "error": [f"{type(exc).__name__}: {exc}"]}
+
     settle = settle_paper_bets(conn)
     # Stage 2：paper T+1 复盘（设计 §4/§10）——sync 已把完赛行入库，昨日推荐
     # 场次可归因。选场为空则静默跳过（非事件）；批整体异常只记账不中断日课
@@ -88,6 +98,27 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
     # 赛，不算降级
     sync_degraded = bool(sync_error) or bool(
         rep is not None and rep.file_errors and not rep.files_ok)
+    # v0.13 恢复闭环三条告警（裁定②③：告警不改账、N=2）——旁路尽力而为，
+    # 推送失败不记入 run 状态（结算与日课本体不受告警通道影响）
+    alerts: list[str] = []
+    if fallback.get("unmatched"):
+        alerts.append("fallback 配对失败（spec v0.13，人工排查）：\n"
+                      + "\n".join(f"  {u['league']} #{u['fixture_id']}"
+                                  f" {u['kickoff']} — {u['reason']}"
+                                  for u in fallback["unmatched"]))
+    if rep is not None and rep.fail_streak >= 2:
+        alerts.append(f"主源当前赛季连续 {rep.fail_streak} 天失败"
+                      f"（N=2 告警，spec v0.13）——已靠备用源结算，恢复后自动覆盖")
+    if rep is not None and rep.fallback_diffs:
+        alerts.append("⚠️ 备用源与官方比分不一致（不改账，待人工裁定）：\n"
+                      + "\n".join(f"  {d[0]} {d[2]}: fallback {d[3]}"
+                                  f" vs 官方 {d[4]}"
+                                  for d in rep.fallback_diffs))
+    fallback_alert = None
+    for text in alerts:
+        if fallback_alert is None:
+            fallback_alert = text
+        send(text)
     summary = {
         "settled": settle["settled"],
         "won": settle["won"],
@@ -98,6 +129,8 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
                   "file_errors": len(rep.file_errors)}),
         "sync_error": sync_error,
         "sync_degraded": sync_degraded,
+        "fallback": fallback,                     # v0.13：备用源结算步原样记账
+        "fallback_alert": fallback_alert,
         "retro": retro,
         "retro_error": retro_error,
         "telegram": None,
@@ -119,6 +152,12 @@ def _run(conn: sqlite3.Connection, run_id: int) -> dict:
                                 "error": last_error() or "推送失败（未记录原因）"})
 
     status = STATUS_DEGRADED if sync_degraded else STATUS_OK
+    # v0.13 恢复闭环尾步：CLV 幂等回填（官方收盘价入库当天自动补齐 NULL，
+    # 纯 UPDATE）；纯增益步失败不上账（次日重试），不上罪 run 状态
+    try:
+        backfill_clv(conn)
+    except Exception:
+        pass
     finish_run(conn, run_id, status, summary)
     return {"status": status, "run_id": run_id, "settled": settle["settled"],
             "won": settle["won"], "pnl": settle["pnl"],

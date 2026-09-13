@@ -3,7 +3,7 @@
 | | |
 |---|---|
 | 项目名 | fa（Football Analysis） |
-| 版本 | v0.12（确认稿） |
+| 版本 | v0.13（确认稿） |
 | 日期 | 2026-09-05 |
 | 状态 | M1 完成；M2 判决 NO-GO（+3.02%，docs/m2-verdict.md）；**项目负责人批准 §12 双线并存协议——B 线（M3-M5 paper 模式）在推翻顺序关卡的前提下启动**（2026-09-03） |
 
@@ -18,6 +18,7 @@
 > v0.9 → v0.10 变更：组合风控三参数预注册（§5.3/§10 M5 入场前提）——总敞口 ≤30% bankroll、同场同轨 ≤2 注、峰值回撤 >20% 单注减半；paper 期仅观测（runs.summary.risk_gates）、实盘入场硬前提（2026-09-04 负责人裁定，参照交易实践的组合总热度/相关集群/回撤节流原则）。
 > v0.10 → v0.11 变更：新增 §12.7 进化线（C 线，M6）——知识库版本化外置 + hermes -z 反思纯函数 + 窗口快照冻结 + 人审关卡；B 线扩第三轨 model_persona_nokb（C 线同期对照，TG 推送保持双轨口径，§12.3 判据口径不变）；recommendations 增 personas_hash 版本戳（schema v8）（2026-09-04 设计评审，docs/superpowers/specs/2026-09-04-m6-evolution-implementation-design.md）。
 > v0.11 → v0.12 变更：数据链养护加固（§3.4/§9.5/§9.6）——daily 的 CSV 同步对**当前赛季分区**无条件强制重下（历史赛季维持缓存+内容哈希跳过）；matches 分区**收缩保护**（新内容行数少于库内现存即拒绝重建、记 file_errors）；watchdog 扩两项数据链巡检（赛果滞后 / 滞留 pending 注，宽限 3 天）。修复实况：daily 从不刷新缓存致 09-01 起赛果零入库（九月 158 注 paper 全 pending），run#9 分区哈希回退曾删除已入库的 09-03 赛果（F1/SP1 各 1 行）。
+> v0.12 → v0.13 变更：赛果备用源 fallback（§3.1/§9.5）——api.football-data.org 免费层为备用赛果源：**结果驱动触发**（存在「已完赛但配不到完赛行」的 pending paper 注即触发，按联赛日期窗精准拉取）；配对三判据（kickoff 时间戳严格相等 + fdorg 别名方向校验 + FINISHED）；落行与 T5 同约定（`raw_line` 记 source，同 UNIQUE key 主源恢复后分区重建幂等覆盖 + 比分 diff 告警**不改账**）；主源当前赛季连续 2 天失败 TG 告警；收缩保护基线排除 fallback 行（2026-09-13 修正裁定：触发判据去「主源失败」合取、纯结果驱动——负责人要求每日看到前一日赛果；设计 docs/superpowers/specs/2026-09-10-fallback-results-source-design.md）。
 
 ---
 
@@ -95,6 +96,7 @@ hermes cron（调度）
 |---|---|---|
 | football-data.co.uk | 历史赛果 + 历史赔率 | 免费 CSV，五大联赛 1993 至今；含赛果、射门/角球、Pinnacle 开盘/收盘赔率。**回测的市场基准用收盘价**（行业标准做法） |
 | The Odds API | 实时盘 | 免费档 500 credits/月。比赛日拉 h2h + totals × 欧英两区 × 5 联赛 ≈ 每次 10 credits，一天两次。响应头剩余额度记账，额度告急自动降频 |
+| api.football-data.org | 备用赛果源（fallback，v0.13） | 免费层、`X-Auth-Token`、10 req/min；无收盘价（CLV 仍走 §7.3 Pinnacle→Betfair 基准链）；结果驱动触发（已完赛配不到完赛行的 pending paper 注）；配对三判据（kickoff 严格相等 + 别名方向校验 + FINISHED）；`raw_line` 记 source、主源恢复后官方行幂等覆盖 + 比分 diff 告警不改账；主源当前赛季连续 2 天失败 TG 告警 |
 
 队名对齐坑点：两个数据源的队名拼写不同（如 `Bayern Munich` vs `Bayern München`），是两大数据源对齐的核心难点，见 3.3。
 
@@ -413,6 +415,7 @@ fa status                  # bankroll / 额度水位 / 最近 run / 未结注
 - CSV 同步分层刷新（v0.12）：当前赛季分区每次强制重下（live 数据），历史赛季走本地缓存 + 内容哈希跳过；当前赛季下载失败沿用「最近缓存 + 告警」
 - matches 分区收缩保护（v0.12）：新内容行数 < 库内现存行数 → 拒绝重建（分区保持原样）并记 file_errors——防上游/缓存回退删赛果（2026-09-05 实况：run#9 曾把已入库的 09-03 赛果回退删除）
 - watchdog 巡检扩展（v0.12）：daily 间隔（原有）之外，加赛果滞后（已开球 fixture 最新日 − matches 最新赛果日 > 3 天）与滞留 pending 注（开球日 + 3 天已过仍 pending）两项（§9.6）
+- 赛果备用源 fallback（v0.13）：daily 在 sync 与结算之间加 `results_fallback` 步——**纯结果驱动**（2026-09-13 修正裁定）：存在 kickoff+4h 已过且 `_paired_match` 配不到完赛行的 pending paper 注即触发，每联赛 1 次精准拉取（dateFrom/dateTo 夹紧逾期窗，最多 5 请求）；配对三判据全满足才落行（kickoff 时间戳严格相等、`team_aliases(source='fdorg')` 方向一致、FINISHED 比分非空），配不上记 `unmatched` + TG 告警、绝不硬猜；落行与 T5 同约定（`raw_line` 记 `{"source":"api.football-data.org","fallback":true}`，同 UNIQUE key）→ 主源恢复后分区重建幂等覆盖，比分不一致 TG 告警**不改账**（已入账的钱只有人能裁定）；token 缺失静默禁用（`skipped:"no_token"`，主源连续失败告警已把人叫来）；主源当前赛季连续 2 天失败 TG 告警（meta `current_season_fail_streak`）；收缩保护基线排除 fallback/stopgap 行（防主源恢复被备用行顶住）；恢复当天幂等 `backfill_clv()` 自动补齐 CLV。设计：docs/superpowers/specs/2026-09-10-fallback-results-source-design.md
 
 ### 9.6 调度（双载体 cron，三条 job，北京时间）
 

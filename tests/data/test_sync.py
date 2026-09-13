@@ -196,3 +196,115 @@ def test_ingest_failure_is_recorded_not_raised(conn, monkeypatch, tmp_path):
     assert rep.inserted == 2 and _count(conn) == 2
     assert sorted(r["league"] for r in
                   conn.execute("SELECT DISTINCT league FROM matches")) == ["D1", "E0"]
+
+
+# ---------------------------------------------------------------- v0.13 恢复闭环
+
+FALLBACK_RAW = '{"source": "api.football-data.org", "fallback": true}'
+
+
+def _fb_conn_ready(conn):
+    """公共布置：E0/1995 分区入库 CSV_A（Arsenal/West Ham 队已建）。"""
+    from fa.data.ingest import ingest_rows
+    from fa.data.parse import parse_csv
+    ingest_rows(conn, "E0", 1995, parse_csv(CSV_A, "E0", 1995))
+
+
+def _insert_fallback_row(conn, date="1995-08-25", fthg=3, ftag=1):
+    hid = conn.execute("SELECT id FROM teams WHERE name='Arsenal'").fetchone()["id"]
+    aid = conn.execute("SELECT id FROM teams WHERE name='West Ham'").fetchone()["id"]
+    conn.execute(
+        "INSERT INTO matches (league, season, date, home_team_id, away_team_id,"
+        " fthg, ftag, raw_line) VALUES ('E0', 1995, ?, ?, ?, ?, ?, ?)",
+        (date, hid, aid, fthg, ftag, FALLBACK_RAW))
+    conn.commit()
+    return f"{date}|{hid}|{aid}"
+
+
+def test_recovery_diff_equal_is_silent(conn):
+    from fa.data.sync import _diff_official, _fallback_snapshot
+    _fb_conn_ready(conn)
+    key = _insert_fallback_row(conn, fthg=3, ftag=1)   # fallback 行 3-1
+    snap = _fallback_snapshot(conn, "E0", 1995)
+    assert snap == {key: (3, 1)}
+    # 官方行同比分（raw 换成官方行形态）→ 无 diff
+    conn.execute(
+        "UPDATE matches SET fthg=3, ftag=1, raw_line='{\"Div\":1}'"
+        " WHERE date='1995-08-25'")
+    conn.commit()
+    assert _diff_official(conn, "E0", 1995, snap) == []
+
+
+def test_recovery_diff_mismatch_reported(conn):
+    from fa.data.sync import _diff_official
+    _fb_conn_ready(conn)
+    key = _insert_fallback_row(conn, fthg=2, ftag=1)   # fallback 2-1
+    snap = {key: (2, 1)}
+    conn.execute(
+        "UPDATE matches SET fthg=1, ftag=2, raw_line='{\"Div\":1}'"
+        " WHERE date='1995-08-25'")                    # 官方 1-2
+    conn.commit()
+    diffs = _diff_official(conn, "E0", 1995, snap)
+    assert len(diffs) == 1
+    league, season, _key_desc, fb, official = diffs[0]
+    assert (league, season) == ("E0", 1995)
+    assert fb == "2-1" and official == "1-2"
+
+
+def test_recovery_diff_missing_official_skipped(conn):
+    """官方内容还没覆盖该场（行缺席）→ 跳过不告警（下轮再比）。"""
+    from fa.data.sync import _diff_official
+    _fb_conn_ready(conn)
+    hid = conn.execute("SELECT id FROM teams WHERE name='Arsenal'").fetchone()["id"]
+    aid = conn.execute("SELECT id FROM teams WHERE name='West Ham'").fetchone()["id"]
+    snap = {f"1999-01-01|{hid}|{aid}": (1, 0)}         # 无此行
+    assert _diff_official(conn, "E0", 1995, snap) == []
+
+
+def _current_season_1995(monkeypatch):
+    monkeypatch.setattr("fa.data.sync._current_season_start", lambda: 1995)
+
+
+def test_fail_streak_counts_current_season_and_resets(conn, monkeypatch):
+    from fa.data.sync import FAIL_STREAK_META_KEY, _update_fail_streak
+    _current_season_1995(monkeypatch)
+    assert _update_fail_streak(conn, [("E0", 1995, "boom")]) == 1
+    assert _update_fail_streak(conn, [("E0", 1995, "boom")]) == 2   # 连 2
+    # 历史赛季失败不算当前赛季失败；成功日归零
+    assert _update_fail_streak(conn, [("E0", 1994, "boom")]) == 0
+    raw = conn.execute("SELECT value FROM meta WHERE key=?",
+                       (FAIL_STREAK_META_KEY,)).fetchone()["value"]
+    assert raw == "0"
+
+
+def test_sync_history_wraps_current_season_recovery(conn, monkeypatch, tmp_path):
+    """集成：当前赛季分区含 fallback 行 → sync 后官方行覆盖、一致则 diff 静默。"""
+    from fa.data.sync import FAIL_STREAK_META_KEY
+    _current_season_1995(monkeypatch)
+    _fb_conn_ready(conn)
+    _insert_fallback_row(conn, fthg=3, ftag=1)         # fallback 3-1
+    csv = CSV_A + "E0,25/08/1995,Arsenal,West Ham,3,1,H\n"   # 官方同比分
+    _serve(monkeypatch, {("E0", 1995): _cached(tmp_path, "E0", 1995,
+                                                csv.encode("utf-8"))})
+    rep = sync_history(conn, seasons_from=1995, refresh=True)
+    assert rep.fallback_diffs == []                    # 比分一致 → 静默覆盖
+    row = conn.execute("SELECT raw_line FROM matches WHERE date='1995-08-25'"
+                       ).fetchone()
+    assert "fallback" not in row["raw_line"]           # 官方行已覆盖
+    assert rep.fail_streak == 0
+    meta = conn.execute("SELECT value FROM meta WHERE key=?",
+                        (FAIL_STREAK_META_KEY,)).fetchone()
+    assert meta is None or meta["value"] == "0"
+
+
+def test_sync_history_recovery_mismatch_alerted(conn, monkeypatch, tmp_path):
+    """比分不一致 → fallback_diffs 记账（告警归 daily/CLI 层）。"""
+    _current_season_1995(monkeypatch)
+    _fb_conn_ready(conn)
+    _insert_fallback_row(conn, fthg=2, ftag=0)         # fallback 2-0
+    csv = CSV_A + "E0,25/08/1995,Arsenal,West Ham,1,1,H\n"   # 官方 1-1
+    _serve(monkeypatch, {("E0", 1995): _cached(tmp_path, "E0", 1995,
+                                                csv.encode("utf-8"))})
+    rep = sync_history(conn, seasons_from=1995, refresh=True)
+    assert len(rep.fallback_diffs) == 1
+    assert rep.fallback_diffs[0][3] == "2-0" and rep.fallback_diffs[0][4] == "1-1"
