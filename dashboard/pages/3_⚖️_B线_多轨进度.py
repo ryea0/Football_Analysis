@@ -72,7 +72,7 @@ def _calc_track_stats(bets_df: pd.DataFrame, strats_order: list) -> dict:
     if bets_df.empty:
         return {}
     out = {}
-    settled = bets_df[bets_df["status"] == "settled"]
+    settled = bets_df[bets_df["status"].isin(["won", "lost"])]
     for strat in strats_order:
         s_all = bets_df[bets_df["strategy"] == strat]
         s_set = settled[settled["strategy"] == strat]
@@ -82,15 +82,11 @@ def _calc_track_stats(bets_df: pd.DataFrame, strats_order: list) -> dict:
         roi = pnl / staked if staked else None
         clv = s_set["clv"].dropna()
         clv_med = float(clv.median()) if len(clv) else None
-        # 累计曲线：按结算日排序后 cumsum（从范围起点 0 起）
+        # 累计曲线：输入已按时间范围过滤，直接 sort + cumsum（从范围起点 0 起）
         if n:
-            cum_df = recalc_cumulative(
-                s_set, "settled_at", "pnl",
-                start=None, end=None,
-                cum_col_name="cum_pnl",
-            )
-            dates = cum_df["settled_at"].tolist()
-            pnls = cum_df["cum_pnl"].tolist()
+            cum = s_set.sort_values("settled_at")
+            dates = cum["settled_at"].tolist()
+            pnls = cum["pnl"].cumsum().tolist()
         else:
             dates = []
             pnls = []
@@ -148,8 +144,8 @@ labels = list(t.keys())
 if n_tracks == 0:
     st.info("当前时间范围内无数据 / No data in range")
 else:
-    # 每行最多 4 轨，多行自适应
-    n_per_row = min(n_tracks, 4)
+    # 每行铺满：≤4 轨一行全显，>4 轨每行 4 条
+    n_per_row = n_tracks if n_tracks <= 4 else 4
     for row_start in range(0, n_tracks, n_per_row):
         row_labels = labels[row_start:row_start + n_per_row]
         cols = st.columns(len(row_labels))
@@ -186,13 +182,26 @@ else:
                     unsafe_allow_html=True,
                 )
 
-                c1, c2 = st.columns(2)
-                c1.metric("ROI（已结）",
-                          "—" if tr["roi"] is None else f"{tr['roi']:+.1%}",
-                          delta_color="normal" if (tr["roi"] or 0) >= 0 else "inverse")
-                c2.metric("CLV 中位",
-                          "—" if tr["clv_median"] is None else f"{tr['clv_median']:+.2%}",
-                          delta_color="normal" if (tr["clv_median"] or 0) >= 0 else "inverse")
+                # ROI + CLV 并排（自定义样式，避免 st.metric 窄列被截断）
+                roi_val = "—" if tr["roi"] is None else f"{tr['roi']:+.1%}"
+                roi_color = PALETTE["good"] if (tr["roi"] or 0) >= 0 else PALETTE["bad"]
+                clv_val = "—" if tr["clv_median"] is None else f"{tr['clv_median']:+.2%}"
+                clv_color = PALETTE["good"] if (tr["clv_median"] or 0) >= 0 else PALETTE["bad"]
+                st.markdown(
+                    f'<div style="display:flex;gap:12px;margin-top:4px;">'
+                    f'<div style="flex:1;">'
+                    f'<div style="font-size:0.72rem;color:{PALETTE["muted"]};'
+                    f'margin-bottom:2px;">ROI（已结）</div>'
+                    f'<div style="font-size:1.05rem;font-weight:700;color:{roi_color};">{roi_val}</div>'
+                    f'</div>'
+                    f'<div style="flex:1;">'
+                    f'<div style="font-size:0.72rem;color:{PALETTE["muted"]};'
+                    f'margin-bottom:2px;">CLV 中位</div>'
+                    f'<div style="font-size:1.05rem;font-weight:700;color:{clv_color};">{clv_val}</div>'
+                    f'</div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
     # 累计 P&L 对比图
     if any(tr["cum"]["dates"] for tr in t.values()):

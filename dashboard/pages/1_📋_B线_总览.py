@@ -103,7 +103,7 @@ def _calc_strat_summary(bets_df: pd.DataFrame) -> dict:
         return {}
     out = {}
     for strat, g in bets_df.groupby("strategy"):
-        settled = g[g["status"] == "settled"]
+        settled = g[g["status"].isin(["won", "lost"])]
         pending = g[g["status"] == "pending"]
         n_settled = len(settled)
         pnl = settled["pnl"].sum() if n_settled else 0.0
@@ -163,7 +163,7 @@ else:
 
 # 计算过滤后的全局指标
 if not bets.empty:
-    settled_bets = bets[bets["status"] == "settled"]
+    settled_bets = bets[bets["status"].isin(["won", "lost"])]
     n_settled = len(settled_bets)
     total_pnl = float(settled_bets["pnl"].sum()) if n_settled else 0.0
     total_staked = float(settled_bets["stake"].sum()) if n_settled else 0.0
@@ -171,6 +171,7 @@ if not bets.empty:
 else:
     n_settled = 0
     total_pnl = 0.0
+    total_staked = 0.0
     range_roi = 0.0
 
 n_pending_range = len(pend) if not pend.empty else 0
