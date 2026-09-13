@@ -56,4 +56,4 @@
 ### 本地只读看板（v0.6，`dashboard/`）
 
 - 启动：`uv run --group dashboard streamlit run dashboard/app.py` → 浏览器开 http://localhost:8501（streamlit/plotly 走 `dashboard` 依赖组，首次自动安装；后台常驻可 `nohup … &`）
-- 只读：`connect_ro` 连生产库 `data/fa.db`，不写任何表；共 8 页——A 线 3 页（回测总览/校准/模拟盘）+ B 线 4 页（总览/推荐台账/多轨进度/运维健康）+ A' 线 1 页（范式对比）；全页时间维度筛选（预设档位 + 自定义范围）
+- 只读：`connect_ro` 连生产库 `data/fa.db`，不写任何表；共 8 页——A 线 3 页（回测总览/校准/模拟盘）+ B 线 4 页（总览/推荐与台账/多轨进度/运维健康）+ A' 线 1 页（范式对比）；全页时间维度筛选（预设档位 + 自定义范围）
