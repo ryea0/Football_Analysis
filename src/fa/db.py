@@ -664,16 +664,27 @@ def _migrate_up(conn: sqlite3.Connection, from_v: int) -> None:
             shadow = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
                 " AND name='recommendations_v10'").fetchone()
-            if shadow is not None:
-                # 弃用半建活动表（一定是不完整的）、从影子恢复
-                conn.execute("DROP TABLE IF EXISTS recommendations;")
-                conn.execute(
-                    "ALTER TABLE recommendations_v10 RENAME TO recommendations;")
             # 前置：idx_recs_run 占名（v8 先例）——rename 路径里它随旧表改名
-            conn.execute(
-                "DROP INDEX IF EXISTS idx_recs_run_v10;")
-            conn.execute(
-                "ALTER TABLE recommendations RENAME TO recommendations_v10;")
+            conn.execute("DROP INDEX IF EXISTS idx_recs_run")
+            # RENAME 不得改写 bets 的外键引用（v8 同款坑：SQLite ≥3.26 的
+            # RENAME 会把子表 REFERENCES 一起改名）。唯一干净组合 = FK=OFF +
+            # legacy_alter_table=ON，只圈住 rename 这一步、用完即还原。
+            if conn.in_transaction:
+                conn.commit()
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("PRAGMA legacy_alter_table=ON")
+            try:
+                if shadow is not None:
+                    # 弃用半建活动表（一定是不完整的）、从影子恢复
+                    conn.execute("DROP TABLE IF EXISTS recommendations;")
+                    conn.execute(
+                        "ALTER TABLE recommendations_v10"
+                        " RENAME TO recommendations;")
+                conn.execute(
+                    "ALTER TABLE recommendations RENAME TO recommendations_v10;")
+            finally:
+                conn.execute("PRAGMA legacy_alter_table=OFF")
+                conn.execute("PRAGMA foreign_keys=ON")
             # 新形状：四轨枚举 + personas_self_hash 列
             conn.executescript(_BLINE_TABLE)
             # 存量行：personas_self_hash 补 NULL（语义 = 「C'线纪元前」）

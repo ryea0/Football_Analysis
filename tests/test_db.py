@@ -1307,3 +1307,141 @@ def test_migrate_v7_to_v8_keeps_bets_ledger_intact(tmp_path):
     conn.close()
 
 
+# ---------------------------------------------------------------------------
+# v10 → v11 迁移（C'线自反思对照线：recommendations 扩四轨 + self 三表）
+# ---------------------------------------------------------------------------
+
+def _make_v10_db(path):
+    """手搭 v10 形状的库：recommendations 三轨枚举（无 kb_self）、
+    无 personas_self_hash、无 evolution_self_* 表。"""
+    from fa import db as dbmod
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+    CREATE TABLE schema_version (version INTEGER NOT NULL);
+    INSERT INTO schema_version (version) VALUES (10);
+    CREATE TABLE runs (id INTEGER PRIMARY KEY, type TEXT NOT NULL, phase TEXT,
+      started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
+      credits_before INTEGER, credits_after INTEGER, summary TEXT);
+    CREATE TABLE fixtures (id INTEGER PRIMARY KEY);
+    CREATE TABLE recommendations (
+      id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES runs(id),
+      fixture_id INTEGER NOT NULL REFERENCES fixtures(id),
+      strategy TEXT NOT NULL
+        CHECK (strategy IN ('model_only','model_persona',
+                            'model_persona_nokb')),
+      market TEXT NOT NULL, phase TEXT NOT NULL, model_p REAL NOT NULL,
+      market_p REAL NOT NULL, best_odds REAL NOT NULL, bookmaker TEXT NOT NULL,
+      edge REAL NOT NULL, ev REAL NOT NULL, kelly_stake_frac REAL NOT NULL,
+      verdict TEXT, confidence_delta REAL, final_stake_frac REAL,
+      key_factors TEXT, report_md TEXT, personas_hash TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE (fixture_id, market, strategy, phase));
+    CREATE INDEX idx_recs_run ON recommendations (run_id);
+    """)
+    # 父行 + 一条挂在 id=42 上的推荐（用于 bets 台账不重排验证）
+    conn.execute(
+        "INSERT INTO runs (id, type, phase, started_at, status)"
+        " VALUES (1, 'matchday', 'am', '2026-09-07T03:00:00Z', 'ok')")
+    conn.execute("INSERT INTO fixtures (id) VALUES (1), (2)")
+    conn.execute(
+        "INSERT INTO recommendations (id, run_id, fixture_id, strategy, market,"
+        " phase, model_p, market_p, best_odds, bookmaker, edge, ev,"
+        " kelly_stake_frac, final_stake_frac, verdict, confidence_delta,"
+        " key_factors, report_md, personas_hash, created_at)"
+        " VALUES (42, 1, 1, 'model_persona', 'H', 'am', 0.5, 0.4, 2.2,"
+        " 'b', 0.1, 0.1, 0.05, 0.05, 'agree', 0.0, '[]', 'r', 'hash_v10',"
+        " '2026-09-07T03:00:00Z')")
+    conn.commit()
+    conn.close()
+    assert dbmod.SCHEMA_VERSION >= 11
+
+
+def test_migrate_v10_to_v11(tmp_path):
+    """v10→v11 正常迁移：四轨枚举、personas_self_hash 列、self 三表都就位。"""
+    from fa import db as dbmod
+    p = tmp_path / "fa.db"
+    _make_v10_db(p)
+    dbmod.init_db(p)
+
+    conn = connect(p)
+    # 版本号到位
+    assert conn.execute("SELECT version FROM schema_version").fetchone()[
+        "version"] == 11
+    # recommendations 含四轨枚举
+    ddl = conn.execute("SELECT sql FROM sqlite_master WHERE type='table'"
+                       " AND name='recommendations'").fetchone()["sql"]
+    assert "model_persona_kb_self" in ddl
+    assert "personas_self_hash" in ddl
+    # evolution_self 三表就位
+    for t in ("evolution_self_windows", "evolution_self_runs",
+              "evolution_self_rulings"):
+        assert conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (t,)).fetchone() is not None
+    # 影子表干净收尾
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='recommendations_v10'"
+    ).fetchone() is None
+    # id 不重排：原 id=42 的行还在，内容原样保留
+    r = conn.execute(
+        "SELECT strategy, personas_hash, personas_self_hash"
+        " FROM recommendations WHERE id=42").fetchone()
+    assert r["strategy"] == "model_persona"
+    assert r["personas_hash"] == "hash_v10"
+    assert r["personas_self_hash"] is None  # 新列补 NULL
+    conn.close()
+
+
+def test_migrate_v10_to_v11_keeps_bets_ledger_intact(tmp_path):
+    """v10→v11 重建的两条生产红线（v8 同款）：
+    1. bets.recommendation_id 的 REFERENCES 不被 RENAME 改写；
+    2. recommendations.id 不重排（注台账不断链）。"""
+    p = tmp_path / "fa.db"
+    _make_v10_db(p)
+    conn = sqlite3.connect(p)
+    conn.executescript("""
+    CREATE TABLE bets (
+      id INTEGER PRIMARY KEY,
+      recommendation_id INTEGER NOT NULL REFERENCES recommendations(id),
+      mode TEXT NOT NULL CHECK (mode IN ('paper','live')),
+      placed_at TEXT NOT NULL, bookmaker TEXT NOT NULL, odds_taken REAL NOT NULL,
+      stake REAL NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('pending','won','lost','void')),
+      settled_at TEXT, return_amt REAL, closing_odds REAL, closing_source TEXT,
+      clv REAL, UNIQUE (recommendation_id, mode));
+    """)
+    conn.execute(
+        "INSERT INTO bets (recommendation_id, mode, placed_at, bookmaker,"
+        " odds_taken, stake, status) VALUES"
+        " (42, 'paper', '2026-09-07T03:00:05Z', 'Pinnacle', 2.2, 10.0, 'pending')")
+    conn.commit()
+    conn.close()
+    from fa import db as dbmod
+    dbmod.init_db(p)
+
+    conn = connect(p)
+    # 台账不断链：注还挂在同一条推荐上（id 原值保全）
+    j = conn.execute(
+        "SELECT b.mode m, r.strategy s, r.personas_self_hash h"
+        " FROM bets b JOIN recommendations r ON r.id = b.recommendation_id"
+    ).fetchone()
+    assert (j["m"], j["s"], j["h"]) == ("paper", "model_persona", None)
+    # 引用方未被 rename 动过刀：bets 仍指 recommendations、不指影子表
+    bets_ddl = conn.execute("SELECT sql FROM sqlite_master WHERE type='table'"
+                            " AND name='bets'").fetchone()["sql"]
+    assert "REFERENCES recommendations(id)" in bets_ddl
+    assert "recommendations_v10" not in bets_ddl
+    # 影子表收尾干净
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE name='recommendations_v10'"
+    ).fetchone() is None
+    # 形状一致性：迁移库与 fresh 库列序逐位一致
+    dbmod.init_db(tmp_path / "fresh.db")
+    fc = connect(tmp_path / "fresh.db")
+    assert [r["name"] for r in conn.execute(
+        "PRAGMA table_info(recommendations)")] == \
+        [r["name"] for r in fc.execute("PRAGMA table_info(recommendations)")]
+    fc.close()
+    conn.close()
+
+
