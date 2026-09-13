@@ -34,7 +34,10 @@ def env(tmp_path, monkeypatch):
     box = SimpleNamespace(
         conn=c, pushed=[], order=[],
         sync_report=SyncReport(files_ok=5, inserted=7),
-        sync_error=None, ok=True, error=None, monkeypatch=monkeypatch)
+        sync_error=None, ok=True, error=None, monkeypatch=monkeypatch,
+        fb_summary={"triggered": False, "fixtures": 0, "filled": 0,
+                    "unmatched": [], "error": []},
+        fb_error=None)
 
     def fake_sync(conn, **kwargs):
         box.order.append("sync")
@@ -43,6 +46,16 @@ def env(tmp_path, monkeypatch):
         return box.sync_report
 
     monkeypatch.setattr(daily, "sync_history", fake_sync)
+
+    def fake_fallback(conn, **kwargs):
+        box.order.append("fallback")
+        if box.fb_error:
+            raise box.fb_error
+        return box.fb_summary
+
+    monkeypatch.setattr(daily, "results_fallback", fake_fallback)
+    monkeypatch.setattr(daily, "backfill_clv",
+                        lambda conn: box.order.append("clv") or {"filled": 0})
 
     real_settle = daily.settle_paper_bets
 
@@ -127,7 +140,7 @@ def test_settled_bets_push_brief_and_record_daily_run(env):
 
     out = daily.run_daily(c)
 
-    assert env.order == ["sync", "settle"]           # sync 先行（结算要新完赛）
+    assert env.order == ["sync", "fallback", "settle", "clv"]  # v0.13 四步
     assert out["status"] == "ok" and out["sent"] is True
     assert out["settled"] == 1 and out["won"] == 1
     assert out["pnl"] == pytest.approx(20.0)
@@ -181,7 +194,7 @@ def test_all_files_failed_is_degraded_but_settlement_still_runs(env):
 
     out = daily.run_daily(c)
 
-    assert env.order == ["sync", "settle"]           # 顺序语义不变
+    assert env.order == ["sync", "fallback", "settle", "clv"]  # v0.13 四步
     assert out["status"] == "degraded_ok"
     assert out["settled"] == 1 and out["won"] == 1   # 降级不阻断结算
     summary = summary_of(c, out["run_id"])
@@ -206,7 +219,7 @@ def test_partial_sync_success_is_not_degraded(env):
 
 
 def test_sync_runs_before_settlement(env, monkeypatch):
-    """顺序钉死：结算依赖新完赛数据，sync 必须先行（哪怕真实 sync 内部容错）。"""
+    """顺序钉死（v0.13 起四步）：sync → fallback（备用源补行）→ 结算 → CLV 回填。"""
     def stub_settle(conn):
         env.order.append("settle")                   # 仍记时点，只是不真结算
         return {"settled": 0, "won": 0, "pnl": 0.0, "clv_median": None}
@@ -214,8 +227,71 @@ def test_sync_runs_before_settlement(env, monkeypatch):
     monkeypatch.setattr(daily, "settle_paper_bets", stub_settle)
     env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
     out = daily.run_daily(env.conn)
-    assert env.order == ["sync", "settle"]
+    assert env.order == ["sync", "fallback", "settle", "clv"]
     assert out["settled"] == 0
+
+
+def test_fallback_not_triggered_adds_no_push(env):
+    """未触发（无逾期）→ summary 记零值、不发任何推送。"""
+    _seed_settleable(env.conn)
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
+    env.fb_summary = {"triggered": False, "fixtures": 0, "filled": 0,
+                      "unmatched": [], "error": []}
+    out = daily.run_daily(env.conn)
+    s = summary_of(env.conn, out["run_id"])
+    assert s["fallback"] == env.fb_summary
+    assert s["fallback_alert"] is None
+    assert len(env.pushed) == 1                       # 只有结算简报
+
+
+def test_fallback_exception_degrades_not_fatal(env):
+    """fallback 整体抛错：只记账不中断——结算照常、run 状态不加罪。"""
+    _seed_settleable(env.conn)
+    env.fb_error = RuntimeError("boom")
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
+    out = daily.run_daily(env.conn)
+    assert out["settled"] > 0                         # 结算没被拖累
+    s = summary_of(env.conn, out["run_id"])
+    assert s["fallback"]["triggered"] is False
+    assert "RuntimeError: boom" in s["fallback"]["error"][0]
+
+
+def test_fallback_unmatched_alerts(env):
+    """配对失败 → TG 告警（§3.3 隔离纪律：绝不静默硬猜）。"""
+    _seed_settleable(env.conn)
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
+    env.fb_summary = {"triggered": True, "fixtures": 2, "filled": 1,
+                      "unmatched": [{"fixture_id": 9, "league": "SP1",
+                                     "kickoff": "2026-09-12T19:00:00Z",
+                                     "reason": "alias_missing:Getafe CF"}],
+                      "error": []}
+    daily.run_daily(env.conn)
+    row = env.conn.execute(
+        "SELECT summary FROM runs WHERE id=(SELECT MAX(id) FROM runs)"
+    ).fetchone()
+    s = json.loads(row["summary"])
+    assert "Getafe CF" in s["fallback_alert"]
+    assert any("Getafe CF" in t for t in env.pushed)  # 告警真发了
+
+
+def test_fail_streak_two_days_alerts(env):
+    """主源当前赛季连续 2 天失败（裁定③ N=2）→ TG 告警。"""
+    _seed_settleable(env.conn)
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
+    env.sync_report = SyncReport(files_ok=168, inserted=59000, fail_streak=2)
+    daily.run_daily(env.conn)
+    assert any("连续 2 天" in t for t in env.pushed)
+
+
+def test_recovery_score_mismatch_alerts(env):
+    """官方行 vs fallback 行比分不一致 → 告警不改账（裁定②）。"""
+    _seed_settleable(env.conn)
+    env.monkeypatch.setattr(daily, "_yesterday", lambda: "1999-01-01")
+    env.sync_report = SyncReport(
+        files_ok=168, inserted=59000,
+        fallback_diffs=[("E0", 2026, "2026-09-12 #4v9", "2-1", "1-2")])
+    daily.run_daily(env.conn)
+    assert any("2-1" in t and "1-2" in t for t in env.pushed)
 
 
 def test_sync_failure_degrades_but_settlement_proceeds(env):
@@ -227,7 +303,7 @@ def test_sync_failure_degrades_but_settlement_proceeds(env):
 
     out = daily.run_daily(c)
 
-    assert env.order == ["sync", "settle"]           # 失败也不改变先后语义
+    assert env.order == ["sync", "fallback", "settle", "clv"]  # 失败也不改变先后语义
     assert out["status"] == "degraded_ok"
     assert out["settled"] == 1 and out["won"] == 1
     assert out["sync"] is None
