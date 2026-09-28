@@ -200,6 +200,18 @@ def test_b_bets(db):
     assert {"closing_odds", "return_amt", "settled_at", "phase", "edge"} <= set(df.columns)
 
 
+def test_b_bets_has_league(db):
+    """league 列回归钉测（2026-09-29）：v3 时间筛选重构（6ce47ea）后盈亏分解
+    「按联赛」tab 改从 b_bets 客户端聚合，但 SELECT 漏了 f.league → 真实
+    注数据下页 2 KeyError 'league'（按联赛/按周期双 tab 炸）。"""
+    from queries import b_bets
+
+    _seed_rec_chain(db)
+    df = b_bets(db)
+    assert "league" in df.columns
+    assert (df["league"] == "E0").all()
+
+
 def test_b_recommendations_empty(db):
     from queries import b_recommendations, b_bets
 
