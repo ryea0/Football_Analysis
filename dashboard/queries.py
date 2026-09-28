@@ -200,7 +200,8 @@ def b_recommendations(conn: sqlite3.Connection) -> pd.DataFrame:
 
 
 def b_bets(conn: sqlite3.Connection) -> pd.DataFrame:
-    """页2 下表：paper/live 注明细 + 推荐维度（market/strategy 等）+ 队名。
+    """页2 下表：paper/live 注明细 + 推荐维度（market/strategy 等）+ 队名
+    与联赛（f.league——页2 盈亏分解「按联赛」tab 的客户端聚合依赖此列）。
 
     ``closing_source`` 透出 CLV 实际所用基准（spec §7.3 基准链：pinnacle /
     betfair / NULL）；``pnl`` 盈亏三态——won/lost = return−stake、void = 0
@@ -212,7 +213,7 @@ def b_bets(conn: sqlite3.Connection) -> pd.DataFrame:
                b.closing_odds, b.closing_source, b.clv,
                r.strategy, r.phase, r.market, r.model_p, r.market_p,
                r.edge, r.ev,
-               f.kickoff_utc, th.name AS home, ta.name AS away
+               f.league, f.kickoff_utc, th.name AS home, ta.name AS away
         FROM bets b
         JOIN recommendations r ON r.id = b.recommendation_id
         JOIN fixtures f ON f.id = r.fixture_id
